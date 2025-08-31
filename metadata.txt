@@ -1,0 +1,7 @@
+[general]
+name=THW Toolbox
+description=Füge SVG-Symbole per Klick auf der Karte hinzu
+version=1.0
+qgisMinimumVersion=3.0
+author=Paul
+email=paul.horstmann@thw-minden.de
