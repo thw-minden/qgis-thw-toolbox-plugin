@@ -143,7 +143,7 @@ Bei Problemen überprüfen Sie:
 
 ## Changelog
 
-### Version 1.0
+### Version 0.1
 - Erste Veröffentlichung
 - Grundlegende Drag & Drop-Funktionalität
 - Feature-Identifizierung und -Bearbeitung
