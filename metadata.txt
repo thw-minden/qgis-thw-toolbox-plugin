@@ -13,7 +13,7 @@ category=Plugins
 icon=icons/icon.svg
 experimental=False
 deprecated=False
-tags=THW,Bundeswehr,Feuerwehr,Polizei,Rettungswesen,Katastrophenschutz,taktische Zeichen,SVG,Symbole,Kartierung,Einsatzplanung
+tags=THW,Feuerwehr,Polizei,Rettungswesen,Katastrophenschutz,taktische Zeichen,SVG,Symbole,Kartierung,Einsatzplanung
 
 # Lizenzinformationen für verwendete externe Ressourcen
 # Taktische Zeichen: https://github.com/jonas-koeritz/Taktische-Zeichen

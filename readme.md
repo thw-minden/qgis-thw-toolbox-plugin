@@ -123,12 +123,6 @@ Jedes Symbol-Feature enthält folgende Attribute:
 Dieses Plugin steht unter der MIT-Lizenz zur Verfügung.
 
 ## Support und Entwicklung
-
-### Autor
-- **Entwickler**: Paul Horstmann
-- **E-Mail**: paul.horstmann@thw-minden.de
-- **Organisation**: THW Minden
-
 ### Fehlerbehebung
 Bei Problemen überprüfen Sie:
 1. QGIS-Version (mindestens 3.0 erforderlich)
@@ -152,7 +146,7 @@ Bei Problemen überprüfen Sie:
 
 ## Beitragen
 
-Verbesserungsvorschläge und Bug-Reports sind willkommen! Kontaktieren Sie den Entwickler oder erstellen Sie ein Issue im Projekt-Repository.
+Verbesserungsvorschläge und Bug-Reports sind willkommen!
 
 ---
 
