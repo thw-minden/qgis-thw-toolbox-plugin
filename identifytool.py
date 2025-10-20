@@ -1,10 +1,11 @@
 # identifytool.py
 
 import os
-from PyQt5.QtCore import Qt
+import time
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QPushButton, QInputDialog, 
                            QLabel, QHBoxLayout, QDockWidget, QWidget, QSlider,
-                           QCheckBox, QSpinBox)
+                           QCheckBox, QSpinBox, QApplication, QLineEdit)
 from PyQt5.QtGui import QPixmap
 from qgis.gui import QgsMapToolIdentify
 from qgis.core import QgsFeatureRequest, QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsProject
@@ -19,48 +20,36 @@ class FeatureDock(QDockWidget):
         self.setWidget(self.content_widget)
         self.main_layout = QVBoxLayout(self.content_widget)
         
-        # SVG-Anzeige
+        # SVG-Anzeige (Preview des ausgewählten Markers)
         self.svg_label = QLabel()
         self.svg_label.setAlignment(Qt.AlignCenter)
+        self.svg_label.setMinimumHeight(200)
+        self.svg_label.setStyleSheet("QLabel { border: 2px dashed #ccc; background-color: #f9f9f9; }")
         self.main_layout.addWidget(self.svg_label)
         
-        # Koordinaten-Anzeige
-        self.coord_label = QLabel("Koordinaten: ")
-        self.coord_label.setAlignment(Qt.AlignCenter)
-        self.coord_label.setStyleSheet("QLabel { font-weight: bold; color: #2E86AB; }")
-        self.main_layout.addWidget(self.coord_label)
+        # Platzhalter-Text für leeren Zustand
+        self.placeholder_label = QLabel()
+        self.placeholder_label.setAlignment(Qt.AlignCenter)
+        self.placeholder_label.setWordWrap(True)
+        self.placeholder_label.setStyleSheet("QLabel { color: #666; font-size: 12px; padding: 20px; }")
+        self.main_layout.addWidget(self.placeholder_label)
         
-        # UTM 32N Koordinaten
+        # UTM 32N Koordinaten mit Kopier-Button
+        coord_layout = QHBoxLayout()
+        
         self.utm32n_label = QLabel("")
         self.utm32n_label.setAlignment(Qt.AlignCenter)
-        self.utm32n_label.setStyleSheet("QLabel { color: #2E86AB; font-size: 11px; }")
-        self.main_layout.addWidget(self.utm32n_label)
+        self.utm32n_label.setStyleSheet("QLabel { color: #2E86AB; font-size: 12px; font-weight: bold; }")
+        coord_layout.addWidget(self.utm32n_label)
         
-        # UTM 32U Koordinaten
-        self.utm32u_label = QLabel("")
-        self.utm32u_label.setAlignment(Qt.AlignCenter)
-        self.utm32u_label.setStyleSheet("QLabel { color: #2E86AB; font-size: 11px; }")
-        self.main_layout.addWidget(self.utm32u_label)
+        self.btn_copy_coords = QPushButton("Kopieren")
+        self.btn_copy_coords.setStyleSheet("QPushButton { background-color: #2E86AB; color: white; border: none; padding: 2px 6px; border-radius: 3px; font-size: 10px; } QPushButton:hover { background-color: #1B5A7A; }")
+        self.btn_copy_coords.setMaximumWidth(60)
+        coord_layout.addWidget(self.btn_copy_coords)
         
-        # MGRS/UTMREF Koordinaten
-        self.mgrs_label = QLabel("")
-        self.mgrs_label.setAlignment(Qt.AlignCenter)
-        self.mgrs_label.setStyleSheet("QLabel { color: #2E86AB; font-size: 11px; }")
-        self.main_layout.addWidget(self.mgrs_label)
+        self.main_layout.addLayout(coord_layout)
         
-        # Längen- und Breitengrad
-        self.latlon_label = QLabel("")
-        self.latlon_label.setAlignment(Qt.AlignCenter)
-        self.latlon_label.setStyleSheet("QLabel { color: #2E86AB; font-size: 11px; }")
-        self.main_layout.addWidget(self.latlon_label)
-        
-        # Zusätzliche Koordinaten-Informationen
-        self.coord_info_label = QLabel("")
-        self.coord_info_label.setAlignment(Qt.AlignCenter)
-        self.coord_info_label.setStyleSheet("QLabel { color: #666; font-size: 10px; }")
-        self.main_layout.addWidget(self.coord_info_label)
-        
-        # Größen-SpinBox
+        # Größen-SpinBox und Schieberegler
         size_layout = QHBoxLayout()
         size_layout.addWidget(QLabel("Größe:"))
         
@@ -73,9 +62,44 @@ class FeatureDock(QDockWidget):
         
         self.main_layout.addLayout(size_layout)
         
+        # Schieberegler für Größe
+        slider_layout = QHBoxLayout()
+        slider_layout.addWidget(QLabel("Größe:"))
+        
+        self.size_slider = QSlider(Qt.Horizontal)
+        self.size_slider.setMinimum(10)  # Minimale Größe
+        self.size_slider.setMaximum(200)  # Maximale Größe
+        self.size_slider.setValue(50)  # Standardwert
+        self.size_slider.setTickPosition(QSlider.TicksBelow)
+        self.size_slider.setTickInterval(20)  # Alle 20 Einheiten eine Markierung
+        slider_layout.addWidget(self.size_slider)
+        
+        self.main_layout.addLayout(slider_layout)
+        
         # Skalierungs-Checkbox
         self.scale_checkbox = QCheckBox("Mit Karte skalieren")
         self.main_layout.addWidget(self.scale_checkbox)
+        
+        # Label-Sektion
+        label_layout = QVBoxLayout()
+        label_layout.addWidget(QLabel("Label:"))
+        
+        self.label_input = QLineEdit()
+        self.label_input.setPlaceholderText("Label-Text eingeben...")
+        self.label_input.setStyleSheet("QLineEdit { padding: 4px; border: 1px solid #ccc; border-radius: 3px; }")
+        label_layout.addWidget(self.label_input)
+        
+        self.main_layout.addLayout(label_layout)
+        
+        # Label-Anzeige-Checkbox
+        self.show_label_checkbox = QCheckBox("Label anzeigen")
+        self.main_layout.addWidget(self.show_label_checkbox)
+        
+        # Eindeutige ID anzeigen
+        self.id_label = QLabel("")
+        self.id_label.setAlignment(Qt.AlignCenter)
+        self.id_label.setStyleSheet("QLabel { color: #666; font-size: 10px; font-family: monospace; }")
+        self.main_layout.addWidget(self.id_label)
         
         # Buttons in horizontalem Layout
         self.button_layout = QHBoxLayout()
@@ -85,8 +109,48 @@ class FeatureDock(QDockWidget):
         
         self.main_layout.addLayout(self.button_layout)
         
-        # Initial verstecken
+        # Tracker für letzte Preview-Datei
+        self.last_preview_path = None
+        
+        # Initial verstecken und Platzhalter anzeigen
         self.hide()
+        self.show_placeholder()
+        
+    def show_placeholder(self):
+        """Zeigt Platzhalter-Text mit Anweisungen an"""
+        # Lösche letzte Preview-Datei, falls vorhanden
+        try:
+            if getattr(self, 'last_preview_path', None) and os.path.exists(self.last_preview_path):
+                os.remove(self.last_preview_path)
+                self.last_preview_path = None
+        except Exception:
+            pass
+        
+        self.svg_label.clear()
+        self.svg_label.setText("Kein Marker ausgewählt")
+        self.svg_label.setStyleSheet("QLabel { border: 2px dashed #ccc; background-color: #f9f9f9; color: #999; font-size: 14px; }")
+        
+        placeholder_text = """<b>Marker auswählen</b><br><br>
+        • Klicken Sie auf einen Marker auf der Karte<br>
+        • Oder ziehen Sie ein Symbol aus der Symbolpalette auf die Karte<br><br>
+        Hier werden dann die Details des ausgewählten Markers angezeigt."""
+        
+        self.placeholder_label.setText(placeholder_text)
+        self.placeholder_label.show()
+        
+        # Koordinaten und Steuerelemente verstecken
+        self.utm32n_label.hide()
+        self.btn_copy_coords.hide()
+        self.size_spinbox.hide()
+        self.size_slider.hide()
+        self.scale_checkbox.hide()
+        self.label_input.hide()
+        self.show_label_checkbox.hide()
+        self.id_label.hide()
+        self.btn_delete.hide()
+        
+        # Dock-Titel ohne Koordinaten
+        self.setWindowTitle("Marker Details")
         
     def convert_to_utm32n(self, point, source_crs):
         """Konvertiert Koordinaten zu UTM Zone 32N (EPSG:32632)"""
@@ -108,178 +172,303 @@ class FeatureDock(QDockWidget):
         except Exception as e:
             return f"UTM 32N: Fehler"
     
-    def convert_to_utm32u(self, point, source_crs):
-        """Konvertiert Koordinaten zu UTM Zone 32U (EPSG:32632) - Südhemisphäre"""
-        try:
-            # UTM Zone 32U CRS (EPSG:32632) - für Südhemisphäre
-            utm_crs = QgsCoordinateReferenceSystem("EPSG:32632")
-            
-            # Koordinatentransformation erstellen
-            transform = QgsCoordinateTransform(source_crs, utm_crs, QgsProject.instance())
-            
-            # Koordinaten transformieren
-            utm_point = transform.transform(point)
-            
-            # Formatierung der UTM-Koordinaten (Südhemisphäre)
-            easting = int(utm_point.x())
-            northing = int(utm_point.y())
-            
-            return f"UTM 32U: {easting}E {northing}S"
-        except Exception as e:
-            return f"UTM 32U: Fehler"
-    
-    def convert_to_mgrs(self, point, source_crs):
-        """Konvertiert Koordinaten zu MGRS/UTMREF Format"""
-        try:
-            # Zuerst zu UTM Zone 32N
-            utm_crs = QgsCoordinateReferenceSystem("EPSG:32632")
-            transform_to_utm = QgsCoordinateTransform(source_crs, utm_crs, QgsProject.instance())
-            utm_point = transform_to_utm.transform(point)
-            
-            # MGRS Format: 32U + 100km Grid + Easting/Northing
-            easting = int(utm_point.x())
-            northing = int(utm_point.y())
-            
-            # 100km Grid berechnen (MGRS verwendet spezielle Grid-Referenzen)
-            # Für Zone 32U (Deutschland) verwenden wir die Standard-Grid-Referenzen
-            grid_e = (easting // 100000) % 10
-            grid_n = (northing // 100000) % 10
-            
-            # Easting/Northing innerhalb des 100km Grids (5-stellig)
-            easting_100k = easting % 100000
-            northing_100k = northing % 100000
-            
-            # MGRS Format: 32U + Grid + Easting + Northing
-            mgrs_text = f"32U {grid_e}{grid_n} {easting_100k:05d} {northing_100k:05d}"
-            
-            return f"MGRS: {mgrs_text}"
-        except Exception as e:
-            return f"MGRS: Fehler"
-    
-    def convert_to_latlon(self, point, source_crs):
-        """Konvertiert Koordinaten zu Längen- und Breitengrad (WGS84)"""
-        try:
-            # WGS84 CRS (EPSG:4326)
-            wgs84_crs = QgsCoordinateReferenceSystem("EPSG:4326")
-            
-            # Koordinatentransformation erstellen
-            transform = QgsCoordinateTransform(source_crs, wgs84_crs, QgsProject.instance())
-            
-            # Koordinaten transformieren
-            wgs84_point = transform.transform(point)
-            
-            # Formatierung der Koordinaten
-            lat = wgs84_point.y()
-            lon = wgs84_point.x()
-            
-            # Himmelsrichtungen bestimmen
-            lat_dir = "N" if lat >= 0 else "S"
-            lon_dir = "E" if lon >= 0 else "W"
-            
-            # Absolute Werte
-            lat_abs = abs(lat)
-            lon_abs = abs(lon)
-            
-            # Grad, Minuten, Sekunden Format
-            lat_deg = int(lat_abs)
-            lat_min = int((lat_abs - lat_deg) * 60)
-            lat_sec = ((lat_abs - lat_deg - lat_min/60) * 3600)
-            
-            lon_deg = int(lon_abs)
-            lon_min = int((lon_abs - lon_deg) * 60)
-            lon_sec = ((lon_abs - lon_deg - lon_min/60) * 3600)
-            
-            lat_text = f"{lat_deg}°{lat_min:02d}'{lat_sec:05.2f}\"{lat_dir}"
-            lon_text = f"{lon_deg}°{lon_min:02d}'{lon_sec:05.2f}\"{lon_dir}"
-            
-            return f"Lat: {lat_text}\nLon: {lon_text}"
-        except Exception as e:
-            return f"Lat/Lon: Fehler"
-    
-    def get_coordinate_info(self, point, source_crs):
-        """Gibt zusätzliche Koordinaten-Informationen zurück"""
-        try:
-            # Ursprüngliche Koordinaten im Quell-CRS
-            source_name = source_crs.description() or source_crs.authid()
-            
-            # Versuche auch WGS84 Koordinaten zu bekommen
-            wgs84_crs = QgsCoordinateReferenceSystem("EPSG:4326")
-            transform_to_wgs84 = QgsCoordinateTransform(source_crs, wgs84_crs, QgsProject.instance())
-            wgs84_point = transform_to_wgs84.transform(point)
-            
-            # Formatiere die Informationen
-            info_text = f"Quell-CRS: {source_name}\n"
-            info_text += f"WGS84: {wgs84_point.y():.6f}°N, {wgs84_point.x():.6f}°E"
-            
-            return info_text
-        except Exception as e:
-            return f"Quell-CRS: {source_crs.authid()}"
         
     def show_feature(self, feat, layer_manager):
         self.feat = feat
         self.layer_manager = layer_manager
         
-        # SVG aktualisieren
-        pixmap = QPixmap(feat['svg_path'])
-        scaled_pixmap = pixmap.scaled(200, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.svg_label.setPixmap(scaled_pixmap)
+        # Debug: Zeige Feature-Daten
+        print(f"DEBUG: Feature-Daten:")
+        print(f"  - ID: {feat.id()}")
+        print(f"  - SVG-Pfad: {feat.attribute('svg_path') if feat.attribute('svg_path') else 'N/A'}")
+        print(f"  - SVG-Inhalt vorhanden: {bool(feat.attribute('svg_content'))}")
+        print(f"  - SVG-Inhalt Länge: {len(feat.attribute('svg_content')) if feat.attribute('svg_content') else 0}")
+        print(f"  - Größe: {feat.attribute('size') if feat.attribute('size') else 'N/A'}")
+        
+        # Platzhalter verstecken
+        self.placeholder_label.hide()
+        
+        # SVG-Preview aktualisieren
+        try:
+            pixmap = None
+            svg_path_feat = feat.attribute('svg_path')
+            svg_content_feat = feat.attribute('svg_content') or ''
+            
+            # Versuche zuerst den SVG-Inhalt zu verwenden
+            if svg_content_feat and svg_content_feat.strip():
+                print("DEBUG: Versuche SVG-Inhalt zu verwenden")
+                # Erstelle temporäre SVG-Datei für Preview
+                temp_svg = self._create_temp_svg_for_preview(svg_content_feat)
+                if temp_svg and os.path.exists(temp_svg):
+                    print(f"DEBUG: Temporäre SVG-Datei erstellt: {temp_svg}")
+                    # Versuche zuerst mit QIcon (bessere SVG-Unterstützung)
+                    from PyQt5.QtGui import QIcon
+                    icon = QIcon(temp_svg)
+                    pixmap = icon.pixmap(180, 180)
+                    if pixmap.isNull():
+                        print("DEBUG: QIcon-Pixmap ist null, versuche QPixmap")
+                        # Fallback auf QPixmap
+                        pixmap = QPixmap(temp_svg)
+                    else:
+                        print("DEBUG: QIcon-Pixmap erfolgreich geladen")
+                else:
+                    print("DEBUG: Temporäre SVG-Datei konnte nicht erstellt werden")
+            
+            # Falls SVG-Inhalt nicht funktioniert hat, versuche den Pfad
+            if pixmap is None or pixmap.isNull():
+                print("DEBUG: Versuche SVG-Pfad zu verwenden")
+                # Konvertiere relativen Pfad zu absolutem Pfad (wie im Haupt-Plugin)
+                if not os.path.isabs(svg_path_feat):
+                    plugin_dir = os.path.dirname(__file__)
+                    absolute_path = os.path.join(plugin_dir, svg_path_feat)
+                    print(f"DEBUG: Konvertierter absoluter Pfad: {absolute_path}")
+                    if os.path.exists(absolute_path):
+                        print("DEBUG: Absoluter Pfad existiert, lade SVG")
+                        # Versuche zuerst mit QIcon (bessere SVG-Unterstützung)
+                        from PyQt5.QtGui import QIcon
+                        icon = QIcon(absolute_path)
+                        pixmap = icon.pixmap(180, 180)
+                        if pixmap.isNull():
+                            print("DEBUG: QIcon-Pixmap ist null, versuche QPixmap")
+                            # Fallback auf QPixmap
+                            pixmap = QPixmap(absolute_path)
+                        else:
+                            print("DEBUG: QIcon-Pixmap erfolgreich geladen")
+                    else:
+                        print("DEBUG: Absoluter Pfad existiert nicht, verwende ursprünglichen Pfad")
+                        # Fallback: Verwende den ursprünglichen Pfad
+                        pixmap = QPixmap(svg_path_feat)
+                else:
+                    print("DEBUG: Pfad ist bereits absolut")
+                    # Versuche zuerst mit QIcon (bessere SVG-Unterstützung)
+                    from PyQt5.QtGui import QIcon
+                    icon = QIcon(svg_path_feat)
+                    pixmap = icon.pixmap(180, 180)
+                    if pixmap.isNull():
+                        print("DEBUG: QIcon-Pixmap ist null, versuche QPixmap")
+                        # Fallback auf QPixmap
+                        pixmap = QPixmap(svg_path_feat)
+                    else:
+                        print("DEBUG: QIcon-Pixmap erfolgreich geladen")
+            
+            # Prüfe ob das Pixmap erfolgreich geladen wurde
+            if pixmap is not None and not pixmap.isNull():
+                print("DEBUG: Pixmap erfolgreich geladen, skaliere für Vorschau")
+                # Skaliere das Bild für die Vorschau
+                scaled_pixmap = pixmap.scaled(180, 180, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self.svg_label.setPixmap(scaled_pixmap)
+                self.svg_label.setStyleSheet("QLabel { border: 2px solid #2E86AB; background-color: white; }")
+                print("DEBUG: SVG-Preview erfolgreich angezeigt")
+            else:
+                print("DEBUG: Pixmap ist None oder null")
+                raise Exception("Pixmap konnte nicht geladen werden")
+            
+        except Exception as e:
+            print(f"Fehler beim Laden des SVG-Previews: {e}")
+            print(f"SVG-Pfad: {feat.attribute('svg_path') if feat.attribute('svg_path') else 'N/A'}")
+            print(f"SVG-Inhalt vorhanden: {bool(feat.attribute('svg_content'))}")
+            print(f"SVG-Inhalt Länge: {len(feat.attribute('svg_content')) if feat.attribute('svg_content') else 0}")
+            
+            # Versuche alternative SVG-Loading-Methoden
+            try:
+                # Versuche mit QIcon (funktioniert oft besser mit SVG)
+                from PyQt5.QtGui import QIcon
+                svg_path_feat = feat.attribute('svg_path')
+                if not os.path.isabs(svg_path_feat):
+                    plugin_dir = os.path.dirname(__file__)
+                    absolute_path = os.path.join(plugin_dir, svg_path_feat)
+                    if os.path.exists(absolute_path):
+                        icon = QIcon(absolute_path)
+                        pixmap = icon.pixmap(180, 180)
+                        if not pixmap.isNull():
+                            self.svg_label.setPixmap(pixmap)
+                            self.svg_label.setStyleSheet("QLabel { border: 2px solid #2E86AB; background-color: white; }")
+                            return
+            except Exception as e2:
+                print(f"Alternative SVG-Loading-Methode fehlgeschlagen: {e2}")
+            
+            self.svg_label.setText("SVG konnte nicht geladen werden")
+            self.svg_label.setStyleSheet("QLabel { border: 2px dashed #ccc; background-color: #f9f9f9; color: #999; font-size: 12px; }")
         
         # Koordinaten anzeigen
         if feat.geometry():
             point = feat.geometry().asPoint()
             source_crs = layer_manager.layer.crs()
             
-            # Alle Koordinatenformate berechnen und anzeigen
+            # Nur UTM 32N Koordinaten berechnen und anzeigen
             utm32n_text = self.convert_to_utm32n(point, source_crs)
-            utm32u_text = self.convert_to_utm32u(point, source_crs)
-            mgrs_text = self.convert_to_mgrs(point, source_crs)
-            latlon_text = self.convert_to_latlon(point, source_crs)
             
-            # Labels aktualisieren
-            self.coord_label.setText("Koordinaten in verschiedenen Formaten:")
+            # Label aktualisieren
             self.utm32n_label.setText(utm32n_text)
-            self.utm32u_label.setText(utm32u_text)
-            self.mgrs_label.setText(mgrs_text)
-            self.latlon_label.setText(latlon_text)
+            self.utm32n_label.show()
             
-            # Zusätzliche Koordinaten-Informationen anzeigen
-            coord_info = self.get_coordinate_info(point, source_crs)
-            self.coord_info_label.setText(coord_info)
+            # UTM-Koordinaten für Kopier-Funktion speichern
+            self.current_utm_coords = utm32n_text
             
-            # Dock-Titel mit UTM 32N Koordinaten aktualisieren
-            self.setWindowTitle(f"Marker Details - {utm32n_text}")
+            # Dock-Titel ohne Koordinaten (nur "Marker Details")
+            self.setWindowTitle("Marker Details")
         
-        # Slider auf aktuelle Größe setzen
-        current_size = feat["size"]
+        # Alle Steuerelemente anzeigen
+        self.btn_copy_coords.show()
+        self.size_spinbox.show()
+        self.size_slider.show()
+        self.scale_checkbox.show()
+        self.label_input.show()
+        self.show_label_checkbox.show()
+        self.id_label.show()
+        self.btn_delete.show()
+        
+        # SpinBox und Schieberegler auf aktuelle Größe setzen
+        current_size = feat.attribute("size")
         self.size_spinbox.setValue(int(current_size))
+        self.size_slider.setValue(int(current_size))
         
         # Checkbox auf aktuellen Wert setzen oder Standardwert verwenden
         try:
-            scale_with_map = feat["scale_with_map"]
-        except KeyError:
+            scale_with_map = feat.attribute("scale_with_map")
+        except:
             scale_with_map = False
         self.scale_checkbox.setChecked(scale_with_map)
         
-        # Buttons, SpinBox und Checkbox neu verbinden
+        # Label-Werte setzen
+        try:
+            label_text = feat.attribute("label") or ""
+            show_label = feat.attribute("show_label") or False
+        except:
+            label_text = ""
+            show_label = False
+        self.label_input.setText(label_text)
+        self.show_label_checkbox.setChecked(show_label)
+        
+        # Eindeutige ID anzeigen
+        try:
+            unique_id = feat.attribute("unique_id") or ""
+            if unique_id:
+                # Zeige nur die ersten 8 Zeichen der UUID für bessere Lesbarkeit
+                short_id = unique_id[:8] + "..."
+                self.id_label.setText(f"ID: {short_id}")
+            else:
+                self.id_label.setText("ID: Nicht verfügbar")
+        except:
+            self.id_label.setText("ID: Nicht verfügbar")
+        
+        # Buttons, SpinBox, Schieberegler und Checkbox neu verbinden
         self.btn_delete.clicked.disconnect() if self.btn_delete.receivers(self.btn_delete.clicked) > 0 else None
+        self.btn_copy_coords.clicked.disconnect() if self.btn_copy_coords.receivers(self.btn_copy_coords.clicked) > 0 else None
         self.size_spinbox.valueChanged.disconnect() if self.size_spinbox.receivers(self.size_spinbox.valueChanged) > 0 else None
+        self.size_slider.valueChanged.disconnect() if self.size_slider.receivers(self.size_slider.valueChanged) > 0 else None
         self.scale_checkbox.stateChanged.disconnect() if self.scale_checkbox.receivers(self.scale_checkbox.stateChanged) > 0 else None
+        self.label_input.textChanged.disconnect() if self.label_input.receivers(self.label_input.textChanged) > 0 else None
+        self.show_label_checkbox.stateChanged.disconnect() if self.show_label_checkbox.receivers(self.show_label_checkbox.stateChanged) > 0 else None
         
         self.btn_delete.clicked.connect(self.on_delete)
+        self.btn_copy_coords.clicked.connect(self.on_copy_coords)
         self.size_spinbox.valueChanged.connect(self.on_size_change)
+        self.size_slider.valueChanged.connect(self.on_size_change)
         self.scale_checkbox.stateChanged.connect(self.on_scale_toggle)
+        self.label_input.textChanged.connect(self.on_label_changed)
+        self.show_label_checkbox.stateChanged.connect(self.on_show_label_toggle)
+        
+        # Synchronisation zwischen SpinBox und Schieberegler
+        self.size_spinbox.valueChanged.connect(self.on_spinbox_changed)
+        self.size_slider.valueChanged.connect(self.on_slider_changed)
         
         self.show()
         
+    def _create_temp_svg_for_preview(self, svg_content):
+        """Erstellt eine temporäre SVG-Datei für die Vorschau"""
+        try:
+            # Lösche vorherige Preview-Datei, falls vorhanden
+            try:
+                if getattr(self, 'last_preview_path', None) and os.path.exists(self.last_preview_path):
+                    os.remove(self.last_preview_path)
+                    self.last_preview_path = None
+            except Exception:
+                pass
+            
+            # Erstelle temporäres Verzeichnis falls es nicht existiert
+            temp_dir = os.path.join(os.path.dirname(__file__), "temp_files", "preview_cache")
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            # Erstelle eindeutigen Dateinamen für Preview
+            temp_filename = f"preview_{int(time.time() * 1000)}.svg"
+            temp_path = os.path.join(temp_dir, temp_filename)
+            
+            # Schreibe SVG-Inhalt in temporäre Datei
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                f.write(svg_content)
+            
+            # Prüfe ob die Datei erfolgreich erstellt wurde
+            if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                # Merke die zuletzt erzeugte Preview-Datei
+                self.last_preview_path = temp_path
+                return temp_path
+            else:
+                return None
+                
+        except Exception:
+            return None
+        
     def on_delete(self):
         self.layer_manager.delete_feature(self.feat.id())
-        self.hide()
+        self.show_placeholder()
+        self.show()
+        
+    def on_copy_coords(self):
+        """Kopiert die UTM 32N Koordinaten in die Zwischenablage"""
+        if hasattr(self, 'current_utm_coords'):
+            clipboard = QApplication.clipboard()
+            clipboard.setText(self.current_utm_coords)
+            # Kurze visuelle Bestätigung
+            self.btn_copy_coords.setText("Kopiert!")
+            self.btn_copy_coords.setStyleSheet("QPushButton { background-color: #28a745; color: white; border: none; padding: 2px 6px; border-radius: 3px; font-size: 10px; }")
+            
+            # Nach 1 Sekunde zurücksetzen
+            QTimer.singleShot(1000, self.reset_copy_button)
+    
+    def reset_copy_button(self):
+        """Setzt den Kopier-Button zurück"""
+        self.btn_copy_coords.setText("Kopieren")
+        self.btn_copy_coords.setStyleSheet("QPushButton { background-color: #2E86AB; color: white; border: none; padding: 2px 6px; border-radius: 3px; font-size: 10px; } QPushButton:hover { background-color: #1B5A7A; }")
         
     def on_size_change(self, value):
         self.layer_manager.resize_feature(self.feat.id(), value)
         
     def on_scale_toggle(self, state):
         self.layer_manager.toggle_scale(self.feat.id(), state == Qt.Checked)
+        
+    def on_spinbox_changed(self, value):
+        """Synchronisiert den Schieberegler mit der SpinBox"""
+        self.size_slider.blockSignals(True)  # Verhindere Endlosschleife
+        self.size_slider.setValue(value)
+        self.size_slider.blockSignals(False)
+        
+    def on_slider_changed(self, value):
+        """Synchronisiert die SpinBox mit dem Schieberegler"""
+        self.size_spinbox.blockSignals(True)  # Verhindere Endlosschleife
+        self.size_spinbox.setValue(value)
+        self.size_spinbox.blockSignals(False)
+        
+    def on_label_changed(self, text):
+        """Wird aufgerufen, wenn der Label-Text geändert wird"""
+        if not hasattr(self, 'feat') or not self.feat:
+            return
+            
+        # Label im Feature aktualisieren
+        self.layer_manager.update_feature_label(self.feat.id(), text)
+        
+        # Feature-Daten aktualisieren
+        updated_feat = self.layer_manager.layer.getFeature(self.feat.id())
+        if updated_feat.isValid():
+            self.feat = updated_feat
+                
+    def on_show_label_toggle(self, state):
+        """Schaltet die Label-Anzeige ein/aus"""
+        if not hasattr(self, 'feat') or not self.feat:
+            return
+            
+        show_label = state == Qt.Checked
+        self.layer_manager.toggle_label_visibility(self.feat.id(), show_label)
         
     def hideEvent(self, event):
         # Verschieben-Modus deaktivieren wenn Dock geschlossen wird
@@ -288,6 +477,18 @@ class FeatureDock(QDockWidget):
             # Cursor zurücksetzen
             if hasattr(self.layer_manager, 'canvas'):
                 self.layer_manager.canvas.setCursor(Qt.ArrowCursor)
+        
+        # Zeige Platzhalter wenn Dock versteckt wird
+        self.show_placeholder()
+        
+        # Versuche verbleibende Preview-Datei zu löschen
+        try:
+            if getattr(self, 'last_preview_path', None) and os.path.exists(self.last_preview_path):
+                os.remove(self.last_preview_path)
+                self.last_preview_path = None
+        except Exception:
+            pass
+        
         super().hideEvent(event)
 
 
@@ -302,7 +503,9 @@ class IdentifyTool(QgsMapToolIdentify):
         # Dock-Widget erstellen
         self.feature_dock = FeatureDock(canvas.parent())
         canvas.parent().addDockWidget(Qt.RightDockWidgetArea, self.feature_dock)
-        self.feature_dock.hide()  # Initial verstecken
+        # Zeige Dock mit Platzhalter initial
+        self.feature_dock.show()
+        self.feature_dock.show_placeholder()
 
     def canvasReleaseEvent(self, event):
         # nur Linksklick
@@ -319,7 +522,8 @@ class IdentifyTool(QgsMapToolIdentify):
             search_radius
         )
         if not results:
-            self.feature_dock.hide()
+            self.feature_dock.show_placeholder()
+            self.feature_dock.show()
             if hasattr(self.layer_manager, 'move_tool'):
                 self.layer_manager.move_tool.set_move_mode(False)
             return

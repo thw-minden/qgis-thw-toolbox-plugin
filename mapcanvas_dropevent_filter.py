@@ -14,8 +14,11 @@ class CanvasDropFilter(QObject):
                 return True
 
         if event.type() == QEvent.Drop:
+            print(f"DEBUG: Drop-Event empfangen: {event.mimeData().text()}")
             svg_path = event.mimeData().text()
             pt = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos().x(), event.pos().y())
+            print(f"DEBUG: Koordinaten: {pt}")
+            print(f"DEBUG: Rufe place_feature auf: {self.place_feature}")
             self.place_feature(svg_path, QgsPointXY(pt))
             event.acceptProposedAction()
             return True

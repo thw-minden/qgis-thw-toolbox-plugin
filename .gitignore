@@ -1,2 +1,9 @@
 svgs
 temp_svg/**
+temp_files/**
+**/*.log
+__pycache__/**
+.vscode/**
+.idea/**
+.pytest_cache/**
+.pytest_cache/**
