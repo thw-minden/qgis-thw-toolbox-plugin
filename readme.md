@@ -1,243 +1,242 @@
 # THW Toolbox Plugin
 
-![Plugin-Vorschau](https://thw-minden.de/qgis-plugin/preview.gif)
+![Plugin-Vorschau](docs/preview.gif)
 
 Ein QGIS-Plugin für das einfache Hinzufügen und Verwalten von taktischen Zeichen auf der Karte. Entwickelt speziell für den Einsatz im Technischen Hilfswerk (THW) und anderen Einsatzorganisationen.
 
-## 🚀 Schnellstart
+---
 
-1. **Plugin aktivieren**: Klicken Sie auf das THW Toolbox-Symbol in der QGIS-Toolbar
-2. **Symbol auswählen**: Wählen Sie ein Symbol aus dem Dock aus
-3. **Platzieren**: Ziehen Sie das Symbol auf die Karte oder klicken Sie auf die gewünschte Position
-4. **Bearbeiten**: Klicken Sie auf ein Symbol, um es zu verschieben, zu skalieren oder zu beschriften
+## Schnellstart
 
-## ✨ Hauptfunktionen
+1. **Plugin aktivieren** — Klicken Sie auf das THW Toolbox-Symbol in der QGIS-Toolbar
+2. **Symbol auswählen** — Wählen Sie ein Symbol aus dem Dock aus
+3. **Platzieren** — Ziehen Sie das Symbol auf die Karte oder klicken Sie auf die gewünschte Position
+4. **Bearbeiten** — Klicken Sie auf ein Symbol, um es zu verschieben, zu skalieren oder zu beschriften
 
-### 🎯 Intuitive Symbol-Platzierung
-- **Drag & Drop**: Ziehen Sie Symbole direkt aus dem Dock auf die Karte
-- **Klick-Modus**: Wählen Sie ein Symbol und klicken Sie auf die gewünschte Position
-- **Intelligente Größenanpassung**: Symbole werden automatisch an den aktuellen Zoom-Faktor angepasst
-- **Persistente Speicherung**: Alle Symbole werden automatisch in einer GeoPackage-Datei gespeichert
+---
 
-### 🔍 Umfassendes Feature-Management
-- **Identifizierung**: Klicken Sie auf Symbole, um Details anzuzeigen
-- **Verschieben**: Symbole können einfach mit der Maus verschoben werden
-- **Größenanpassung**: Dynamische Größenänderung mit Schieberegler
-- **Labeling**: Beschriftung der Symbole mit anpassbarem Text und Positionierung
-- **Echtzeit-Vorschau**: Sofortige visuelle Rückmeldung bei Änderungen
+## Hauptfunktionen
 
-### 📁 Umfangreiche Symbol-Bibliothek
-Das Plugin enthält eine umfassende Sammlung von taktischen Zeichen für:
+### Symbol-Platzierung
 
-- **THW** (Technisches Hilfswerk) - Einheiten, Fahrzeuge, Personen, Gebäude
-- **Bundeswehr** - Einheiten, Fahrzeuge, Personen
-- **Feuerwehr** - Einheiten, Fahrzeuge, Personen, Gebäude
-- **Polizei** - Einheiten und Fahrzeuge
-- **Rettungswesen** - Einheiten, Fahrzeuge, Personen, Einrichtungen
-- **Katastrophenschutz** - Einheiten und Fahrzeuge
-- **Wasserrettung** - Einheiten, Fahrzeuge, Personen, Einrichtungen
-- **Zoll** - Einheiten und Fahrzeuge
-- **Einrichtungen** - Führungsstellen, Versorgungsstellen, Behandlungsplätze
-- **Gefahren** - Verschiedene Gefahrensymbole
-- **Maßnahmen** - Einsatzmaßnahmen und Aktionen
-- **Schäden** - Schadensdarstellungen
-- Und viele weitere Kategorien
+- **Drag & Drop** — Symbole direkt aus dem Dock auf die Karte ziehen
+- **Klick-Modus** — Symbol auswählen und auf die gewünschte Position klicken
+- **Intelligente Größenanpassung** — Symbole werden automatisch an den Zoom-Faktor angepasst
+- **Persistente Speicherung** — Alle Symbole werden automatisch in einer GeoPackage-Datei gespeichert
 
-### 💾 Intelligente Datenverwaltung
-- **Automatisches Speichern**: Änderungen werden automatisch gespeichert
-- **Projekt-Integration**: Layer-Dateien werden beim Speichern des Projekts verschoben
-- **Portable Pakete**: Export-Funktion für vollständig portable Symbol-Sammlungen
-- **SVG-Embedding**: Alle SVG-Inhalte werden in der GeoPackage gespeichert für maximale Portabilität
+### Feature-Management
 
-### 🔎 Schnelle Symbol-Suche
-- **Echtzeit-Suche**: Sofortige Filterung beim Tippen
-- **Mehrsprachig**: Suche funktioniert mit deutschen und englischen Begriffen
-- **Kategorien-Filter**: Schnelle Navigation durch verschiedene Symbol-Kategorien
+- **Identifizierung** — Klick auf Symbole zeigt Details an
+- **Verschieben** — Symbole per Maus an neue Position ziehen
+- **Größenanpassung** — Dynamische Größenänderung mit Schieberegler
+- **Labeling** — Beschriftung mit anpassbarem Text und Positionierung
+- **Echtzeit-Vorschau** — Sofortige visuelle Rückmeldung bei Änderungen
 
-## 📦 Installation
+### Einstellungen (neu in 2.0)
+
+- **Einstellungs-Dialog** — Zentrale Konfiguration über das Zahnrad-Icon im Dock
+- **Icon-Standardwerte** — Standardgröße und Kartenskalierung konfigurierbar
+- **Label-Konfiguration** — Schriftgröße, Buffer-Größe und Labels ein-/ausschalten
+
+### Symbol-Bibliothek
+
+Umfassende Sammlung von über 1000 taktischen Zeichen:
+
+| Kategorie | Inhalte |
+|-----------|---------|
+| THW | Einheiten, Fahrzeuge, Personen, Gebäude |
+| Bundeswehr | Einheiten, Fahrzeuge, Personen |
+| Feuerwehr | Einheiten, Fahrzeuge, Personen, Gebäude |
+| Polizei | Einheiten, Fahrzeuge |
+| Rettungswesen | Einheiten, Fahrzeuge, Personen, Einrichtungen |
+| Katastrophenschutz | Einheiten, Fahrzeuge |
+| Wasserrettung | Einheiten, Fahrzeuge, Personen, Einrichtungen |
+| Zoll | Einheiten, Fahrzeuge |
+| Einrichtungen | Führungsstellen, Versorgungsstellen, Behandlungsplätze |
+| Gefahren | Verschiedene Gefahrensymbole |
+| Maßnahmen | Einsatzmaßnahmen und Aktionen |
+| Schäden | Schadensdarstellungen |
+
+### Symbol-Suche
+
+- **Echtzeit-Filterung** beim Tippen
+- **Mehrsprachig** — Deutsch und Englisch
+- **Kategorien-Filter** — Schnelle Navigation durch Kategorien
+
+### Datenverwaltung
+
+- **Automatisches Speichern** — Änderungen werden sofort gespeichert
+- **Projekt-Integration** — Layer-Dateien werden beim Speichern des Projekts verschoben
+- **Portable Pakete** — Export-Funktion für vollständig portable Symbol-Sammlungen
+- **SVG-Embedding** — SVG-Inhalte werden in der GeoPackage eingebettet für maximale Portabilität
+
+---
+
+## Installation
 
 ### Voraussetzungen
-- **QGIS**: Version 3.0 oder höher
-- **Python**: Version 3.x (wird mit QGIS mitgeliefert)
-- **Betriebssystem**: Windows, Linux oder macOS
 
-### Installationsschritte
+- **QGIS** 3.0 oder höher
+- **Python** 3.x (wird mit QGIS mitgeliefert)
+- **Betriebssystem** — Windows, Linux oder macOS
 
-#### Option 1: Manuelle Installation
-1. Laden Sie das Plugin herunter oder klonen Sie das Repository
-2. Kopieren Sie den Plugin-Ordner in Ihr QGIS Plugin-Verzeichnis:
+### Option 1: QGIS Plugin-Manager (empfohlen)
+
+1. QGIS öffnen
+2. `Plugins` > `Verwalten und installieren`
+3. Tab "Installiert" > "THW Toolbox" aktivieren
+
+### Option 2: Manuelle Installation
+
+1. Plugin herunterladen oder Repository klonen
+2. Plugin-Ordner ins QGIS Plugin-Verzeichnis kopieren:
    - **Windows**: `%APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\`
    - **Linux**: `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/`
    - **macOS**: `~/Library/Application Support/QGIS/QGIS3/profiles/default/python/plugins/`
+3. QGIS neu starten
 
-3. Starten Sie QGIS neu oder laden Sie das Plugin über den Plugin-Manager
+---
 
-#### Option 2: Über den QGIS Plugin-Manager
-1. Öffnen Sie QGIS
-2. Gehen Sie zu `Plugins` → `Verwalten und installieren`
-3. Klicken Sie auf den Tab "Installiert"
-4. Aktivieren Sie "THW Toolbox" in der Liste
-
-4. Das Plugin-Symbol erscheint in der QGIS-Toolbar
-
-## 📖 Verwendung
+## Verwendung
 
 ### Plugin aktivieren
+
 1. Klicken Sie auf das **THW Toolbox-Symbol** in der QGIS-Toolbar
 2. Das **Symbol-Dock** öffnet sich rechts in QGIS
 3. Ein neuer Layer **"THW Toolbox Marker"** wird automatisch erstellt
 
 ### Symbole platzieren
 
-1. Navigieren Sie im Symbol-Dock zu der gewünschten Kategorie
-2. Ziehen Sie ein Symbol aus dem Dock
-3. Lassen Sie es auf der gewünschten Position auf der Karte los
-
+1. Im Symbol-Dock zur gewünschten Kategorie navigieren
+2. Symbol aus dem Dock ziehen
+3. Auf der gewünschten Position auf der Karte loslassen
 
 ### Symbole bearbeiten
 
-#### Symbol identifizieren und auswählen
-1. Klicken Sie auf ein Symbol auf der Karte
-2. Das **Feature-Dock** öffnet sich und zeigt alle Eigenschaften des Symbols
-3. Das ausgewählte Symbol wird hervorgehoben
+**Auswählen** — Klick auf ein Symbol auf der Karte öffnet das Feature-Dock mit allen Eigenschaften
 
-#### Symbol verschieben
-1. Wählen Sie ein Symbol aus (siehe oben)
-2. Halten Sie die **linke Maustaste** gedrückt
-3. Ziehen Sie das Symbol an die neue Position
-4. Lassen Sie die Maustaste los
+**Verschieben** — Linke Maustaste gedrückt halten und an die neue Position ziehen
 
-#### Symbolgröße ändern
-1. Wählen Sie ein Symbol aus
-2. Verwenden Sie den **Größen-Schieberegler** im Feature-Dock
-3. Die Änderung wird sofort auf der Karte sichtbar
+**Größe ändern** — Größen-Schieberegler im Feature-Dock verwenden
 
-#### Label hinzufügen oder bearbeiten
-1. Wählen Sie ein Symbol aus
-2. Aktivieren Sie **"Label anzeigen"** im Feature-Dock
-3. Geben Sie den gewünschten Text in das **Label-Feld** ein
-4. Das Label wird automatisch unter dem Symbol angezeigt
+**Label bearbeiten** — "Label anzeigen" aktivieren und Text eingeben
 
-### Symbol-Suche verwenden
-- Verwenden Sie die **Suchleiste** im oberen Bereich des Symbol-Docks
-- Die Suche filtert die Symbole in Echtzeit
-- Die Suche funktioniert sowohl mit deutschen als auch englischen Begriffen
-- Klicken Sie auf das **X** oder löschen Sie den Text, um die Suche zurückzusetzen
+### Symbol-Suche
 
-## 🔧 Technische Details
+Suchleiste im oberen Bereich des Symbol-Docks nutzen. Funktioniert mit deutschen und englischen Begriffen. Klick auf **X** setzt die Suche zurück.
+
+---
+
+## Technische Details
 
 ### Datenformat
-- **Layer-Typ**: GeoPackage (.gpkg)
-- **Geometrie**: Punkt-Features
-- **Symbole**: SVG-Dateien mit eingebettetem Inhalt
-- **Koordinatensystem**: Automatische Anpassung an das Projekt-CRS
-- **Speicherort**: Temporäre Dateien werden im `tmp`-Verzeichnis des Plugins gespeichert
+
+| Eigenschaft | Wert |
+|-------------|------|
+| Layer-Typ | GeoPackage (.gpkg) |
+| Geometrie | Punkt-Features |
+| Symbole | SVG mit eingebettetem Inhalt |
+| CRS | Automatische Anpassung an Projekt-CRS |
+| Speicherort | `tmp`-Verzeichnis des Plugins |
 
 ### Feature-Attribute
-Jedes Symbol-Feature enthält folgende Attribute:
 
 | Feld | Typ | Beschreibung |
 |------|-----|--------------|
 | `name` | String | Name der SVG-Datei |
 | `svg_path` | String | Relativer Pfad zur SVG-Datei |
-| `svg_content` | String | Vollständiger SVG-Inhalt (für Portabilität) |
+| `svg_content` | String | Vollständiger SVG-Inhalt (Portabilität) |
 | `size` | Real | Symbolgröße in Map Units |
-| `scale_with_map` | Boolean | Ob das Symbol mit der Karte skalieren soll |
-| `unique_id` | String | Eindeutige Identifikation des Features |
+| `scale_with_map` | Boolean | Skalierung mit der Karte |
+| `unique_id` | String | Eindeutige Feature-ID |
 | `label` | String | Beschriftungstext |
-| `show_label` | Boolean | Ob die Beschriftung angezeigt werden soll |
+| `show_label` | Boolean | Beschriftung anzeigen |
 
-### Performance-Optimierungen
-- **Intelligente Toleranz**: Feature-Erkennung basiert auf Symbolgröße für präzise Auswahl
-- **Throttling**: Aktualisierungen werden gedrosselt für bessere Performance bei vielen Features
-- **Caching**: SVG-Icons werden gecacht für schnelle Anzeige im Dock
-- **Lazy Loading**: Symbol-Ordner werden nur bei Bedarf geladen
-- **Effiziente Rendering**: Optimierte SVG-Darstellung auf der Karte
+### Performance
 
-## 📤 Export-Funktionen
-
-### Portables Paket erstellen
-Erstellen Sie ein vollständig portables Paket mit allen Symbolen und Daten:
-
-1. Gehen Sie zu `Plugins` → `THW Toolbox` → `Portables Paket exportieren`
-2. Wählen Sie einen Zielordner aus
-3. Das Plugin erstellt automatisch ein ZIP-Archiv mit:
-   - Allen SVG-Symbolen aus der Bibliothek
-   - Der GeoPackage-Datei mit allen platzierten Symbolen
-   - Installationsanweisungen
-   - README-Datei
-
-Das exportierte Paket kann auf anderen Systemen verwendet werden, ohne dass zusätzliche Abhängigkeiten erforderlich sind.
-
-## 📄 Lizenzinformationen
-
-### Externe Ressourcen
-
-#### Taktische Zeichen
-- **Lizenz**: CC BY 4.0 (Creative Commons Attribution 4.0 International)
-- **Quelle**: [Taktische-Zeichen auf GitHub](https://github.com/jonas-koeritz/Taktische-Zeichen)
-- **Verwendung**: Die SVG-Symbole werden unter der CC BY 4.0-Lizenz bereitgestellt
-
-#### Google Roboto Font
-- **Lizenz**: Apache 2.0 (Apache License, Version 2.0)
-- **Quelle**: [Google Fonts - Roboto](https://fonts.google.com/specimen/Roboto)
-- **Verwendung**: Wird für die Beschriftungen verwendet
-
-### Plugin-Lizenz
-Dieses Plugin steht unter der **MIT-Lizenz** zur Verfügung. Siehe die `LICENSE`-Datei im Repository für Details.
-
-## 🆘 Support und Fehlerbehebung
-
-### Häufige Probleme
-
-#### Plugin erscheint nicht in der Toolbar
-- Überprüfen Sie, ob das Plugin im Plugin-Manager aktiviert ist
-- Starten Sie QGIS neu
-- Überprüfen Sie die QGIS-Version (mindestens 3.0 erforderlich)
-
-#### Symbole werden nicht angezeigt
-- Überprüfen Sie, ob der Layer "THW Toolbox Marker" sichtbar ist
-- Überprüfen Sie die Verfügbarkeit der SVG-Dateien im `svgs`-Verzeichnis
-- Überprüfen Sie die Schreibrechte im Plugin-Verzeichnis
-
-#### Performance-Probleme
-- Reduzieren Sie die Anzahl der gleichzeitig angezeigten Symbole
-- Überprüfen Sie die Größe der SVG-Dateien
-- Schließen Sie andere große Projekte oder Layer
-
-### Log-Dateien
-Bei Problemen können Sie die Log-Datei überprüfen:
-- **Log-Datei**: `svg_dock.log` im Plugin-Verzeichnis
-- **QGIS-Log**: `Plugins` → `Python-Konsole` → Log-Ausgabe
-
-### Bekannte Einschränkungen
-- Symbole werden nur in Punkt-Layern unterstützt
-- Sehr große SVG-Dateien (> 1 MB) können die Performance beeinträchtigen
-- Bei sehr vielen Symbolen (> 1000) kann die Darstellung verlangsamt werden
-- Die Symbol-Suche ist case-sensitive
-
-## 📝 Changelog
-
-### Version 0.1
-- ✨ Erste Veröffentlichung
-- 🎯 Grundlegende Drag & Drop-Funktionalität
-- 🔍 Feature-Identifizierung und -Bearbeitung
-- 📁 Umfangreiche Symbol-Bibliothek mit über 1000 Symbolen
-- 💾 Export-Funktionen für portable Pakete
-- 🔎 Symbol-Suche mit Mehrsprachigkeit
-- 📝 Labeling-Funktionalität
-- ⚡ Performance-Optimierungen
-
-## 🤝 Beitragen
-
-Verbesserungsvorschläge, Bug-Reports und Pull Requests sind herzlich willkommen!
-
-### Wie Sie beitragen können
-- 🐛 **Bug-Reports**: Melden Sie Fehler über GitHub Issues
-- 💡 **Feature-Vorschläge**: Teilen Sie Ihre Ideen mit
-- 📝 **Dokumentation**: Helfen Sie bei der Verbesserung der Dokumentation
-- 🔧 **Code-Beiträge**: Pull Requests sind willkommen
+- **Intelligente Toleranz** — Feature-Erkennung basiert auf Symbolgröße
+- **Throttling** — Aktualisierungen werden gedrosselt
+- **Caching** — SVG-Icons werden gecacht
+- **Lazy Loading** — Ordner werden nur bei Bedarf geladen
 
 ---
 
-**Hinweis**: Dieses Plugin wurde für den Einsatz im Technischen Hilfswerk (THW) entwickelt, kann aber auch für andere Organisationen und Zwecke verwendet werden. Die taktischen Zeichen entsprechen den offiziellen Standards und können in verschiedenen Einsatzszenarien verwendet werden.
+## Export
+
+### Portables Paket erstellen
+
+1. `Plugins` > `THW Toolbox` > `Portables Paket exportieren`
+2. Zielordner auswählen
+3. Das Plugin erstellt ein ZIP-Archiv mit allen SVG-Symbolen, der GeoPackage-Datei und Installationsanweisungen
+
+Das Paket kann auf anderen Systemen ohne zusätzliche Abhängigkeiten verwendet werden.
+
+---
+
+## Credits
+
+### Taktische Zeichen
+
+Die taktischen Zeichen stammen aus dem hervorragenden Projekt [Taktische-Zeichen](https://github.com/jonas-koeritz/Taktische-Zeichen) von **[Jonas Köritz](https://github.com/jonas-koeritz)**. Vielen Dank für die umfangreiche und hochwertige Sammlung von über 1000 taktischen Zeichen, die als SVG frei zur Verfügung gestellt werden.
+
+Ein besonderer Dank geht auch an **[ZeiberKreim](https://github.com/ZeiberKreim)** für wertvolle Beiträge und Erweiterungen der Zeichen-Sammlung.
+
+### Verwendete Ressourcen
+
+| Ressource | Lizenz | Quelle |
+|-----------|--------|--------|
+| Taktische Zeichen | CC BY 4.0 | [jonas-koeritz/Taktische-Zeichen](https://github.com/jonas-koeritz/Taktische-Zeichen) |
+| Google Roboto Font | Apache 2.0 | [Google Fonts](https://fonts.google.com/specimen/Roboto) |
+
+---
+
+## Lizenz
+
+Dieses Plugin steht unter der **MIT-Lizenz**. Siehe `LICENSE` für Details.
+
+---
+
+## Support und Fehlerbehebung
+
+### Häufige Probleme
+
+**Plugin erscheint nicht in der Toolbar**
+- Plugin im Plugin-Manager aktiviert?
+- QGIS neu starten
+- QGIS-Version mindestens 3.0?
+
+**Symbole werden nicht angezeigt**
+- Layer "THW Toolbox Marker" sichtbar?
+- SVG-Dateien im `svgs`-Verzeichnis vorhanden?
+- Schreibrechte im Plugin-Verzeichnis?
+
+**Performance-Probleme**
+- Anzahl gleichzeitig angezeigter Symbole reduzieren
+- Größe der SVG-Dateien prüfen
+- Andere große Projekte oder Layer schließen
+
+### Logs
+
+- **Log-Datei**: `svg_dock.log` im Plugin-Verzeichnis
+- **QGIS-Log**: `Plugins` > `Python-Konsole` > Log-Ausgabe
+
+### Bekannte Einschränkungen
+
+- Nur Punkt-Layer unterstützt
+- Sehr große SVGs (> 1 MB) können die Performance beeinträchtigen
+- Bei > 1000 Symbolen kann die Darstellung verlangsamt werden
+- Symbol-Suche ist case-sensitive
+
+---
+
+## Beitragen
+
+Verbesserungsvorschläge, Bug-Reports und Pull Requests sind herzlich willkommen!
+
+- **Bug-Reports** — Fehler über GitHub Issues melden
+- **Feature-Vorschläge** — Ideen teilen
+- **Code-Beiträge** — Pull Requests sind willkommen
+
+---
+
+**Hinweis**: Dieses Plugin wurde für den Einsatz im THW entwickelt, kann aber auch für andere Organisationen verwendet werden. Die taktischen Zeichen entsprechen den offiziellen Standards.

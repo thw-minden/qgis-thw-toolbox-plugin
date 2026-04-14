@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.0]
+
+### Hinzugefügt
+- Einstellungs-Dialog für Plugin-Konfiguration
+- Konfigurierbare Standardwerte für Icon-Erstellung (Größe, Kartenskalierung)
+- Label-Einstellungen (Schriftgröße, Buffer-Größe, Labels ein-/ausschalten)
+
+### Verbessert
+- Refactoring der Settings-Verwaltung mit zentraler `PluginSettings`-Klasse
+- Einheitenumrechnung für Label-Darstellung (Millimeter statt Punkte)
+
+### Behoben
+- Korrektur der Einheitenumrechnung (UM zu MM)
+- Fix für Dialog-Ergebnisprüfung (`== Accepted` statt `is not Rejected`)
+- Numerische Werte werden konsistent als Integer gespeichert
+
 ## [1.3]
 
 ### Verbessert
