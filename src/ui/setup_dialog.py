@@ -3,15 +3,18 @@
 import os
 
 from qgis.core import QgsProject, QgsVectorLayer
-from qgis.PyQt.QtCore import QCoreApplication, Qt
+from qgis.PyQt.QtCore import pyqtSignal, QCoreApplication, Qt
 from qgis.PyQt.QtGui import QFont, QPixmap
 from qgis.PyQt.QtWidgets import (
+    QAbstractItemView,
     QButtonGroup,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFrame,
     QGridLayout,
     QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QMessageBox,
@@ -19,6 +22,7 @@ from qgis.PyQt.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QTableWidget,
     QTabWidget,
     QToolBox,
     QVBoxLayout,
@@ -44,12 +48,29 @@ from ..tools.basemap_setup import (
     set_project_crs_to_target,
     zoom_to_germany,
 )
-from ..tools.layer_setup import BASEMAPS, MapLayer, basemaps_by_category
+from ..tools.layer_setup import (
+    BASEMAPS, 
+    MapLayer, 
+    basemaps_by_category, 
+    additional_layers_by_category,
+    qgis_connection_exists,
+    install_qgis_connection,
+    add_basemap_to_project,
+    add_layer_to_project,
+    set_project_crs,
+)
 
 logger = get_logger(__name__)
 
 _OK_COLOR = "#2e7d32"
 _FAIL_COLOR = "#c62828"
+
+class ClickableCellWidget(QWidget):
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event):
+        self.clicked.emit()
+        super().mousePressEvent(event)
 
 
 class StartPage(QWizardPage):
@@ -150,12 +171,12 @@ class CrsPage(QWizardPage):
         details_box.addItem(details, "Details")
         self.layout.addWidget(details_box)
 
-    def get_selected_epsg(self):
+    def get_selected_epsg(self)->int:
         epsg_str = self.zone_group.checkedButton().text()
         epsg = self.EPSGS.get(epsg_str)
         if epsg is None:
             logger.warning(f"Unsupported zone {epsg_str} received on CRS selection.")
-        return epsg
+        return int(epsg)
 
 
 class BaseMapPage(QWizardPage):
@@ -167,8 +188,12 @@ class BaseMapPage(QWizardPage):
         self._active_button_group = QButtonGroup(self)
         self._active_button_group.setExclusive(True)
 
+        self._project_basemap_button_list = []
+        self._qgis_basemap_button_list = []
+
         top_text = QLabel(
-            "Es wird gleichzeitig nur eine Hintergrundkarte angezeigt. Die Karten benötigen eine Internetverbindung um zu laden."
+            "Es wird gleichzeitig nur eine Hintergrundkarte angezeigt. Die Karten benötigen eine Internetverbindung um zu laden.<br/>"
+            "Die in Spalte Aktiv ausgewählte Karte wird genutzt. Weitere Karten können dem Projekt hinzugefügt werden. Die Spalte QGIS fügt Karten dem QGIS-Browser auch zur Verwendung in anderen Projekten hinzu."
         )
         top_text.setWordWrap(True)
         self.layout.addWidget(top_text)
@@ -179,71 +204,287 @@ class BaseMapPage(QWizardPage):
         self.layout.addWidget(tabs)
 
     def _build_category_tab(self, items: list) -> QWidget:
-        page = QWidget()
-        page_layout = QVBoxLayout(page)
-        page_layout.setContentsMargins(0, 6, 0, 0)
-        page_layout.setSpacing(6)
-
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+
         inner = QWidget()
         inner_layout = QVBoxLayout(inner)
         inner_layout.setContentsMargins(0, 0, 0, 0)
-        inner_layout.setSpacing(4)
-        for bm in items:
-            inner_layout.addWidget(self._build_basemap_row(bm))
-        inner_layout.addStretch(1)
+        inner_layout.setSpacing(8)
+
+        table = QTableWidget(len(items), 4, inner)
+        table.setHorizontalHeaderLabels(["Karte / Beschreibung", "Aktiv", "Projekt", "QGIS"])
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        for row, bm in enumerate(items):
+            self._build_basemap_row(table, row, bm)
+
+        inner_layout.addWidget(table)
+
         scroll.setWidget(inner)
-        page_layout.addWidget(scroll, 1)
-        return page
+        return scroll
 
-    def _build_basemap_row(self, bm: MapLayer) -> QWidget:
-        row = QFrame()
-        row.setFrameShape(QFrame.Shape.StyledPanel)
-        hbox = QHBoxLayout(row)
-        hbox.setContentsMargins(8, 6, 8, 6)
-        hbox.setSpacing(8)
-
-        left_vbox = QVBoxLayout()
-        left_vbox.setSpacing(4)
-
-        name = QLabel(bm.name)
-        f = QFont(name.font())
-        f.setBold(True)
-        name.setFont(f)
-        left_vbox.addWidget(name)
-
-        desc = QLabel(bm.description)
-        desc.setStyleSheet("color: gray;")
-        desc.setWordWrap(True)
-        left_vbox.addWidget(desc)
-
-        hbox.addLayout(left_vbox, stretch=1)
-
-        button_vbox = QVBoxLayout()
-        button_vbox.setSpacing(4)
-
-        active_btn = QPushButton("Als aktiv setzen")
-        active_btn.setCheckable(True)
-
-        add_project_btn = QPushButton("Im Projekt hinzufügen")
-        add_project_btn.setCheckable(True)
-
-        add_browser_btn = QPushButton("In QGIS Browser hinz.")
-        add_browser_btn.setCheckable(True)
-
-        button_vbox.addWidget(active_btn)
-        button_vbox.addWidget(add_project_btn)
-        button_vbox.addWidget(add_browser_btn)
-        button_vbox.addStretch(1)
-
-        hbox.addLayout(button_vbox, stretch=0)
+    def _build_basemap_row(self, table: QTableWidget, row: int, bm: MapLayer):
+        active_btn = QRadioButton()
+        add_project_btn = QCheckBox()
+        add_qgis_btn = QCheckBox()
 
         self._active_button_group.addButton(active_btn)
+        self._project_basemap_button_list.append(add_project_btn)
+        self._qgis_basemap_button_list.append(add_qgis_btn)
 
-        return row
+        if qgis_connection_exists(bm):
+            add_qgis_btn.setChecked(True)
+            add_qgis_btn.setDisabled(True)
 
+        active_btn.setProperty("bm", bm)
+        add_project_btn.setProperty("bm", bm)
+        add_qgis_btn.setProperty("bm", bm)
+
+        def set_active():
+            active_btn.setChecked(True)
+            add_project_btn.setChecked(True)
+
+        def toggle_project():
+            if not active_btn.isChecked():
+                add_project_btn.setChecked(not add_project_btn.isChecked())
+
+        def toggle_qgis():
+            add_qgis_btn.setChecked(not add_qgis_btn.isChecked())
+            if add_qgis_btn.isChecked():
+                add_project_btn.setChecked(True)
+
+
+        name_text = QLabel(bm.name)
+        def update_name_style(checked: bool):
+            f = QFont(name_text.font())
+            f.setBold(checked)
+            name_text.setFont(f)
+        active_btn.toggled.connect(update_name_style)
+
+        if bm.default_active is not None and bm.default_active:
+            set_active()
+
+        if bm.default_add_to_project is not None and bm.default_add_to_project:
+            toggle_project()
+
+        description_text = QLabel(bm.description)
+        description_text.setStyleSheet("color: gray;")
+        description_text.setWordWrap(True)
+
+        first_column = ClickableCellWidget()
+        info_layout = QVBoxLayout(first_column)
+        name_text.setContentsMargins(0,0,0,0)
+        description_text.setContentsMargins(0,0,0,0)
+        info_layout.setContentsMargins(4,0,4,4)
+        info_layout.setSpacing(0)
+        info_layout.addWidget(name_text)
+        info_layout.addWidget(description_text)
+        first_column.clicked.connect(set_active)
+        table.setCellWidget(row, 0, first_column)
+
+        second_column = ClickableCellWidget()
+        active_layout = QHBoxLayout(second_column)
+        active_layout.setContentsMargins(0, 0, 0, 0)
+        active_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        active_layout.addWidget(active_btn)
+        second_column.clicked.connect(set_active)
+        table.setCellWidget(row, 1, second_column)
+
+        third_column = ClickableCellWidget()
+        project_layout = QHBoxLayout(third_column)
+        project_layout.setContentsMargins(0, 0, 0, 0)
+        project_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        project_layout.addWidget(add_project_btn)
+        third_column.clicked.connect(toggle_project)
+        table.setCellWidget(row, 2, third_column)
+
+        fourth_column = ClickableCellWidget()
+        qgis_layout = QHBoxLayout(fourth_column)
+        qgis_layout.setContentsMargins(0, 0, 0, 0)
+        qgis_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        qgis_layout.addWidget(add_qgis_btn)
+        fourth_column.clicked.connect(toggle_qgis)
+        table.setCellWidget(row, 3, fourth_column)
+
+        name_text_size = name_text.sizeHint()
+        description_text_size = description_text.sizeHint()
+        table.setRowHeight(row, name_text_size.height() + description_text_size.height()-10)
+    
+    def get_active_bm(self)->MapLayer:
+        active_btn = self._active_button_group.checkedButton()
+        return active_btn.property("bm")
+
+    def get_project_bms(self)->list[MapLayer]:
+        selected_bms = []
+        for project_btn in self._project_basemap_button_list:
+            if project_btn.isChecked():
+                selected_bms.append(project_btn.property("bm"))
+        return selected_bms
+
+    def get_qgis_bms(self)->list[MapLayer]:
+        selected_bms = []
+        for qgis_btn in self._qgis_basemap_button_list:
+            if qgis_btn.isChecked():
+                selected_bms.append(qgis_btn.property("bm"))
+        return selected_bms
+
+class AddLayerPage(QWizardPage):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setTitle("Themenspezifische Zusatzlagen")
+        self.layout = QVBoxLayout(self)
+
+        self._project_add_layer_button_list = []
+        self._qgis_add_layer_button_list = []
+
+        top_text = QLabel(
+            "Es können mehrere Themenspezifische Zusatzlagen eingeblendet werden. Die Karten benötigen eine Internetverbindung um zu laden.<br/>"
+            "Die Karten können beliebig dem Projekt hinzugefügt werden. Die Spalte QGIS fügt Karten dem QGIS-Browser auch zur Verwendung in anderen Projekten hinzu."
+        )
+        top_text.setWordWrap(True)
+        self.layout.addWidget(top_text)
+
+        tabs = QTabWidget()
+        for category, items in additional_layers_by_category().items():
+            tabs.addTab(self._build_category_tab(items), category)
+        self.layout.addWidget(tabs)
+
+    def _build_category_tab(self, items: list) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        inner = QWidget()
+        inner_layout = QVBoxLayout(inner)
+        inner_layout.setContentsMargins(0, 0, 0, 0)
+        inner_layout.setSpacing(8)
+
+        table = QTableWidget(len(items), 4, inner)
+        table.setHorizontalHeaderLabels(["Karte / Beschreibung", "Aktiv", "Projekt", "QGIS"])
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        for row, bm in enumerate(items):
+            self._build_add_layer_row(table, row, bm)
+
+        inner_layout.addWidget(table)
+
+        scroll.setWidget(inner)
+        return scroll
+
+    def _build_add_layer_row(self, table: QTableWidget, row: int, bm: MapLayer):
+        active_btn = QCheckBox()
+        add_project_btn = QCheckBox()
+        add_qgis_btn = QCheckBox()
+
+
+        def toggle_active():
+            active_btn.setChecked(not active_btn.isChecked())
+            add_project_btn.setChecked(active_btn.isChecked())
+
+        def toggle_project():
+            if not active_btn.isChecked():
+                add_project_btn.setChecked(not add_project_btn.isChecked())
+
+        def toggle_qgis():
+            add_qgis_btn.setChecked(not add_qgis_btn.isChecked())
+            if add_qgis_btn.isChecked():
+                add_project_btn.setChecked(True)
+        
+        self._project_add_layer_button_list.append(add_project_btn)
+        self._qgis_add_layer_button_list.append(add_qgis_btn)
+
+        if qgis_connection_exists(bm):
+            add_qgis_btn.setChecked(True)
+            add_qgis_btn.setDisabled(True)
+
+        name_text = QLabel(bm.name)
+        def update_name_style(checked: bool):
+            f = QFont(name_text.font())
+            f.setBold(checked)
+            name_text.setFont(f)
+        active_btn.toggled.connect(update_name_style)
+
+        if bm.default_active is not None and bm.default_active:
+            toggle_active()
+
+        if bm.default_add_to_project is not None and bm.default_add_to_project:
+            toggle_project()
+
+        add_project_btn.setProperty("bm", bm)
+        add_qgis_btn.setProperty("bm", bm)
+
+        description_text = QLabel(bm.description)
+        description_text.setStyleSheet("color: gray;")
+        description_text.setWordWrap(True)
+
+        first_column = ClickableCellWidget()
+        info_layout = QVBoxLayout(first_column)
+        name_text.setContentsMargins(0,0,0,0)
+        description_text.setContentsMargins(0,0,0,0)
+        info_layout.setContentsMargins(4,0,4,4)
+        info_layout.setSpacing(0)
+        info_layout.addWidget(name_text)
+        info_layout.addWidget(description_text)
+        first_column.clicked.connect(toggle_active)
+        table.setCellWidget(row, 0, first_column)
+
+        second_column = ClickableCellWidget()
+        active_layout = QHBoxLayout(second_column)
+        active_layout.setContentsMargins(0, 0, 0, 0)
+        active_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        active_layout.addWidget(active_btn)
+        second_column.clicked.connect(toggle_active)
+        table.setCellWidget(row, 1, second_column)
+
+        third_column = ClickableCellWidget()
+        project_layout = QHBoxLayout(third_column)
+        project_layout.setContentsMargins(0, 0, 0, 0)
+        project_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        project_layout.addWidget(add_project_btn)
+        third_column.clicked.connect(toggle_project)
+        table.setCellWidget(row, 2, third_column)
+
+        fourth_column = ClickableCellWidget()
+        qgis_layout = QHBoxLayout(fourth_column)
+        qgis_layout.setContentsMargins(0, 0, 0, 0)
+        qgis_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        qgis_layout.addWidget(add_qgis_btn)
+        fourth_column.clicked.connect(toggle_qgis)
+        table.setCellWidget(row, 3, fourth_column)
+
+        name_text_size = name_text.sizeHint()
+        description_text_size = description_text.sizeHint()
+        table.setRowHeight(row, name_text_size.height() + description_text_size.height())
+    
+    def get_project_layers(self)->list[MapLayer]:
+        selected_layers = []
+        for project_btn in self._project_add_layer_button_list:
+            if project_btn.isChecked():
+                selected_layers.append(project_btn.property("bm"))
+        return selected_layers
+
+    def get_qgis_layers(self)->list[MapLayer]:
+        selected_layers = []
+        for qgis_btn in self._qgis_add_layer_button_list:
+            if qgis_btn.isChecked():
+                selected_layers.append(qgis_btn.property("bm"))
+        return selected_layers
 
 class SetupDialog(QWizard):
     """Wizard für Projekt-Setup und Basiskarten-Installation."""
@@ -255,21 +496,64 @@ class SetupDialog(QWizard):
         self.resize(620, 640)
 
         # Page builder calls
-        start_pg = StartPage(parent=self)
-        crs_pg = CrsPage(parent=self)
-        base_map_pg = BaseMapPage(parent=self)
+        self.start_pg = StartPage(parent=self)
+        self.crs_pg = CrsPage(parent=self)
+        self.base_map_pg = BaseMapPage(parent=self)
+        self.add_layer_pg = AddLayerPage(parent=self)
 
-        self.addPage(start_pg)
-        self.addPage(crs_pg)
-        self.addPage(base_map_pg)
+        self.addPage(self.start_pg)
+        self.addPage(self.crs_pg)
+        self.addPage(self.base_map_pg)
+        self.addPage(self.add_layer_pg)
 
+        self._run_dialog()
+
+    def _run_dialog(self):
+        logger.debug("Setup-Dialog started.")
         result = self.exec()
-        logger.debug(f"Setup Wizard returned with result {result}")
 
         if result == QDialog.DialogCode.Accepted:
-            pass  # Handle successful return
+            logger.debug("Dialog completed")
+            # 1. Add the static basemap connections to the QGIS browser
+            for bm in self.base_map_pg.get_qgis_bms():
+                if qgis_connection_exists(bm):
+                    logger.debug("Base Map %s already added to QGIS", bm.name)
+                else:
+                    logger.debug("Adding Basemap %s as permanent connection", bm.name)
+                    install_qgis_connection(bm)
+
+            # 2. Add the basemaps to the project
+            for bm in self.base_map_pg.get_project_bms():
+                if bm == self.base_map_pg.get_active_bm():
+                    add_basemap_to_project(bm, visible=True)
+                else:
+                    add_basemap_to_project(bm)
+
+            # 3. Add the additional layer connections to the QGIS browser
+            for map_layer in self.add_layer_pg.get_qgis_layers():
+                if qgis_connection_exists(map_layer):
+                    logger.debug("Additional Layer %s already added to QGIS", bm.name)
+                else:
+                    logger.debug("Adding Additional Layer %s as permanent connection", bm.name)
+                    install_qgis_connection(map_layer)
+
+            # 4. Add the additional basemaps to the project
+            for map_layer in self.add_layer_pg.get_project_layers():
+                add_layer_to_project(map_layer)
+
+            # 5. Set the CRS
+            set_project_crs(self.crs_pg.get_selected_epsg())
+
+            # 6. Zoom to Germany
+            zoom_to_germany()
+
+            # Collapse all layers in the Layer view
+            from qgis.utils import iface
+            iface.layerTreeView().collapseAll()
+
         else:
-            pass  # Handle Rejection
+            logger.debug("Setup Canceled, No action")
+
 
         # outer = QVBoxLayout(self)
         # outer.setContentsMargins(12, 12, 12, 12)
@@ -301,17 +585,17 @@ class SetupDialog(QWizard):
         # buttons.accepted.connect(self.accept)
         # outer.addWidget(buttons)
 
-        self._refresh_all()
-        self._crs_label = QLabel()
-        self._crs_fix_btn = QPushButton(f"Auf {TARGET_CRS} setzen")
-        self._basemap_label = QLabel()
-        self._basemap_fix_btn = QPushButton("OSM laden")
-        self._zoom_btn = QPushButton("Auf Deutschland zoomen")
+        # self._refresh_all()
+        # self._crs_label = QLabel()
+        # self._crs_fix_btn = QPushButton(f"Auf {TARGET_CRS} setzen")
+        # self._basemap_label = QLabel()
+        # self._basemap_fix_btn = QPushButton("OSM laden")
+        # self._zoom_btn = QPushButton("Auf Deutschland zoomen")
 
-        self._zoom_label = QLabel("Kartenansicht auf Deutschland zentrieren")
-        self._styles_status = QLabel()
-        self._styles_remove_btn = QPushButton("Stile entfernen")
-        self._styles_import_btn = QPushButton("Stile importieren")
+        # self._zoom_label = QLabel("Kartenansicht auf Deutschland zentrieren")
+        # self._styles_status = QLabel()
+        # self._styles_remove_btn = QPushButton("Stile entfernen")
+        # self._styles_import_btn = QPushButton("Stile importieren")
 
     # ---------------------------------------------------------------- status
 

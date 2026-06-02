@@ -8,13 +8,27 @@ also add a live layer to the current project.
 
 from dataclasses import dataclass
 from typing import Callable, Optional
+from urllib.parse import quote
 
-from qgis.core import QgsProject
+
+from qgis.core import (
+    QgsProject, 
+    QgsMapLayer, 
+    QgsRasterLayer, 
+    QgsRectangle,
+    QgsVectorTileLayer,
+    QgsCoordinateTransform,
+    QgsCoordinateReferenceSystem
+    )
+from qgis.PyQt.QtCore import QSettings
+from qgis.utils import iface
 
 from ..logging_utils import get_logger
 
 logger = get_logger(__name__)
 
+def _q_settings() -> QSettings:
+    return QSettings()
 
 @dataclass(frozen=True)
 class MapLayer:
@@ -31,6 +45,8 @@ class MapLayer:
     wms_params: Optional[dict] = None
     description: str = ""
     category: str = "Deutschland"
+    default_active: Optional[bool] = False
+    default_add_to_project: Optional[bool] = False
 
 
 _CBM_WORLD = "Allg. Karten Weltweit"
@@ -46,6 +62,7 @@ BASEMAPS: tuple[MapLayer, ...] = (
         zmax=19,
         description="OpenStreetMap Standard (weltweit)",
         category=_CBM_WORLD,
+        default_active=True,
     ),
     MapLayer(
         key="topplus_web",
@@ -64,15 +81,6 @@ BASEMAPS: tuple[MapLayer, ...] = (
         wms_params={"layers": "web_grau", "styles": "", "format": "image/png", "crs": ""},
         description="Graustufen-Variante (gut für Overlays)",
         category=_CBM_WORLD,
-    ),
-    MapLayer(
-        key="bkg_dop",
-        name="BKG Sentinel-2 Mosaik",
-        kind="wms",
-        url="https://sgx.geodatenzentrum.de/wms_sen2europe",
-        wms_params={"layers": "rgb", "styles": "", "format": "image/png", "crs": ""},
-        description="Sentinel-2-Mosaik Europa (BKG, offen)",
-        category=_CBM_AERIAL,
     ),
     MapLayer(
         key="basemapde_vektor",
@@ -97,6 +105,15 @@ BASEMAPS: tuple[MapLayer, ...] = (
         category=_CBM_WORLD,
     ),
     MapLayer(
+        key="bkg_dop",
+        name="BKG Sentinel-2 Mosaik",
+        kind="wms",
+        url="https://sgx.geodatenzentrum.de/wms_sen2europe",
+        wms_params={"layers": "rgb", "styles": "", "format": "image/png", "crs": ""},
+        description="Sentinel-2-Mosaik Europa (BKG, offen)",
+        category=_CBM_AERIAL,
+    ),
+    MapLayer(
         key="esri_world_imagery",
         name="Esri World Imagery",
         kind="xyz",
@@ -104,6 +121,7 @@ BASEMAPS: tuple[MapLayer, ...] = (
         zmax=19,
         description="Hochaufgelöste Satellitenbilder (Esri, frei)",
         category=_CBM_AERIAL,
+        default_add_to_project=True,
     ),
     MapLayer(
         key="esri_world_topo",
@@ -188,6 +206,16 @@ _CAL_AERIAL_STATE = "Luftbilder Länder"
 _CAL_DRONE = "Drohne"
 
 ADD_LAYERS: tuple[MapLayer, ...] = (
+    MapLayer(
+        key="mgrs_grid",
+        name="MGRS/UMTRef Gitter",
+        kind="wms",
+        url="https://geodata.meier-tkn.de/geoserver/mtkn/wms",
+        wms_params={"layers": "mtkn%3ATOP%2BUTMRef", "styles": "", "format": "image/png", "crs": "4326"},
+        description="Fügt beschriftetes UTM-Zonen-Gitter ein",
+        category=_CAL_THEMED,
+        default_active=True,
+    ),
     MapLayer(
         key="bfn_schutzgebiete",
         name="Schutzgebiete (BfN)",
@@ -379,3 +407,204 @@ def additional_layers_by_category() -> dict[str, list[MapLayer]]:
             order.append(al.category)
         groups[al.category].append(al)
     return {cat: groups[cat] for cat in order}
+
+
+#  █████  ██████  ██████      ███    ███  █████  ██████  ███████ 
+# ██   ██ ██   ██ ██   ██     ████  ████ ██   ██ ██   ██ ██      
+# ███████ ██   ██ ██   ██     ██ ████ ██ ███████ ██████  ███████ 
+# ██   ██ ██   ██ ██   ██     ██  ██  ██ ██   ██ ██           ██ 
+# ██   ██ ██████  ██████      ██      ██ ██   ██ ██      ███████
+
+def qgis_connection_exists(basemap: MapLayer) -> bool:
+    """Checks if there is already a connection """
+    s = _q_settings()
+    if basemap.kind == "xyz":
+        return s.contains(f"qgis/connections-xyz/{basemap.name}/url")
+    if basemap.kind == "wms":
+        return s.contains(f"qgis/connections-wms/{basemap.name}/url")
+    if basemap.kind == "vtile":
+        return s.contains(f"qgis/connections-vector-tile/{basemap.name}/url")
+    return False
+
+def reload_browser() -> None:
+    """Bittet QGIS, die Browser-Connections neu einzulesen, damit neue
+    Einträge sofort in der Browser-Ansicht erscheinen."""
+    try:
+        if iface is not None and hasattr(iface, "reloadConnections"):
+            iface.reloadConnections()
+    except Exception as e:
+        logger.debug("Browser reloadConnections failed: %s", e)
+
+def install_qgis_connection(basemap: MapLayer) -> None:
+    """Stellt eine projektübergreifende Verbindung im QGIS-Browser her."""
+    s = _q_settings()
+    if basemap.kind == "xyz":
+        base = f"qgis/connections-xyz/{basemap.name}"
+        s.setValue(f"{base}/url", basemap.url)
+        s.setValue(f"{base}/zmin", basemap.zmin)
+        s.setValue(f"{base}/zmax", basemap.zmax)
+        s.setValue(f"{base}/authcfg", "")
+        s.setValue(f"{base}/username", "")
+        s.setValue(f"{base}/password", "")
+        s.setValue(f"{base}/referer", "")
+        s.setValue(f"{base}/tilePixelRatio", 0)
+    elif basemap.kind == "wms":
+        base = f"qgis/connections-wms/{basemap.name}"
+        s.setValue(f"{base}/url", basemap.url)
+        s.setValue(f"{base}/ignoreAxisOrientation", False)
+        s.setValue(f"{base}/invertAxisOrientation", False)
+        s.setValue(f"{base}/ignoreGetFeatureInfoURI", False)
+        s.setValue(f"{base}/smoothPixmapTransform", False)
+        s.setValue(f"{base}/dpiMode", 7)
+    elif basemap.kind == "vtile":
+        base = f"qgis/connections-vector-tile/{basemap.name}"
+        s.setValue(f"{base}/url", basemap.url)
+        s.setValue(f"{base}/zmin", basemap.zmin)
+        s.setValue(f"{base}/zmax", basemap.zmax)
+        s.setValue(f"{base}/styleUrl", basemap.style_url)
+        s.setValue(f"{base}/serviceType", "")
+        s.setValue(f"{base}/authcfg", "")
+        s.setValue(f"{base}/username", "")
+        s.setValue(f"{base}/password", "")
+        s.setValue(f"{base}/referer", "")
+    reload_browser()
+
+def _build_xyz_uri(map_layer: MapLayer) -> str:
+    encoded = quote(map_layer.url, safe="")
+    return f"type=xyz&url={encoded}&zmin={map_layer.zmin}&zmax={map_layer.zmax}"
+
+
+def _build_wms_uri(map_layer: MapLayer) -> str:
+    params = map_layer.wms_params or {}
+    encoded_url = quote(map_layer.url, safe="")
+    raw_layers = params.get("layers", "")
+    layers = [name.strip() for name in raw_layers.split(",") if name.strip()]
+    style = params.get("styles", "")
+
+    parts = [
+        "contextualWMSLegend=0",
+        f"crs={params.get('crs', 'EPSG:3857')}",
+        "dpiMode=7",
+        "featureCount=10",
+        f"format={params.get('format', 'image/png')}",
+    ]
+    # Für N Layer braucht der WMS-Provider N `layers=`- und N `styles=`-Einträge.
+    for layer in layers:
+        parts.append(f"layers={layer}")
+        parts.append(f"styles={style}")
+    parts.append(f"url={encoded_url}")
+    return "&".join(parts)
+
+def _build_vtile_uri(map_layer: MapLayer) -> str:
+    encoded_url = quote(map_layer.url, safe="")
+    encoded_style = quote(map_layer.style_url, safe="")
+    return f"type=xyz&url={encoded_url}&zmin={map_layer.zmin}&zmax={map_layer.zmax}&styleUrl={encoded_style}"
+
+def create_map_layer(map_layer: MapLayer)->QgsMapLayer:
+    """Adds the basemap to the current project"""
+    if map_layer.kind == "xyz":
+        return QgsRasterLayer(_build_xyz_uri(map_layer), map_layer.name, "wms")
+    if map_layer.kind == "wms":
+        return QgsRasterLayer(_build_wms_uri(map_layer), map_layer.name, "wms")
+    if map_layer.kind == "vtile":
+        return QgsVectorTileLayer(_build_vtile_uri(map_layer), map_layer.name)
+    return None
+
+GROUP_NAME_BASEMAPS = "Hintergrundkarten"
+
+def add_basemap_to_project(bm: MapLayer, visible: bool = False):
+    """Adds the basemap as a layer to the current project. 
+        Only the layer passed with visible=True will be visible."""
+    project = QgsProject.instance()
+    root = project.layerTreeRoot()
+
+    layer = create_map_layer(bm)
+    if layer is None:
+        logger.debug("Basemap layer could not be created: %s", bm.name)
+        return
+
+    project.addMapLayer(layer, False)
+
+    bm_group = root.findGroup(GROUP_NAME_BASEMAPS)
+    if bm_group is None:
+        bm_group = root.addGroup(GROUP_NAME_BASEMAPS)
+
+    group = bm_group.findGroup(bm.category)
+    if group is None:
+        group = bm_group.addGroup(bm.category)
+
+    group.addLayer(layer)
+
+    node = root.findLayer(layer.id())
+    if node is not None:
+        node.setItemVisibilityChecked(visible)
+        if visible:
+            node.setItemVisibilityCheckedParentRecursive(True)
+    logger.debug("Basemap layer %s added", bm.name)
+
+GROUP_NAME_ADD_LAYERS = "Zusatzkarten"
+
+def add_layer_to_project(map_layer: MapLayer):
+    """Adds the map layer to the current project."""
+    project = QgsProject.instance()
+    root = project.layerTreeRoot()
+
+    layer = create_map_layer(map_layer)
+    if layer is None:
+        logger.debug("Additional layer could not be created: %s", map_layer.name)
+        return
+
+    project.addMapLayer(layer, False)
+
+    add_layer_group = root.findGroup(GROUP_NAME_ADD_LAYERS)
+    if add_layer_group is None:
+        add_layer_group = root.insertGroup(0,GROUP_NAME_ADD_LAYERS)
+
+    group = add_layer_group.findGroup(map_layer.category)
+    if group is None:
+        group = add_layer_group.addGroup(map_layer.category)
+
+    group.addLayer(layer)
+
+    logger.debug("Additional layer %s added", map_layer.name)
+
+# ███████ ███████ ████████      ██████ ██████  ███████ 
+# ██      ██         ██        ██      ██   ██ ██      
+# ███████ █████      ██        ██      ██████  ███████ 
+#      ██ ██         ██        ██      ██   ██      ██ 
+# ███████ ███████    ██         ██████ ██   ██ ███████ 
+
+
+def set_project_crs(new_crs: int):
+    """Sets Coordinate Reference System (CRS) to the provided EPSG ID."""
+    crs = QgsCoordinateReferenceSystem.fromEpsgId(new_crs)
+    if not crs.isValid():
+        logger.error("Invalid CRS for EPSG:%d", new_crs)
+    QgsProject.instance().setCrs(crs)
+
+# ███████  ██████   ██████  ███    ███ 
+#    ███  ██    ██ ██    ██ ████  ████ 
+#   ███   ██    ██ ██    ██ ██ ████ ██ 
+#  ███    ██    ██ ██    ██ ██  ██  ██ 
+# ███████  ██████   ██████  ██      ██ 
+
+# Geographische Bounding Box Deutschland (WGS84): ~5.8°E–15.1°E, 47.2°N–55.1°N
+GERMANY_BBOX_WGS84 = QgsRectangle(5.8, 47.2, 15.1, 55.1)
+
+def zoom_to_germany():
+    """Zoomt die Kartenansicht auf Deutschland (transformiert in das Projekt-CRS)."""
+    try:
+        from qgis.utils import iface
+
+        if iface is None:
+            return False
+        canvas = iface.mapCanvas()
+        project = QgsProject.instance()
+        src = QgsCoordinateReferenceSystem("EPSG:4326")
+        dst = project.crs()
+        transform = QgsCoordinateTransform(src, dst, project)
+        extent = transform.transformBoundingBox(GERMANY_BBOX_WGS84)
+        canvas.setExtent(extent)
+        canvas.refresh()
+    except Exception as e:
+        logger.error("Error while zooming in: %s", e)
