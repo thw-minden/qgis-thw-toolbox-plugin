@@ -10,16 +10,18 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 from urllib.parse import quote
 
-
 from qgis.core import (
-    QgsProject, 
-    QgsMapLayer, 
-    QgsRasterLayer, 
-    QgsRectangle,
-    QgsVectorTileLayer,
+    QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
-    QgsCoordinateReferenceSystem
-    )
+    QgsLayerTree,
+    QgsMapLayer,
+    QgsProject,
+    QgsRasterLayer,
+    QgsRectangle,
+    QgsSettings,
+    QgsVectorTileLayer,
+)
+from qgis.gui import QgsBrowserDockWidget
 from qgis.PyQt.QtCore import QSettings
 from qgis.utils import iface
 
@@ -27,8 +29,10 @@ from ..logging_utils import get_logger
 
 logger = get_logger(__name__)
 
-def _q_settings() -> QSettings:
-    return QSettings()
+
+def _q_settings() -> QgsSettings:
+    return QgsSettings()
+
 
 @dataclass(frozen=True)
 class MapLayer:
@@ -51,6 +55,10 @@ class MapLayer:
 
 _CBM_WORLD = "Allg. Karten Weltweit"
 _CBM_AERIAL = "Luftbilder Weltweit"
+
+# ---------------------------------------------------------------------------
+# Basemap Definitions
+# ---------------------------------------------------------------------------
 
 BASEMAPS: tuple[MapLayer, ...] = (
     MapLayer(
@@ -201,6 +209,10 @@ def basemaps_by_category() -> dict[str, list[MapLayer]]:
     return {cat: groups[cat] for cat in order}
 
 
+# ---------------------------------------------------------------------------
+# Additional Layer Definitions
+# ---------------------------------------------------------------------------
+
 _CAL_THEMED = "Fachdaten"
 _CAL_AERIAL_STATE = "Luftbilder Länder"
 _CAL_DRONE = "Drohne"
@@ -208,10 +220,15 @@ _CAL_DRONE = "Drohne"
 ADD_LAYERS: tuple[MapLayer, ...] = (
     MapLayer(
         key="mgrs_grid",
-        name="MGRS/UMTRef Gitter",
+        name="MGRS/UTMRef Gitter",
         kind="wms",
-        url="https://geodata.meier-tkn.de/geoserver/mtkn/wms",
-        wms_params={"layers": "mtkn%3ATOP%2BUTMRef", "styles": "", "format": "image/png", "crs": "4326"},
+        url="https://geodata.meier-tkn.de/geoserver/ows?version=1.3.0",
+        wms_params={
+            "layers": "mtkn%3Amgrsgrid",
+            "styles": "",
+            "format": "image/png",
+            "crs": "EPSG:25832",
+        },
         description="Fügt beschriftetes UTM-Zonen-Gitter ein",
         category=_CAL_THEMED,
         default_active=True,
@@ -409,37 +426,175 @@ def additional_layers_by_category() -> dict[str, list[MapLayer]]:
     return {cat: groups[cat] for cat in order}
 
 
-#  █████  ██████  ██████      ███    ███  █████  ██████  ███████ 
-# ██   ██ ██   ██ ██   ██     ████  ████ ██   ██ ██   ██ ██      
-# ███████ ██   ██ ██   ██     ██ ████ ██ ███████ ██████  ███████ 
-# ██   ██ ██   ██ ██   ██     ██  ██  ██ ██   ██ ██           ██ 
-# ██   ██ ██████  ██████      ██      ██ ██   ██ ██      ███████
+# ---------------------------------------------------------------------------
+# Maps Helper Function
+# ---------------------------------------------------------------------------
+
 
 def qgis_connection_exists(basemap: MapLayer) -> bool:
-    """Checks if there is already a connection """
+    """Checks if the layer was already added to the QGIS browser."""
     s = _q_settings()
+
     if basemap.kind == "xyz":
-        return s.contains(f"qgis/connections-xyz/{basemap.name}/url")
-    if basemap.kind == "wms":
-        return s.contains(f"qgis/connections-wms/{basemap.name}/url")
-    if basemap.kind == "vtile":
-        return s.contains(f"qgis/connections-vector-tile/{basemap.name}/url")
+        group_path = "connections/xyz/items"
+    elif basemap.kind == "wms":
+        group_path = "connections/wms"
+    elif basemap.kind == "vtile":
+        group_path = "connections/vector-tile"
+    else:
+        return False
+
+    s.beginGroup(group_path)
+    connection_groups = s.childGroups()
+    s.endGroup()
+
+    return basemap.name in connection_groups
+
+
+def exists_in_project(basemap: MapLayer) -> bool:
+    """Checks if this layer is already somewhere in the project tree"""
+    project = QgsProject.instance()
+    root = project.layerTreeRoot()
+
+    # Walk through all groups and layers in the tree
+    def check_node(node):
+        if QgsLayerTree.isLayer(node):
+            layer = node.layer()
+            if layer.name() == basemap.name:
+                return True
+        elif QgsLayerTree.isGroup(node):
+            for child in node.children():
+                if check_node(child):
+                    return True
+        return False
+
+    return check_node(root)
+
+
+def is_visible_in_project(basemap: MapLayer) -> bool:
+    """Returns wheter the given map is visible in the LayerTree"""
+    project = QgsProject.instance()
+    root = project.layerTreeRoot()
+
+    # Find the layer by name
+    layer_to_find = None
+    for layer in project.mapLayers().values():
+        if layer.name() == basemap.name:
+            layer_to_find = layer
+            break
+
+    if layer_to_find is None:
+        logger.debug("Layer %s not found in project", basemap.name)
+        return False
+
+    # Find the layer node in the tree and check if it's visible
+    layer_node = root.findLayer(layer_to_find)
+    if layer_node is not None:
+        return layer_node.isVisible()
+
     return False
+
+
+def set_visibility_in_project(basemap: MapLayer, visible: bool):
+    """Sets the visibility in the project as provided."""
+    project = QgsProject.instance()
+    root = project.layerTreeRoot()
+
+    # Find the layer by name
+    layer_to_find = None
+    for layer in project.mapLayers().values():
+        if layer.name() == basemap.name:
+            layer_to_find = layer
+            break
+
+    if layer_to_find is None:
+        return
+    # Find the layer node in the tree and check if it's visible
+    layer_node = root.findLayer(layer_to_find)
+    if layer_node is not None:
+        layer_node.setItemVisibilityChecked(visible)
+
+
+def remove_layer_from_project(basemap: MapLayer):
+    """Removes the layer from the current project tree if it exists."""
+    print(f"Removal Process Called for {basemap.name}")
+    project = QgsProject.instance()
+    root = project.layerTreeRoot()
+
+    # Find the layer by name
+    layer_to_remove = None
+    for layer in project.mapLayers().values():
+        if layer.name() == basemap.name:
+            layer_to_remove = layer
+            break
+
+    if layer_to_remove is None:
+        logger.debug("Layer %s not found in project", basemap.name)
+        return False
+
+    # Find and remove from tree group
+    layer_node = root.findLayer(layer_to_remove)
+    if layer_node is not None:
+        layer_node.parent().removeChildNode(layer_node)
+
+    # Remove from project
+    project.removeMapLayer(layer_to_remove.id())
+
+
+def remove_from_qgis(basemap: MapLayer) -> bool:
+    """Removes the layer from the QGIS browser if it exists."""
+    s = _q_settings()
+
+    if basemap.kind == "xyz":
+        group_path = "connections/xyz/items"
+    elif basemap.kind == "wms":
+        group_path = "connections/wms"
+    elif basemap.kind == "vtile":
+        group_path = "connections/vector-tile"
+    else:
+        return False
+
+    s.beginGroup(group_path)
+    connection_groups = s.childGroups()
+    s.endGroup()
+
+    if basemap.name not in connection_groups:
+        return False
+
+    s.beginGroup(group_path)
+    s.beginGroup(basemap.name)
+    s.remove("")
+    s.endGroup()
+    s.endGroup()
+
+    reload_browser()
+    return True
+
 
 def reload_browser() -> None:
     """Bittet QGIS, die Browser-Connections neu einzulesen, damit neue
     Einträge sofort in der Browser-Ansicht erscheinen."""
     try:
-        if iface is not None and hasattr(iface, "reloadConnections"):
-            iface.reloadConnections()
+        if iface is not None:
+            # Find the browser dock widget and call refresh on it
+            main_window = iface.mainWindow()
+            if main_window is not None:
+                browser_widgets = main_window.findChildren(QgsBrowserDockWidget)
+                for browser_widget in browser_widgets:
+                    if browser_widget is not None:
+                        # Try multiple refresh methods
+                        browser_widget.refresh()
+                        break
     except Exception as e:
-        logger.debug("Browser reloadConnections failed: %s", e)
+        logger.debug("Browser refresh failed: %s", e)
+
 
 def install_qgis_connection(basemap: MapLayer) -> None:
     """Stellt eine projektübergreifende Verbindung im QGIS-Browser her."""
     s = _q_settings()
+
     if basemap.kind == "xyz":
-        base = f"qgis/connections-xyz/{basemap.name}"
+        base = f"connections/xyz/items/{basemap.name}"
         s.setValue(f"{base}/url", basemap.url)
         s.setValue(f"{base}/zmin", basemap.zmin)
         s.setValue(f"{base}/zmax", basemap.zmax)
@@ -447,9 +602,9 @@ def install_qgis_connection(basemap: MapLayer) -> None:
         s.setValue(f"{base}/username", "")
         s.setValue(f"{base}/password", "")
         s.setValue(f"{base}/referer", "")
-        s.setValue(f"{base}/tilePixelRatio", 0)
+        s.setValue(f"{base}/tile-pixel-ratio", 1)
     elif basemap.kind == "wms":
-        base = f"qgis/connections-wms/{basemap.name}"
+        base = f"connections/wms/{basemap.name}"
         s.setValue(f"{base}/url", basemap.url)
         s.setValue(f"{base}/ignoreAxisOrientation", False)
         s.setValue(f"{base}/invertAxisOrientation", False)
@@ -457,7 +612,7 @@ def install_qgis_connection(basemap: MapLayer) -> None:
         s.setValue(f"{base}/smoothPixmapTransform", False)
         s.setValue(f"{base}/dpiMode", 7)
     elif basemap.kind == "vtile":
-        base = f"qgis/connections-vector-tile/{basemap.name}"
+        base = f"connections/vector-tile/{basemap.name}"
         s.setValue(f"{base}/url", basemap.url)
         s.setValue(f"{base}/zmin", basemap.zmin)
         s.setValue(f"{base}/zmax", basemap.zmax)
@@ -467,7 +622,9 @@ def install_qgis_connection(basemap: MapLayer) -> None:
         s.setValue(f"{base}/username", "")
         s.setValue(f"{base}/password", "")
         s.setValue(f"{base}/referer", "")
+
     reload_browser()
+
 
 def _build_xyz_uri(map_layer: MapLayer) -> str:
     encoded = quote(map_layer.url, safe="")
@@ -495,12 +652,14 @@ def _build_wms_uri(map_layer: MapLayer) -> str:
     parts.append(f"url={encoded_url}")
     return "&".join(parts)
 
+
 def _build_vtile_uri(map_layer: MapLayer) -> str:
     encoded_url = quote(map_layer.url, safe="")
     encoded_style = quote(map_layer.style_url, safe="")
     return f"type=xyz&url={encoded_url}&zmin={map_layer.zmin}&zmax={map_layer.zmax}&styleUrl={encoded_style}"
 
-def create_map_layer(map_layer: MapLayer)->QgsMapLayer:
+
+def create_map_layer(map_layer: MapLayer) -> QgsMapLayer:
     """Adds the basemap to the current project"""
     if map_layer.kind == "xyz":
         return QgsRasterLayer(_build_xyz_uri(map_layer), map_layer.name, "wms")
@@ -510,11 +669,13 @@ def create_map_layer(map_layer: MapLayer)->QgsMapLayer:
         return QgsVectorTileLayer(_build_vtile_uri(map_layer), map_layer.name)
     return None
 
+
 GROUP_NAME_BASEMAPS = "Hintergrundkarten"
 
+
 def add_basemap_to_project(bm: MapLayer, visible: bool = False):
-    """Adds the basemap as a layer to the current project. 
-        Only the layer passed with visible=True will be visible."""
+    """Adds the basemap as a layer to the current project.
+    Only the layer passed with visible=True will be visible."""
     project = QgsProject.instance()
     root = project.layerTreeRoot()
 
@@ -542,10 +703,12 @@ def add_basemap_to_project(bm: MapLayer, visible: bool = False):
             node.setItemVisibilityCheckedParentRecursive(True)
     logger.debug("Basemap layer %s added", bm.name)
 
+
 GROUP_NAME_ADD_LAYERS = "Zusatzkarten"
 
-def add_layer_to_project(map_layer: MapLayer):
-    """Adds the map layer to the current project."""
+
+def add_layer_to_project(map_layer: MapLayer, visible: bool = False):
+    """Adds the map layer to the current project. Only the layer passed with visible=True will be visible."""
     project = QgsProject.instance()
     root = project.layerTreeRoot()
 
@@ -558,7 +721,7 @@ def add_layer_to_project(map_layer: MapLayer):
 
     add_layer_group = root.findGroup(GROUP_NAME_ADD_LAYERS)
     if add_layer_group is None:
-        add_layer_group = root.insertGroup(0,GROUP_NAME_ADD_LAYERS)
+        add_layer_group = root.insertGroup(0, GROUP_NAME_ADD_LAYERS)
 
     group = add_layer_group.findGroup(map_layer.category)
     if group is None:
@@ -566,13 +729,17 @@ def add_layer_to_project(map_layer: MapLayer):
 
     group.addLayer(layer)
 
+    node = root.findLayer(layer.id())
+    if node is not None:
+        node.setItemVisibilityChecked(visible)
+        if visible:
+            node.setItemVisibilityCheckedParentRecursive(True)
     logger.debug("Additional layer %s added", map_layer.name)
 
-# ███████ ███████ ████████      ██████ ██████  ███████ 
-# ██      ██         ██        ██      ██   ██ ██      
-# ███████ █████      ██        ██      ██████  ███████ 
-#      ██ ██         ██        ██      ██   ██      ██ 
-# ███████ ███████    ██         ██████ ██   ██ ███████ 
+
+# ---------------------------------------------------------------------------
+# Set CRS and Zoom Helper Functions
+# ---------------------------------------------------------------------------
 
 
 def set_project_crs(new_crs: int):
@@ -582,14 +749,17 @@ def set_project_crs(new_crs: int):
         logger.error("Invalid CRS for EPSG:%d", new_crs)
     QgsProject.instance().setCrs(crs)
 
-# ███████  ██████   ██████  ███    ███ 
-#    ███  ██    ██ ██    ██ ████  ████ 
-#   ███   ██    ██ ██    ██ ██ ████ ██ 
-#  ███    ██    ██ ██    ██ ██  ██  ██ 
-# ███████  ██████   ██████  ██      ██ 
+
+def get_project_crs() -> int:
+    """Gets the current Coordinate Reference System (CRS) of the project and returns the EPSG ID."""
+    crs = QgsProject.instance().crs()
+    authid = crs.authid()  # Returns something like "EPSG:25832"
+    return int(authid.split(":")[1])
+
 
 # Geographische Bounding Box Deutschland (WGS84): ~5.8°E–15.1°E, 47.2°N–55.1°N
 GERMANY_BBOX_WGS84 = QgsRectangle(5.8, 47.2, 15.1, 55.1)
+
 
 def zoom_to_germany():
     """Zoomt die Kartenansicht auf Deutschland (transformiert in das Projekt-CRS)."""
@@ -597,7 +767,7 @@ def zoom_to_germany():
         from qgis.utils import iface
 
         if iface is None:
-            return False
+            return
         canvas = iface.mapCanvas()
         project = QgsProject.instance()
         src = QgsCoordinateReferenceSystem("EPSG:4326")
