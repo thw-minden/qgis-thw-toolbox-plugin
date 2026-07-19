@@ -26,6 +26,7 @@ from qgis.PyQt.QtCore import QSettings
 from qgis.utils import iface
 
 from ..logging_utils import get_logger
+from .layer_functions import setup_thw_dienststellen
 
 logger = get_logger(__name__)
 
@@ -38,14 +39,16 @@ def _q_settings() -> QgsSettings:
 class MapLayer:
     key: str
     name: str
-    kind: str  # "xyz" | "wms" | "vtile"
+    kind: str  # "xyz" | "wms" | "vtile" | "fun"
     # XYZ: raw URL template like "https://.../{z}/{x}/{y}.png"
     # WMS: GetCapabilities URL + `wms_params` dict used for provider URI
     # VTILE: tile URL + style URL
-    url: str
+    # FUN: function reference
+    url: Optional[str] = ""
     zmin: int = 0
     zmax: int = 19
     style_url: str = ""
+    fun: Optional[Callable] = None
     wms_params: Optional[dict] = None
     description: str = ""
     category: str = "Deutschland"
@@ -241,6 +244,14 @@ ADD_LAYERS: tuple[MapLayer, ...] = (
         zmin=0,
         zmax=17,
         description="OpenInfraMap Overlay hebt Infrastrukturobjecte aus der OSM Datenbank hervor.",
+        category=_CAL_THEMED,
+    ),
+    MapLayer(
+        key="thwdst",
+        name="THW Dienststellen",
+        kind="fun",
+        fun=setup_thw_dienststellen,
+        description="Fügt taktische Zeichen an den THW Dienststellen hinzu.",
         category=_CAL_THEMED,
     ),
     MapLayer(
@@ -451,6 +462,8 @@ def qgis_connection_exists(basemap: MapLayer) -> bool:
         group_path = "connections/wms"
     elif basemap.kind == "vtile":
         group_path = "connections/vector-tile"
+    elif basemap.kind == "fun":
+        return False
     else:
         return False
 
@@ -561,6 +574,8 @@ def remove_from_qgis(basemap: MapLayer) -> bool:
         group_path = "connections/wms"
     elif basemap.kind == "vtile":
         group_path = "connections/vector-tile"
+    elif basemap.kind == "fun":
+        return False
     else:
         return False
 
@@ -632,7 +647,9 @@ def install_qgis_connection(basemap: MapLayer) -> None:
         s.setValue(f"{base}/username", "")
         s.setValue(f"{base}/password", "")
         s.setValue(f"{base}/referer", "")
-
+    elif basemap.kind == "fun":
+        # No connections for function based layers
+        return
     reload_browser()
 
 
@@ -677,6 +694,8 @@ def create_map_layer(map_layer: MapLayer) -> QgsMapLayer:
         return QgsRasterLayer(_build_wms_uri(map_layer), map_layer.name, "wms")
     if map_layer.kind == "vtile":
         return QgsVectorTileLayer(_build_vtile_uri(map_layer), map_layer.name)
+    if map_layer.kind == "fun":
+        return map_layer.fun(map_layer.name)
     return None
 
 
