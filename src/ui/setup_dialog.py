@@ -269,29 +269,45 @@ class BaseMapPage(QWizardPage):
 
         # Functions triggering on state change
         def toggle_active(checked: bool):
+            # visual + project visibility
             f = QFont(name_text.font())
             f.setBold(checked)
             name_text.setFont(f)
             set_visibility_in_project(basemap_layer, checked)
+
             if checked:
+                # when this basemap becomes active, the project checkbox must be on
                 add_project_btn.setChecked(True)
 
         def set_active():
+            # make this basemap active and ensure it's in the project
             active_btn.setChecked(True)
             add_project_btn.setChecked(True)
 
+        def remove_from_project_if_deselected():
+            # only remove if:
+            # - project checkbox is unchecked
+            # - and this basemap is not currently active
+            if add_project_btn.isChecked():
+                return
+            if active_btn.isChecked():
+                # keep it in the project while active
+                return
+            if exists_in_project(basemap_layer):
+                remove_layer_from_project(basemap_layer)
+
         def toggle_project():
+            # user intent: toggle project membership via third column / checkbox
+            # but: if active_btn is checked, never allow the project checkbox to go off
+            if active_btn.isChecked():
+                # force it to stay checked when active
+                add_project_btn.setChecked(True)
+                return
+
+            # normal toggle if not active
             new_state = not add_project_btn.isChecked()
             add_project_btn.setChecked(new_state)
             remove_from_project_if_deselected()
-
-        def remove_from_project_if_deselected():
-            if add_project_btn.isChecked():  # Trigger if deselected
-                return
-            if active_btn.isChecked():  # Do not remove when currently active
-                return
-            if exists_in_project(basemap_layer):  # And it is already added
-                remove_layer_from_project(basemap_layer)  # Then remove
 
         def toggle_qgis():
             new_state = not add_qgis_btn.isChecked()
@@ -306,11 +322,20 @@ class BaseMapPage(QWizardPage):
 
         # Connect these functions to the buttons
         active_btn.toggled.connect(toggle_active)
-        add_project_btn.toggled.connect(remove_from_project_if_deselected)
+
+        # project checkbox uses the same protection as toggle_project:
+        # if it gets toggled off while active, immediately force it back on.
+        def on_add_project_toggled(checked: bool):
+            if active_btn.isChecked() and not checked:
+                # re-check to keep consistency with active state
+                add_project_btn.setChecked(True)
+                return
+            remove_from_project_if_deselected()
+
+        add_project_btn.toggled.connect(on_add_project_toggled)
         add_qgis_btn.toggled.connect(remove_from_qgis_if_deselected)
 
         # Set the states according to the current project status
-        # Else, use the default values
         if qgis_connection_exists(basemap_layer):
             add_qgis_btn.setChecked(True)
         if exists_in_project(basemap_layer):
@@ -335,6 +360,7 @@ class BaseMapPage(QWizardPage):
         info_layout.setSpacing(0)
         info_layout.addWidget(name_text)
         info_layout.addWidget(description_text)
+        # clicking the first column also sets the basemap active and keeps project checkbox on
         first_column.clicked.connect(set_active)
         table.setCellWidget(row, 0, first_column)
 
@@ -351,6 +377,7 @@ class BaseMapPage(QWizardPage):
         project_layout.setContentsMargins(0, 0, 0, 0)
         project_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         project_layout.addWidget(add_project_btn)
+        # clicking the third column uses the guarded toggle_project
         third_column.clicked.connect(toggle_project)
         table.setCellWidget(row, 2, third_column)
 
@@ -458,58 +485,89 @@ class AddLayerPage(QWizardPage):
 
         name_text = QLabel(map_layer.name)
 
-        # Functions triggerin on state change
+        # Functions triggering on state change
+        def remove_visibility_if_deselected():
+            set_visibility_in_project(map_layer, active_btn.isChecked())
+
         def toggle_active():
             # Cannot take the checked keyword since also called by the ClickableCellWidget
             new_state = not active_btn.isChecked()
+
             f = QFont(name_text.font())
             f.setBold(new_state)
             name_text.setFont(f)
             active_btn.setChecked(new_state)
+
             if new_state:
+                # when layer becomes active, ensure it's in the project
                 add_project_btn.setChecked(True)
+
             remove_visibility_if_deselected()
 
-        def remove_visibility_if_deselected():
-            set_visibility_in_project(map_layer, active_btn.isChecked())
+        def remove_from_project_if_deselected():
+            if add_project_btn.isChecked():
+                return
+
+            # if project checkbox is off, layer cannot stay active
+            if active_btn.isChecked():
+                active_btn.setChecked(False)
+                remove_visibility_if_deselected()
+
+            if exists_in_project(map_layer):
+                remove_layer_from_project(map_layer)
 
         def toggle_project():
+            # if layer is active, keep project checkbox checked
+            if active_btn.isChecked():
+                add_project_btn.setChecked(True)
+                return
+
             new_state = not add_project_btn.isChecked()
             add_project_btn.setChecked(new_state)
             remove_from_project_if_deselected()
 
-        def remove_from_project_if_deselected():
-            if add_project_btn.isChecked():  # Trigger if deselected
-                return
-            active_btn.setChecked(False)
-            # Also remove when currently active
-            if exists_in_project(map_layer):  # It is already added
-                remove_layer_from_project(map_layer)  # Then Remove
-                active_btn.setChecked(False)  # Also set not active if not already set
-
-        def toggle_qgis():
-            new_state = not add_qgis_btn.isChecked()
-            add_qgis_btn.setChecked(new_state)
-            remove_from_qgis_if_deselected()
-
         def remove_from_qgis_if_deselected():
+            # for "fun" layers, ignore any attempt to change QGIS state
+            if getattr(map_layer, "kind", None) == "fun":
+                return
             if add_qgis_btn.isChecked():
                 return
             if qgis_connection_exists(map_layer):
                 remove_from_qgis(map_layer)
 
-        if qgis_connection_exists(map_layer):
+        def toggle_qgis():
+            # Completely ignore clicks for "fun" layers so ClickableCellWidget cannot toggle it
+            if getattr(map_layer, "kind", None) == "fun":
+                return
+
+            new_state = not add_qgis_btn.isChecked()
+            add_qgis_btn.setChecked(new_state)
+            remove_from_qgis_if_deselected()
+
+        # Disable add_qgis_btn if this is a "fun" layer
+        if getattr(map_layer, "kind", None) == "fun":
+            add_qgis_btn.setChecked(False)
+            add_qgis_btn.setDisabled(
+                True
+            )  # user cannot interact, and toggle_qgis will also ignore clicks.[web:44][web:40]
+        elif qgis_connection_exists(map_layer):
             add_qgis_btn.setChecked(True)
             add_qgis_btn.setDisabled(True)
 
         # Connect these functions to the buttons
         active_btn.toggled.connect(remove_visibility_if_deselected)
-        add_project_btn.toggled.connect(remove_from_project_if_deselected)
+
+        def on_add_project_toggled(checked: bool):
+            if active_btn.isChecked() and not checked:
+                add_project_btn.setChecked(True)
+                return
+            remove_from_project_if_deselected()
+
+        add_project_btn.toggled.connect(on_add_project_toggled)
         add_qgis_btn.toggled.connect(remove_from_qgis_if_deselected)
 
         # Set the states according to the current project status
-        # Else, use the default values
-        if qgis_connection_exists(map_layer):
+        if qgis_connection_exists(map_layer) and getattr(map_layer, "kind", None) != "fun":
             add_qgis_btn.setChecked(True)
         if exists_in_project(map_layer):
             add_project_btn.setChecked(True)
