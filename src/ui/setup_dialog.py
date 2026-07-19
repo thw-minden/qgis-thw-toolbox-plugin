@@ -2,7 +2,8 @@
 
 import os
 
-from qgis.core import QgsProject, QgsVectorLayer
+from qgis.core import Qgis, QgsProject, QgsVectorLayer
+from qgis.gui import QgsCollapsibleGroupBox
 from qgis.PyQt.QtCore import QCoreApplication, Qt, pyqtSignal
 from qgis.PyQt.QtGui import QFont, QPixmap
 from qgis.PyQt.QtWidgets import (
@@ -30,6 +31,7 @@ from qgis.PyQt.QtWidgets import (
     QWizard,
     QWizardPage,
 )
+from qgis.utils import iface
 
 from ..logging_utils import get_logger
 from ..tools import style_library
@@ -587,6 +589,125 @@ class AddLayerPage(QWizardPage):
 
 
 # ---------------------------------------------------------------------------
+# Final Page
+# ---------------------------------------------------------------------------
+
+
+class FinalSetupPage(QWizardPage):
+    def __init__(self, parent=None, plugin=None):
+        super().__init__(parent)
+        self._plugin = plugin
+        self.setTitle("Sonstige Einstellungen")
+        self.layout = QVBoxLayout(self)
+        self.layout.setSpacing(12)
+
+        # Collapsable Group Box for advanced options
+        self._advanced_box = QgsCollapsibleGroupBox(self)
+        self._advanced_box.setTitle("Erweiterte Optionen für Profis")
+        self._advanced_box.setCollapsed(True)  # Start collapsed
+
+        advanced_layout = QVBoxLayout(self._advanced_box)
+        self._styles_group = self._build_styles_group()
+        advanced_layout.addWidget(self._styles_group)
+
+        self.layout.addWidget(self._advanced_box)
+        self._refresh_styles()
+
+    def _log_message(self, msg: str, critical: bool = False) -> None:
+        try:
+            level = Qgis.MessageLevel.Critical if critical else Qgis.MessageLevel.Info
+            iface.messageBar().pushMessage("THW Setup", msg, level=level)
+        except Exception as e:
+            logger.debug("Konnte Setup-Meldung nicht anzeigen: %s", e)
+
+    @staticmethod
+    def _set_status(label: QLabel, ok: bool, text: str) -> None:
+        prefix = "✓" if ok else "✗"
+        color = _OK_COLOR if ok else _FAIL_COLOR
+        label.setText(f"<span style='color:{color}; font-weight:bold;'>{prefix}</span> {text}")
+
+    def _build_styles_group(self) -> QGroupBox:
+        box = QGroupBox("Symbolbibliothek")
+        vbox = QVBoxLayout()
+        vbox.setSpacing(6)
+
+        hint = QLabel("Macht die Taktischen Zeichen projektübergreifend im Symbol-Auswahldialog verfügbar.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: gray;")
+        vbox.addWidget(hint)
+
+        row = QHBoxLayout()
+        self._styles_status = QLabel()
+        self._styles_status.setWordWrap(True)
+        row.addWidget(self._styles_status, 1)
+
+        self._styles_remove_btn = QPushButton("Stile entfernen")
+        self._styles_remove_btn.clicked.connect(self._on_remove_styles)
+        row.addWidget(self._styles_remove_btn)
+
+        self._styles_import_btn = QPushButton("Stile importieren")
+        self._styles_import_btn.clicked.connect(self._on_import_styles)
+        row.addWidget(self._styles_import_btn)
+
+        vbox.addLayout(row)
+        box.setLayout(vbox)
+        return box
+
+    def _refresh_styles(self) -> None:
+        present, total = style_library.status(self._plugin.plugin_dir)
+        if total == 0:
+            self._set_status(self._styles_status, False, "Keine SVGs gefunden")
+            self._styles_import_btn.setEnabled(False)
+            self._styles_remove_btn.setEnabled(False)
+            return
+        if present == total:
+            self._set_status(self._styles_status, True, f"{present} von {total} Symbolen importiert")
+        elif present == 0:
+            self._set_status(self._styles_status, False, f"0 von {total} Symbolen importiert")
+        else:
+            self._set_status(self._styles_status, False, f"{present} von {total} Symbolen importiert")
+        self._styles_import_btn.setEnabled(True)
+        self._styles_remove_btn.setEnabled(present > 0)
+
+    def _on_import_styles(self) -> None:
+        _, total = style_library.status(self._plugin.plugin_dir)
+        if total == 0:
+            self._log_message("Keine SVGs gefunden.", critical=True)
+            return
+
+        progress = QProgressDialog("Symbole werden importiert …", "Abbrechen", 0, total, self)
+        progress.setWindowTitle("Stilbibliothek")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        QCoreApplication.processEvents()
+
+        def on_progress(done: int, total_count: int) -> bool:
+            progress.setValue(done)
+            progress.setLabelText(f"Symbole werden importiert … ({done}/{total_count})")
+            QCoreApplication.processEvents()
+            return not progress.wasCanceled()
+
+        written, total_done = style_library.import_styles(self._plugin.plugin_dir, on_progress=on_progress)
+        progress.close()
+
+        if progress.wasCanceled():
+            self._log_message(f"Import abgebrochen. {written} Symbole bereits geschrieben.")
+        else:
+            self._log_message(
+                f"{written} von {total_done} Symbolen zur Stilbibliothek hinzugefügt."
+                " Hinweis: Symbol-Auswahldialog ggf. neu öffnen.",
+                critical=written == 0,
+            )
+        self._refresh_styles()
+
+    def _on_remove_styles(self) -> None:
+        removed = style_library.remove_styles(self._plugin.plugin_dir)
+        self._log_message(f"{removed} Symbole aus der Stilbibliothek entfernt.")
+        self._refresh_styles()
+
+
+# ---------------------------------------------------------------------------
 # SetupDialog
 # ---------------------------------------------------------------------------
 class SetupDialog(QWizard):
@@ -603,11 +724,13 @@ class SetupDialog(QWizard):
         self.crs_pg = CrsPage(parent=self)
         self.base_map_pg = BaseMapPage(parent=self)
         self.add_layer_pg = AddLayerPage(parent=self)
+        self.final_setup_pg = FinalSetupPage(parent=self, plugin=self._plugin)
 
         self.addPage(self.start_pg)
         self.addPage(self.crs_pg)
         self.addPage(self.base_map_pg)
         self.addPage(self.add_layer_pg)
+        self.addPage(self.final_setup_pg)
 
         self._run_dialog()
 
@@ -662,8 +785,6 @@ class SetupDialog(QWizard):
                 self._plugin.activate()
 
             # Collapse all layers in the Layer view
-            from qgis.utils import iface
-
             iface.layerTreeView().collapseAll()
 
         else:
