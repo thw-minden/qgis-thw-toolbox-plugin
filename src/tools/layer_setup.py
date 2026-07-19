@@ -234,6 +234,16 @@ ADD_LAYERS: tuple[MapLayer, ...] = (
         default_active=True,
     ),
     MapLayer(
+        key="osminfra",
+        name="OpenInfrastructureMap",
+        kind="vtile",
+        url="https://openinframap.org/tiles/{z}/{x}/{y}.pbf",
+        zmin=0,
+        zmax=17,
+        description="OpenInfraMap Overlay hebt Infrastrukturobjecte aus der OSM Datenbank hervor.",
+        category=_CAL_THEMED,
+    ),
+    MapLayer(
         key="bfn_schutzgebiete",
         name="Schutzgebiete (BfN)",
         kind="wms",
