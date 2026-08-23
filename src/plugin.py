@@ -625,7 +625,7 @@ class THWToolboxPlugin:
         self.iface.messageBar().pushMessage("MGRS-Gitter", message, Qgis.MessageLevel.Success)
 
     def _open_setup_dialog(self):
-        SetupDialog(self, self.iface.mainWindow()).exec()
+        SetupDialog(self, self.iface.mainWindow())
 
     def _open_config_dialog(self):
         if ConfigDialog(self.settings, self.iface.mainWindow()).exec_and_apply():
