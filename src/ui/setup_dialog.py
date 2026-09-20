@@ -1,25 +1,20 @@
-"""Setup-Dialog: Projekt-Status prüfen + Basemaps installieren."""
+"""Setup-Assistent: Projekt Schritt für Schritt einrichten (CRS, Hintergrundkarte, Zusatzlagen)."""
 
 import os
+from typing import Optional
 
-from qgis.core import Qgis, QgsProject, QgsVectorLayer
 from qgis.gui import QgsCollapsibleGroupBox
-from qgis.PyQt.QtCore import QCoreApplication, Qt, pyqtSignal
+from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtGui import QFont, QPixmap
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
     QCheckBox,
     QDialog,
-    QDialogButtonBox,
     QFrame,
-    QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QMessageBox,
-    QProgressDialog,
     QPushButton,
     QRadioButton,
     QScrollArea,
@@ -34,9 +29,7 @@ from qgis.PyQt.QtWidgets import (
 from qgis.utils import iface
 
 from ..logging_utils import get_logger
-from ..tools import style_library
 from ..tools.layer_setup import (
-    BASEMAPS,
     MapLayer,
     add_basemap_to_project,
     add_layer_to_project,
@@ -50,15 +43,21 @@ from ..tools.layer_setup import (
     reload_browser,
     remove_from_qgis,
     remove_layer_from_project,
-    set_project_crs,
     set_visibility_in_project,
     zoom_to_germany,
 )
+from .setup_common import (
+    SETUP_MODE_CLASSIC,
+    SETUP_MODE_WIZARD,
+    UTM_ZONE_DEFAULT,
+    UTM_ZONES,
+    StyleLibraryGroup,
+    apply_project_crs,
+    get_setup_mode,
+    set_setup_mode,
+)
 
 logger = get_logger(__name__)
-
-_OK_COLOR = "#2e7d32"
-_FAIL_COLOR = "#c62828"
 
 
 class ClickableCellWidget(QWidget):
@@ -97,6 +96,18 @@ class StartPage(QWizardPage):
 
         self.layout.addStretch(1)
 
+        mode_row = QHBoxLayout()
+        self.wizard_default_cb = QCheckBox("Assistent künftig standardmäßig öffnen")
+        self.wizard_default_cb.setChecked(get_setup_mode() == SETUP_MODE_WIZARD)
+        self.wizard_default_cb.toggled.connect(
+            lambda checked: set_setup_mode(SETUP_MODE_WIZARD if checked else SETUP_MODE_CLASSIC)
+        )
+        mode_row.addWidget(self.wizard_default_cb, 1)
+
+        self.classic_btn = QPushButton("Zum klassischen Dialog wechseln")
+        mode_row.addWidget(self.classic_btn)
+        self.layout.addLayout(mode_row)
+
 
 # ---------------------------------------------------------------------------
 # CRS Page
@@ -104,12 +115,8 @@ class StartPage(QWizardPage):
 
 
 class CrsPage(QWizardPage):
-    EPSGS = {
-        "31* Nord": 25831,
-        "32* Nord": 25832,
-        "33* Nord": 25833,
-    }
-    EPSG_DEFAULT = "32* Nord"
+    EPSGS = UTM_ZONES
+    EPSG_DEFAULT = UTM_ZONE_DEFAULT
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -174,7 +181,7 @@ class CrsPage(QWizardPage):
         details = QWidget()
         details_layout = QVBoxLayout(details)
         details_text = QLabel(
-            "Durch Deutschland verlaufen die 3 Zonen 31N bis 32N die hier zu Auswahl stehen. Für Einsätze im Ausland ist unten rechts in QGIS manuell das korrekte Koordinatenreferenzsystem auszuwählen.<br/><br/>"
+            "Durch Deutschland verlaufen die 3 Zonen 31N bis 33N, die hier zur Auswahl stehen. Für Einsätze im Ausland ist unten rechts in QGIS manuell das korrekte Koordinatenreferenzsystem auszuwählen.<br/><br/>"
             "Was ist UTM?<br/>"
             "Die runde Erde muss auf eine flache Karte projiziert werden. Dafür werden unterschiedliche Systeme verwendet wovon UTM ein im begrenzten Gebiet sehr genaues Verfahren darstellt. Allerdings muss für die UTM-Projektion der passende Ost-West-Abschnitt gewählt werden, um die Fehler durch die Projektion niedrig zu halten."
         )
@@ -185,10 +192,12 @@ class CrsPage(QWizardPage):
         self.layout.addWidget(details_box)
 
     def get_selected_epsg(self) -> int:
-        epsg_str = self.zone_group.checkedButton().text()
+        checked = self.zone_group.checkedButton()
+        epsg_str = checked.text() if checked is not None else self.EPSG_DEFAULT
         epsg = self.EPSGS.get(epsg_str)
         if epsg is None:
-            logger.warning(f"Unsupported zone {epsg_str} received on CRS selection.")
+            logger.warning("Unsupported zone %s received on CRS selection, falling back to default.", epsg_str)
+            epsg = self.EPSGS[self.EPSG_DEFAULT]
         return int(epsg)
 
 
@@ -665,116 +674,30 @@ class FinalSetupPage(QWizardPage):
         self._advanced_box.setCollapsed(True)  # Start collapsed
 
         advanced_layout = QVBoxLayout(self._advanced_box)
-        self._styles_group = self._build_styles_group()
+        self._styles_group = StyleLibraryGroup(plugin, self)
         advanced_layout.addWidget(self._styles_group)
 
         self.layout.addWidget(self._advanced_box)
-        self._refresh_styles()
-
-    def _log_message(self, msg: str, critical: bool = False) -> None:
-        try:
-            level = Qgis.MessageLevel.Critical if critical else Qgis.MessageLevel.Info
-            iface.messageBar().pushMessage("THW Setup", msg, level=level)
-        except Exception as e:
-            logger.debug("Konnte Setup-Meldung nicht anzeigen: %s", e)
-
-    @staticmethod
-    def _set_status(label: QLabel, ok: bool, text: str) -> None:
-        prefix = "✓" if ok else "✗"
-        color = _OK_COLOR if ok else _FAIL_COLOR
-        label.setText(f"<span style='color:{color}; font-weight:bold;'>{prefix}</span> {text}")
-
-    def _build_styles_group(self) -> QGroupBox:
-        box = QGroupBox("Symbolbibliothek")
-        vbox = QVBoxLayout()
-        vbox.setSpacing(6)
-
-        hint = QLabel("Macht die Taktischen Zeichen projektübergreifend im Symbol-Auswahldialog verfügbar.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: gray;")
-        vbox.addWidget(hint)
-
-        row = QHBoxLayout()
-        self._styles_status = QLabel()
-        self._styles_status.setWordWrap(True)
-        row.addWidget(self._styles_status, 1)
-
-        self._styles_remove_btn = QPushButton("Stile entfernen")
-        self._styles_remove_btn.clicked.connect(self._on_remove_styles)
-        row.addWidget(self._styles_remove_btn)
-
-        self._styles_import_btn = QPushButton("Stile importieren")
-        self._styles_import_btn.clicked.connect(self._on_import_styles)
-        row.addWidget(self._styles_import_btn)
-
-        vbox.addLayout(row)
-        box.setLayout(vbox)
-        return box
-
-    def _refresh_styles(self) -> None:
-        present, total = style_library.status(self._plugin.plugin_dir)
-        if total == 0:
-            self._set_status(self._styles_status, False, "Keine SVGs gefunden")
-            self._styles_import_btn.setEnabled(False)
-            self._styles_remove_btn.setEnabled(False)
-            return
-        if present == total:
-            self._set_status(self._styles_status, True, f"{present} von {total} Symbolen importiert")
-        elif present == 0:
-            self._set_status(self._styles_status, False, f"0 von {total} Symbolen importiert")
-        else:
-            self._set_status(self._styles_status, False, f"{present} von {total} Symbolen importiert")
-        self._styles_import_btn.setEnabled(True)
-        self._styles_remove_btn.setEnabled(present > 0)
-
-    def _on_import_styles(self) -> None:
-        _, total = style_library.status(self._plugin.plugin_dir)
-        if total == 0:
-            self._log_message("Keine SVGs gefunden.", critical=True)
-            return
-
-        progress = QProgressDialog("Symbole werden importiert …", "Abbrechen", 0, total, self)
-        progress.setWindowTitle("Stilbibliothek")
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-        QCoreApplication.processEvents()
-
-        def on_progress(done: int, total_count: int) -> bool:
-            progress.setValue(done)
-            progress.setLabelText(f"Symbole werden importiert … ({done}/{total_count})")
-            QCoreApplication.processEvents()
-            return not progress.wasCanceled()
-
-        written, total_done = style_library.import_styles(self._plugin.plugin_dir, on_progress=on_progress)
-        progress.close()
-
-        if progress.wasCanceled():
-            self._log_message(f"Import abgebrochen. {written} Symbole bereits geschrieben.")
-        else:
-            self._log_message(
-                f"{written} von {total_done} Symbolen zur Stilbibliothek hinzugefügt."
-                " Hinweis: Symbol-Auswahldialog ggf. neu öffnen.",
-                critical=written == 0,
-            )
-        self._refresh_styles()
-
-    def _on_remove_styles(self) -> None:
-        removed = style_library.remove_styles(self._plugin.plugin_dir)
-        self._log_message(f"{removed} Symbole aus der Stilbibliothek entfernt.")
-        self._refresh_styles()
+        self.layout.addStretch(1)
 
 
 # ---------------------------------------------------------------------------
 # SetupDialog
 # ---------------------------------------------------------------------------
 class SetupDialog(QWizard):
-    """Wizard für Projekt-Setup und Basiskarten-Installation."""
+    """Wizard für Projekt-Setup und Karten-Installation.
+
+    ``switch_to`` ist nach dem Schließen gesetzt, wenn der Nutzer zum klassischen Dialog wechseln möchte.
+    """
 
     def __init__(self, plugin, parent=None):
         super().__init__(parent)
         self._plugin = plugin
+        self.switch_to: Optional[str] = None
         self.setWindowTitle("THW Toolbox Setup")
+        # Der Windows-Aero-Stil zeichnet die Seiten immer weiß, unabhängig vom QGIS-Theme.
+        # ModernStyle verwendet die Palette der Anwendung und bleibt so auch im Dark-Theme lesbar.
+        self.setWizardStyle(QWizard.WizardStyle.ModernStyle)
         self.resize(620, 640)
 
         # Page builder calls
@@ -790,60 +713,65 @@ class SetupDialog(QWizard):
         self.addPage(self.add_layer_pg)
         self.addPage(self.final_setup_pg)
 
-        self._run_dialog()
+        self.start_pg.classic_btn.clicked.connect(self._on_switch_to_classic)
 
-    def _run_dialog(self):
+    def _on_switch_to_classic(self) -> None:
+        self.switch_to = SETUP_MODE_CLASSIC
+        self.reject()
+
+    def run(self) -> bool:
+        """Zeigt den Assistenten modal an und wendet bei "Fertig" die Auswahl auf das Projekt an.
+
+        Returns True if the wizard was completed, False if cancelled.
+        """
         logger.debug("Setup-Dialog started.")
         result = self.exec()
 
-        if result == QDialog.DialogCode.Accepted:
-            logger.debug("Dialog completed")
-            # 1. Add the static basemap connections to the QGIS browser
-            for bm in self.base_map_pg.get_qgis_bms():
-                if qgis_connection_exists(bm):
-                    logger.debug("Base Map %s already added to QGIS", bm.name)
-                else:
-                    logger.debug("Adding Basemap %s as permanent connection", bm.name)
-                    install_qgis_connection(bm)
-
-            # 2. Add the basemaps to the project
-            for bm in self.base_map_pg.get_project_bms():
-                if exists_in_project(bm):
-                    continue
-                if bm == self.base_map_pg.get_active_bm():
-                    add_basemap_to_project(bm, visible=True)
-                else:
-                    add_basemap_to_project(bm)
-
-            # 3. Add the additional layer connections to the QGIS browser
-            for map_layer in self.add_layer_pg.get_qgis_layers():
-                if qgis_connection_exists(map_layer):
-                    logger.debug("Additional Layer %s already added to QGIS", bm.name)
-                else:
-                    logger.debug("Adding Additional Layer %s as permanent connection", bm.name)
-                    install_qgis_connection(map_layer)
-            reload_browser()
-
-            # 4. Add the additional layers to the project
-            for map_layer in self.add_layer_pg.get_project_layers():
-                if exists_in_project(map_layer):
-                    continue
-                if map_layer in self.add_layer_pg.get_active_layers():
-                    add_layer_to_project(map_layer, visible=True)
-                else:
-                    add_layer_to_project(map_layer)
-
-            # 5. Set the CRS
-            set_project_crs(self.crs_pg.get_selected_epsg())
-
-            # 6. Zoom to Germany if the setup is run the first time
-            if not self._plugin.action.isChecked():
-                zoom_to_germany()
-                # 7. Activate the Plugin if not already done
-                self._plugin.activate()
-
-            # Collapse all layers in the Layer view
-            iface.layerTreeView().collapseAll()
-
-        else:
+        if result != QDialog.DialogCode.Accepted:
             logger.debug("Setup Canceled, No action")
+            return False
+
+        logger.debug("Dialog completed")
+        # 0. Set the CRS first so that all following steps (layers, zoom) use the final project CRS
+        apply_project_crs(self._plugin, self.parentWidget(), self.crs_pg.get_selected_epsg())
+
+        # 1. Add the static basemap connections to the QGIS browser
+        for bm in self.base_map_pg.get_qgis_bms():
+            if qgis_connection_exists(bm):
+                logger.debug("Base Map %s already added to QGIS", bm.name)
+            else:
+                logger.debug("Adding Basemap %s as permanent connection", bm.name)
+                install_qgis_connection(bm)
+
+        # 2. Add the basemaps to the project
+        active_bm = self.base_map_pg.get_active_bm()
+        for bm in self.base_map_pg.get_project_bms():
+            if exists_in_project(bm):
+                continue
+            add_basemap_to_project(bm, visible=bm == active_bm)
+
+        # 3. Add the additional layer connections to the QGIS browser
+        for map_layer in self.add_layer_pg.get_qgis_layers():
+            if qgis_connection_exists(map_layer):
+                logger.debug("Additional Layer %s already added to QGIS", map_layer.name)
+            else:
+                logger.debug("Adding Additional Layer %s as permanent connection", map_layer.name)
+                install_qgis_connection(map_layer)
+        reload_browser()
+
+        # 4. Add the additional layers to the project
+        active_layers = self.add_layer_pg.get_active_layers()
+        for map_layer in self.add_layer_pg.get_project_layers():
+            if exists_in_project(map_layer):
+                continue
+            add_layer_to_project(map_layer, visible=map_layer in active_layers)
+
+        # 5. Zoom to Germany if the setup is run the first time
+        if not self._plugin.action.isChecked():
+            zoom_to_germany()
+            # 6. Activate the Plugin if not already done
+            self._plugin.activate()
+
+        # Collapse all layers in the Layer view
+        iface.layerTreeView().collapseAll()
+        return True

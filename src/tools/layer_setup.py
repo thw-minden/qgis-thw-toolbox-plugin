@@ -22,7 +22,6 @@ from qgis.core import (
     QgsVectorTileLayer,
 )
 from qgis.gui import QgsBrowserDockWidget
-from qgis.PyQt.QtCore import QSettings
 from qgis.utils import iface
 
 from ..logging_utils import get_logger
@@ -540,7 +539,7 @@ def set_visibility_in_project(basemap: MapLayer, visible: bool):
 
 def remove_layer_from_project(basemap: MapLayer):
     """Removes the layer from the current project tree if it exists."""
-    print(f"Removal Process Called for {basemap.name}")
+    logger.debug("Removing layer %s from project", basemap.name)
     project = QgsProject.instance()
     root = project.layerTreeRoot()
 
@@ -771,19 +770,26 @@ def add_layer_to_project(map_layer: MapLayer, visible: bool = False):
 # ---------------------------------------------------------------------------
 
 
-def set_project_crs(new_crs: int):
-    """Sets Coordinate Reference System (CRS) to the provided EPSG ID."""
+def set_project_crs(new_crs: int) -> bool:
+    """Sets Coordinate Reference System (CRS) to the provided EPSG ID. Returns False if the CRS is invalid."""
     crs = QgsCoordinateReferenceSystem.fromEpsgId(new_crs)
     if not crs.isValid():
         logger.error("Invalid CRS for EPSG:%d", new_crs)
+        return False
     QgsProject.instance().setCrs(crs)
+    return True
 
 
-def get_project_crs() -> int:
-    """Gets the current Coordinate Reference System (CRS) of the project and returns the EPSG ID."""
+def get_project_crs() -> Optional[int]:
+    """Returns the EPSG ID of the current project CRS, or None if the CRS is unset or not an EPSG code."""
     crs = QgsProject.instance().crs()
-    authid = crs.authid()  # Returns something like "EPSG:25832"
-    return int(authid.split(":")[1])
+    if not crs.isValid():
+        return None
+    authid = crs.authid()  # Returns something like "EPSG:25832" (or "USER:100000" for custom CRS)
+    prefix, _, code = authid.partition(":")
+    if prefix.upper() != "EPSG" or not code.isdigit():
+        return None
+    return int(code)
 
 
 # Geographische Bounding Box Deutschland (WGS84): ~5.8°E–15.1°E, 47.2°N–55.1°N

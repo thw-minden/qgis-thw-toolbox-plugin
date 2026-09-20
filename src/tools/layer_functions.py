@@ -6,13 +6,9 @@ import os
 
 from qgis.core import (
     Qgis,
-    QgsLayerTreeGroup,
     QgsMarkerSymbol,
     QgsPalLayerSettings,
-    QgsProject,
     QgsProperty,
-    QgsRasterLayer,
-    QgsRectangle,
     QgsRuleBasedRenderer,
     QgsSvgMarkerSymbolLayer,
     QgsSymbolLayer,
@@ -23,6 +19,10 @@ from qgis.core import (
     QgsVectorLayerSimpleLabeling,
 )
 from qgis.PyQt.QtGui import QColor
+
+from ..logging_utils import get_logger
+
+logger = get_logger(__name__)
 
 
 def setup_thw_dienststellen(label: str) -> QgsVectorLayer:
@@ -37,7 +37,7 @@ def setup_thw_dienststellen(label: str) -> QgsVectorLayer:
         ("Leitung", os.path.join(plugin_dir, "svgs", "THW_Gebäude", "Leitung.svg")),
     ]
 
-    print("JSON path:", dst_json)
+    logger.debug("Loading THW Dienststellen from %s", dst_json)
     layer = QgsVectorLayer(str(dst_json), label, "ogr")
     if not layer.isValid():
         raise ValueError(f"{label} layer invalid: {layer.error().summary()}")
@@ -112,7 +112,7 @@ def setup_thw_dienststellen(label: str) -> QgsVectorLayer:
                     QgsPalLayerSettings.BottomMiddle if hasattr(QgsPalLayerSettings, "BottomMiddle") else 0
                 )
     except Exception as e:
-        print(f"DEBUG: Position festsetzen fehlgeschlagen: {e}")
+        logger.debug("Label placement could not be set: %s", e)
 
     try:
         # Offset-Werte in Points , Abstand abhängig von der Größe des Zeichens
@@ -121,7 +121,7 @@ def setup_thw_dienststellen(label: str) -> QgsVectorLayer:
         size_property = QgsProperty.fromExpression("array(0,5)")
         label_settings.dataDefinedProperties().setProperty(QgsPalLayerSettings.Property.OffsetXY, size_property)
     except Exception as e:
-        print(f"DEBUG: Fehler bei der Festsetzung der Position: {e}")
+        logger.debug("Label offset could not be set: %s", e)
 
     label_settings.dataDefinedProperties().setProperty(QgsPalLayerSettings.Property.ScaleVisibility, True)
     label_settings.dataDefinedProperties().setProperty(QgsPalLayerSettings.Property.MinimumScale, 5000)

@@ -41,7 +41,9 @@ from .tools.identify_tool import IdentifyTool
 from .tools.move_tool import MoveTool
 from .ui.config_dialog import ConfigDialog
 from .ui.nominatim_search_dialog import NominatimSearchDialog
+from .ui.setup_common import SETUP_MODE_WIZARD, get_setup_mode
 from .ui.setup_dialog import SetupDialog
+from .ui.setup_dialog_classic import ClassicSetupDialog
 from .ui.svg_dock import SvgDock
 from .ui.template_dialog import TemplateDialog
 from .util.temp_files import cleanup_temp_files
@@ -624,8 +626,21 @@ class THWToolboxPlugin:
         QgsProject.instance().addMapLayer(layer)
         self.iface.messageBar().pushMessage("MGRS-Gitter", message, Qgis.MessageLevel.Success)
 
-    def _open_setup_dialog(self):
-        SetupDialog(self, self.iface.mainWindow())
+    def _open_setup_dialog(self, mode: str | None = None):
+        """Öffnet den Setup-Dialog im gewählten Modus (Standard: Einstellung aus QgsSettings, Assistent).
+
+        Beide Dialoge können einen Wechsel in den jeweils anderen Modus anfordern (``switch_to``).
+        """
+        mode = mode or get_setup_mode()
+        parent = self.iface.mainWindow()
+        if mode == SETUP_MODE_WIZARD:
+            dialog = SetupDialog(self, parent)
+            dialog.run()
+        else:
+            dialog = ClassicSetupDialog(self, parent)
+            dialog.exec()
+        if dialog.switch_to and dialog.switch_to != mode:
+            self._open_setup_dialog(dialog.switch_to)
 
     def _open_config_dialog(self):
         if ConfigDialog(self.settings, self.iface.mainWindow()).exec_and_apply():
