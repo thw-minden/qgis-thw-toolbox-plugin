@@ -51,7 +51,6 @@ def apply_renderer(layer: QgsVectorLayer, plugin_dir: str) -> None:
     has_rotation = "rotation" in field_names
     has_origin_x = "origin_x" in field_names
     has_origin_y = "origin_y" in field_names
-    has_unique_id = "unique_id" in field_names
 
     categories = []
     for feat in layer.getFeatures():
@@ -65,7 +64,7 @@ def apply_renderer(layer: QgsVectorLayer, plugin_dir: str) -> None:
             origin_y=_origin_or_default(feat, "origin_y", has_origin_y),
         )
 
-        unique_id = feat.attribute("unique_id") if has_unique_id else str(feat.id())
+        unique_id = category_value(feat)
         svg_path = feat.attribute("svg_path")
         feature_name = feat.attribute("name") or os.path.basename(svg_path)
         display_name = os.path.splitext(feature_name)[0]
@@ -77,6 +76,59 @@ def apply_renderer(layer: QgsVectorLayer, plugin_dir: str) -> None:
         layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol.createSimple({})))
 
     layer.triggerRepaint()
+
+
+def category_value(feat) -> str:
+    """The renderer category key of a feature."""
+    if feat.fields().indexFromName("unique_id") >= 0:
+        return feat.attribute("unique_id")
+    return str(feat.id())
+
+
+def feature_symbol(layer: QgsVectorLayer, unique_id: str) -> QgsMarkerSymbol | None:
+    """Return a copy of the symbol the renderer currently draws for `unique_id`."""
+    renderer = layer.renderer()
+    if not isinstance(renderer, QgsCategorizedSymbolRenderer):
+        return None
+    idx = renderer.categoryIndexForValue(unique_id)
+    if idx < 0:
+        return None
+    # Keep the list alive: each category owns its symbol.
+    categories = renderer.categories()
+    return categories[idx].symbol().clone()
+
+
+def replace_feature_symbol(layer: QgsVectorLayer, unique_id: str, symbol: QgsMarkerSymbol) -> None:
+    """Swap one feature's symbol in place, without rebuilding the whole renderer.
+
+    Cheap enough for live feedback while dragging; the attribute write on
+    release goes through the regular `apply_renderer` rebuild.
+    """
+    renderer = layer.renderer()
+    if not isinstance(renderer, QgsCategorizedSymbolRenderer):
+        return
+    idx = renderer.categoryIndexForValue(unique_id)
+    if idx < 0:
+        return
+    renderer.updateCategorySymbol(idx, symbol.clone())
+    layer.triggerRepaint()
+
+
+def svg_symbol_layer(symbol: QgsMarkerSymbol) -> QgsSvgMarkerSymbolLayer | None:
+    for symbol_layer in symbol.symbolLayers():
+        if symbol_layer.layerType() == "SvgMarker":
+            return symbol_layer
+    return None
+
+
+def set_symbol_size_and_rotation(symbol: QgsMarkerSymbol, size: float, rotation: float) -> None:
+    """Apply `size`/`rotation` the same way `_build_feature_symbol` does."""
+    for symbol_layer in symbol.symbolLayers():
+        if symbol_layer.layerType() == "SvgMarker":
+            symbol_layer.setSize(size)
+            symbol_layer.setAngle(rotation)
+        else:
+            symbol_layer.setSize(size * _BG_SCALE)
 
 
 def _origin_or_default(feat, field_name: str, present: bool) -> int:

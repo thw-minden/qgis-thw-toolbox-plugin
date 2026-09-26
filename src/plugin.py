@@ -219,6 +219,7 @@ class THWToolboxPlugin:
             self.canvas.unsetMapTool(self.ident_tool)
         if self.move_tool:
             self.canvas.unsetMapTool(self.move_tool)
+            self.move_tool.dispose()
         if self.action:
             self.iface.removeToolBarIcon(self.action)
             self.iface.removePluginMenu("THW Toolbox", self.action)
@@ -387,6 +388,7 @@ class THWToolboxPlugin:
             if self.ident_tool:
                 self.ident_tool.layer = None
             if self.move_tool:
+                self.move_tool.clear_selection()
                 self.move_tool.layer = None
 
             was_active = self.action is not None and self.action.isChecked()
@@ -502,6 +504,10 @@ class THWToolboxPlugin:
         # Labeling auch aktualisieren
         self._setup_labeling(self.layer)
 
+        # Auswahlrahmen an geänderte Größe/Rotation/Ankerpunkt anpassen
+        if self.move_tool:
+            self.move_tool.refresh_selection()
+
     def _on_project_save(self):
         """Speichert Settings und delegiert das Verschieben des Layers an den LayerManager."""
         if not self.layer or not self.layer_manager:
@@ -524,6 +530,8 @@ class THWToolboxPlugin:
         if hasattr(self, "ident_tool") and self.ident_tool:
             self.ident_tool.layer = self.layer
         if hasattr(self, "move_tool") and self.move_tool:
+            # Feature-IDs gelten im neuen Layer nicht mehr
+            self.move_tool.clear_selection()
             self.move_tool.layer = self.layer
 
     def _place_feature(self, svg_path, point):
@@ -554,6 +562,7 @@ class THWToolboxPlugin:
             self.ident_tool.feature_dock.show_feature(new_feature, self)
         if self.move_tool:
             self.move_tool.set_move_mode(True)
+            self.move_tool.select_feature(new_feature.id())
 
     # ------------------------------------------------------------------
     # Public callbacks (called from FeatureDock with legacy method names)

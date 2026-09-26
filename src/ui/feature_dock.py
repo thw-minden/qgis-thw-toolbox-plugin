@@ -360,7 +360,11 @@ class FeatureDock(QDockWidget):
         except Exception:
             rotation = 0.0
         rotation = ((float(rotation) + 180.0) % 360.0) - 180.0
+        # Signale blockieren: sonst würde on_rotation_change (noch verbunden)
+        # frei gedrehte Werte auf 10°-Schritte runden und zurückschreiben.
+        self.rotation_slider.blockSignals(True)
         self.rotation_slider.setValue(int(rotation))
+        self.rotation_slider.blockSignals(False)
         self.rotation_value_label.setText(f"{int(rotation)}°")
 
         # Ankerpunkt setzen
