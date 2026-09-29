@@ -732,8 +732,6 @@ class SetupDialog(QWizard):
             return False
 
         logger.debug("Dialog completed")
-        # 0. Set the CRS first so that all following steps (layers, zoom) use the final project CRS
-        apply_project_crs(self._plugin, self.parentWidget(), self.crs_pg.get_selected_epsg())
 
         # 1. Add the static basemap connections to the QGIS browser
         for bm in self.base_map_pg.get_qgis_bms():
@@ -766,7 +764,10 @@ class SetupDialog(QWizard):
                 continue
             add_layer_to_project(map_layer, visible=map_layer in active_layers)
 
-        # 5. Zoom to Germany if the setup is run the first time
+        # 5. Set the CRS after the addition of the maps. If set too early, a map crs might change the project setting.
+        apply_project_crs(self._plugin, self.parentWidget(), self.crs_pg.get_selected_epsg())
+
+        # 6. Zoom to Germany if the setup is run the first time
         if not self._plugin.action.isChecked():
             zoom_to_germany()
             # 6. Activate the Plugin if not already done
