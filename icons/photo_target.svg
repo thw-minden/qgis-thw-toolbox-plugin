@@ -1,0 +1,18 @@
+<svg width="597" height="597" viewBox="0 0 597 597" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M218 118C207 118 197 125 193 135L176 172H112C83 172 60 195 60 224V438C60 467 83 490 112 490H485C514 490 537 467 537 438V224C537 195 514 172 485 172H421L404 135C400 125 390 118 379 118H218Z" fill="url(#paint0_radial_photo)"/>
+<circle cx="298.5" cy="325" r="118" fill="url(#paint1_linear_photo)"/>
+<circle cx="298.5" cy="325" r="72" stroke="#FFFFFF" stroke-width="18"/>
+<path d="M298.5 222V282M298.5 368V428M195.5 325H255.5M341.5 325H401.5" stroke="#FFFFFF" stroke-width="18" stroke-linecap="round"/>
+<circle cx="298.5" cy="325" r="14" fill="#E53935"/>
+<rect x="436" y="208" width="54" height="30" rx="10" fill="#A3FFFF"/>
+<defs>
+<radialGradient id="paint0_radial_photo" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(130.948 69.0763) scale(457.33 458.201)">
+<stop stop-color="#6FCEFC"/>
+<stop offset="1" stop-color="#167CF7"/>
+</radialGradient>
+<linearGradient id="paint1_linear_photo" x1="380" y1="207" x2="217" y2="443" gradientUnits="userSpaceOnUse">
+<stop stop-color="#2471CA"/>
+<stop offset="1" stop-color="#123864"/>
+</linearGradient>
+</defs>
+</svg>

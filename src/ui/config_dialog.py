@@ -50,8 +50,9 @@ class ConfigDialog(QDialog):
         box = QGroupBox("Einstellungen für neue Zeichen")
         form = QFormLayout()
 
+        # The stored setting is inverted (True = fixed screen size), see renderer.size_unit
         self._cb_scale = QCheckBox()
-        self._cb_scale.setChecked(self._settings.new_icon_scaling_with_map)
+        self._cb_scale.setChecked(not self._settings.new_icon_scaling_with_map)
         form.addRow("Neue Zeichen mit Karte skalieren", self._cb_scale)
 
         self._cb_fixed_size = QCheckBox()
@@ -105,7 +106,7 @@ class ConfigDialog(QDialog):
         return box
 
     def _apply_to_settings(self) -> None:
-        self._settings.new_icon_scaling_with_map = self._cb_scale.isChecked()
+        self._settings.new_icon_scaling_with_map = not self._cb_scale.isChecked()
         self._settings.new_icon_fixed_size = self._cb_fixed_size.isChecked()
         self._settings.new_icon_size = self._spin_icon_size.value()
         self._settings.new_icon_crs = self._dropdown_crs.currentText()

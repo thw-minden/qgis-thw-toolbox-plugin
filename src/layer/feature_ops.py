@@ -2,7 +2,15 @@ import os
 import uuid
 from collections.abc import Callable
 
-from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsPointXY, QgsVectorLayer
+from qgis.core import (
+    QgsFeature,
+    QgsField,
+    QgsGeometry,
+    QgsPointXY,
+    QgsRenderContext,
+    QgsUnitTypes,
+    QgsVectorLayer,
+)
 
 from .fields import field_types_dict
 
@@ -11,6 +19,8 @@ _BASE_SIZE = 30.0
 # Bounds for the adaptive zoom-aware initial size
 _ADAPTIVE_MIN = 50.0
 _ADAPTIVE_MAX = 500.0
+# Smallest size a unit conversion may produce (matches the dock's spinbox minimum)
+_MIN_SIZE = 1.0
 
 
 class FeatureOperations:
@@ -42,10 +52,17 @@ class FeatureOperations:
         self._error_alert = error_alert
         self._on_renderer_dirty = on_renderer_dirty
         self._on_labeling_dirty = on_labeling_dirty
+        # (size, scale_with_map) of the symbol the user last resized or rescaled —
+        # newly placed symbols copy it so they come out the same size.
+        self._last_size_style: tuple[float, bool] | None = None
 
     @property
     def layer(self) -> QgsVectorLayer | None:
         return self._layer_provider()
+
+    def forget_last_size(self) -> None:
+        """New symbols fall back to the configured default size again."""
+        self._last_size_style = None
 
     # ------------------------------------------------------------------
     # Single-attribute setters
@@ -53,9 +70,36 @@ class FeatureOperations:
 
     def resize(self, fid, size) -> None:
         self._update_attribute(fid, "size", size, dirty="renderer")
+        layer = self.layer
+        feat = layer.getFeature(fid) if layer else None
+        if feat is not None and feat.isValid():
+            self._last_size_style = (float(size), bool(feat.attribute("scale_with_map")))
 
-    def toggle_scale(self, fid, value) -> None:
-        self._update_attribute(fid, "scale_with_map", value, dirty="renderer")
+    def set_scales_with_map(self, fid, scales: bool) -> float | None:
+        """Switch between map-unit size (`scales`) and fixed screen size.
+
+        The size is converted at the current zoom so the symbol keeps its
+        on-screen size instead of jumping (e.g. 50 m → 50 mm). Returns the
+        new size, or None if the feature could not be updated.
+        """
+        layer = self.layer
+        feat = layer.getFeature(fid) if layer else None
+        if feat is None or not feat.isValid():
+            return None
+
+        # Stored flag is inverted: True = fixed screen size (see renderer.size_unit)
+        was_fixed = bool(feat.attribute("scale_with_map"))
+        fixed = not scales
+        size = float(feat.attribute("size") or _BASE_SIZE)
+        if was_fixed != fixed:
+            context = QgsRenderContext.fromMapSettings(self._canvas.mapSettings())
+            mm = QgsUnitTypes.RenderUnit.RenderMillimeters
+            size = context.convertFromMapUnits(size, mm) if fixed else context.convertToMapUnits(size, mm)
+            size = max(_MIN_SIZE, round(size, 1))
+
+        self._update_attributes(fid, {"scale_with_map": fixed, "size": size}, dirty="renderer")
+        self._last_size_style = (size, fixed)
+        return size
 
     def toggle_white_background(self, fid, value) -> None:
         self._update_attribute(fid, "white_background", value, dirty="renderer")
@@ -86,17 +130,59 @@ class FeatureOperations:
         layer.triggerRepaint()
         self._on_renderer_dirty()
 
+    def change_symbol(self, fid, svg_path: str) -> bool:
+        """Swap the feature's SVG (name, path, embedded content); label and placement stay."""
+        layer = self.layer
+        if not layer:
+            return False
+        svg_content = self._read_svg(svg_path)
+        if svg_content is None:
+            return False
+        values = {
+            "name": os.path.basename(svg_path),
+            "svg_path": self._relative_to_plugin(svg_path),
+            "svg_content": svg_content,
+        }
+        if not layer.isEditable():
+            layer.startEditing()
+        for field_name, value in values.items():
+            idx = layer.fields().indexFromName(field_name)
+            if idx >= 0:
+                layer.changeAttributeValue(fid, idx, value)
+        layer.commitChanges()
+        layer.triggerRepaint()
+        self._on_renderer_dirty()
+        return True
+
+    def move(self, fid, point: QgsPointXY) -> bool:
+        """Set the feature's point (layer CRS) — this is where its anchor point sits."""
+        layer = self.layer
+        if not layer:
+            return False
+        if not layer.isEditable():
+            layer.startEditing()
+        moved = layer.changeGeometry(fid, QgsGeometry.fromPointXY(point))
+        layer.commitChanges()
+        layer.triggerRepaint()
+        return moved
+
     def _update_attribute(self, fid, field_name: str, value, dirty: str) -> None:
         """Generic single-attribute write with renderer or labeling refresh."""
+        self._update_attributes(fid, {field_name: value}, dirty)
+
+    def _update_attributes(self, fid, values: dict, dirty: str) -> None:
+        """Write several attributes in one edit transaction, then refresh."""
         layer = self.layer
         if not layer:
             return
-        idx = layer.fields().indexFromName(field_name)
-        if idx < 0:
+        indexed = [(layer.fields().indexFromName(name), value) for name, value in values.items()]
+        indexed = [(idx, value) for idx, value in indexed if idx >= 0]
+        if not indexed:
             return
         if not layer.isEditable():
             layer.startEditing()
-        layer.changeAttributeValue(fid, idx, value)
+        for idx, value in indexed:
+            layer.changeAttributeValue(fid, idx, value)
         layer.commitChanges()
         layer.triggerRepaint()
         if dirty == "renderer":
@@ -149,7 +235,10 @@ class FeatureOperations:
             return None
 
         relative_path = self._relative_to_plugin(svg_path)
-        icon_size = self._initial_size(layer)
+        if self._last_size_style is not None:
+            icon_size, scale_with_map = self._last_size_style
+        else:
+            icon_size, scale_with_map = self._initial_size(layer), self._settings.new_icon_scaling_with_map
         default_label = os.path.splitext(os.path.basename(svg_path))[0].replace("_", " ")
 
         f = QgsFeature(layer.fields())
@@ -158,7 +247,7 @@ class FeatureOperations:
         f.setAttribute("svg_path", relative_path)
         f.setAttribute("svg_content", svg_content)
         f.setAttribute("size", icon_size)
-        f.setAttribute("scale_with_map", self._settings.new_icon_scaling_with_map)
+        f.setAttribute("scale_with_map", scale_with_map)
         f.setAttribute("unique_id", str(uuid.uuid4()))
         f.setAttribute("label", default_label)
         f.setAttribute("show_label", False)

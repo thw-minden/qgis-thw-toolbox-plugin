@@ -54,6 +54,9 @@ class LayerManager:
         self._error_alert = error_alert
         self._check_map_available = check_map_available
         self.layer: QgsVectorLayer | None = None
+        # True while we deliberately swap the layer (save / reprojection), so the
+        # plugin does not mistake the removal for the user deleting the layer.
+        self.replacing = False
 
     # ------------------------------------------------------------------
     # Layer creation / loading
@@ -429,8 +432,7 @@ class LayerManager:
 
             # Step 2: only NOW release the original layer's file lock and
             # swap the migrated file over it.
-            old_id = self.layer.id()
-            QgsProject.instance().removeMapLayer(old_id)
+            self._remove_for_swap(self.layer.id())
             self.layer = None
             time.sleep(0.1)
 
@@ -510,6 +512,14 @@ class LayerManager:
     # Project-save handling
     # ------------------------------------------------------------------
 
+    def _remove_for_swap(self, layer_id: str) -> None:
+        """Remove the marker layer ahead of re-adding a replacement."""
+        self.replacing = True
+        try:
+            QgsProject.instance().removeMapLayer(layer_id)
+        finally:
+            self.replacing = False
+
     def on_project_save(self) -> QgsVectorLayer | None:
         """Move the GeoPackage next to the project file. Returns the new layer (or None)."""
         logger.debug("Projekt wird gespeichert, verschiebe Layer-Datei zum Projektpfad")
@@ -572,7 +582,7 @@ class LayerManager:
             logger.debug("Layer-Daten erfolgreich exportiert/kopiert")
 
             # Swap project's layer reference
-            QgsProject.instance().removeMapLayer(self.layer.id())
+            self._remove_for_swap(self.layer.id())
             uri = f"{new_gpkg}|layername={GPKG_LAYER_NAME}"
             new_layer = QgsVectorLayer(uri, LAYER_DISPLAY_NAME, "ogr")
             if not new_layer.isValid():

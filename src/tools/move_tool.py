@@ -273,6 +273,16 @@ class MoveTool(QgsMapTool):
         pointer = self.canvas.getCoordinateTransform().toMapCoordinates(pos.x(), pos.y())
         return QgsPointXY(pointer.x() + self._grab_offset[0], pointer.y() + self._grab_offset[1])
 
+    def _past_drag_threshold(self, pos: QPointF) -> bool:
+        return self._press_pos is not None and (
+            max(abs(pos.x() - self._press_pos.x()), abs(pos.y() - self._press_pos.y())) >= _DRAG_THRESHOLD_PX
+        )
+
+    def _write_position(self, map_point: QgsPointXY) -> None:
+        """Stores the dragged position; the layer CRS may differ from the project CRS."""
+        layer_point = self.toLayerCoordinates(self.layer, map_point)
+        self.layer.changeGeometry(self.moving_feature.id(), QgsGeometry.fromPointXY(layer_point))
+
     def _show_selected_in_dock(self):
         dock = self._feature_dock()
         if dock is None or self.selected_fid is None:
@@ -322,6 +332,9 @@ class MoveTool(QgsMapTool):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
         if self.moving_feature:
+            # A plain click must never nudge the marker: only move once past the threshold.
+            if not self.is_editing and not self._past_drag_threshold(QPointF(event.pos())):
+                return
             point = self._drag_target(event.pos())
             if self.moving_feature.id() == self.selected_fid:
                 self.selection.move_to(point)
@@ -339,7 +352,7 @@ class MoveTool(QgsMapTool):
                     self.layer.startEditing()
                     self.is_editing = True
 
-                self.layer.changeGeometry(self.moving_feature.id(), QgsGeometry.fromPointXY(point))
+                self._write_position(point)
                 self.last_pos = point
                 self.last_update_time = current_time
 
@@ -406,10 +419,7 @@ class MoveTool(QgsMapTool):
                 hit = self._hit_frame(QPointF(event.pos()))
                 self.setCursor(self._cursor_for(hit) if hit is not None else Qt.CursorShape.ArrowCursor)
             elif self.moving_feature:
-                pos = QPointF(event.pos())
-                dragged = self._press_pos is not None and (
-                    max(abs(pos.x() - self._press_pos.x()), abs(pos.y() - self._press_pos.y())) >= _DRAG_THRESHOLD_PX
-                )
+                dragged = self._past_drag_threshold(QPointF(event.pos()))
                 if dragged or self.is_editing:
                     # Moves are throttled — write the final position so the
                     # marker ends up exactly where it was dropped.
@@ -417,7 +427,7 @@ class MoveTool(QgsMapTool):
                     if not self.is_editing:
                         self.layer.startEditing()
                         self.is_editing = True
-                    self.layer.changeGeometry(self.moving_feature.id(), QgsGeometry.fromPointXY(point))
+                    self._write_position(point)
                 if self.is_editing:
                     self.layer.commitChanges()
                     self.is_editing = False
