@@ -1,0 +1,22 @@
+<svg width="597" height="597" viewBox="0 0 597 597" fill="none" xmlns="http://www.w3.org/2000/svg">
+<rect x="70" y="90" width="497" height="467" rx="34" fill="#199BE2"/>
+<rect x="30" y="50" width="497" height="467" rx="34" fill="#50E6FF"/>
+<path d="M120 400C200 400 220 300 300 300H372" stroke="#2471CA" stroke-width="16" stroke-linecap="round" stroke-dasharray="1 34"/>
+<rect x="84" y="372" width="72" height="72" rx="10" fill="#0A42A1"/>
+<path d="M120 384L106 420H112L118 404H130L120 432L142 398H128L136 384Z" fill="#FFEB3B"/>
+<rect x="96" y="104" width="128" height="104" rx="10" fill="url(#tent)"/>
+<rect x="250" y="104" width="128" height="104" rx="10" fill="url(#tent)"/>
+<rect x="378" y="252" width="104" height="216" rx="12" fill="#2471CA"/>
+<rect x="378" y="252" width="104" height="62" rx="12" fill="#123864"/>
+<rect x="364" y="238" width="132" height="244" stroke="#FFFFFF" stroke-width="12"/>
+<g fill="#FFFFFF" stroke="#0A42A1" stroke-width="8">
+<rect x="346" y="220" width="36" height="36"/><rect x="478" y="220" width="36" height="36"/>
+<rect x="346" y="464" width="36" height="36"/><rect x="478" y="464" width="36" height="36"/>
+</g>
+<defs>
+<linearGradient id="tent" x1="160" y1="104" x2="160" y2="208" gradientUnits="userSpaceOnUse">
+<stop stop-color="#2471CA"/>
+<stop offset="1" stop-color="#123864"/>
+</linearGradient>
+</defs>
+</svg>

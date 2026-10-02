@@ -7,14 +7,14 @@
 - Druckvorlagen-Dialog fragt Ortsverband, Einheit, Bearbeiter, Einsatz und Einstufung (VS-NfD / nicht klassifiziert) ab; OV/Einheit/Bearbeiter werden in den Benutzereinstellungen, der Einsatz im Projekt gemerkt
 - Autovervollständigung für den Ortsverband aus `data/ovs.json` (670 OVs, Teilwortsuche)
 - Platzhalter der Vorlagen werden zu Layout-Variablen (`@thw_ov`, `@thw_einheit`, `@thw_einheit_kurz`, `@thw_bearbeiter`, `@thw_einsatz`), nachträglich in den Layout-Eigenschaften änderbar
-- **Objektplanung** (Dock + schwebende Hotbar unten auf der Karte, Paket `planning/`):
+- **Objektplanung** (Dock + schwebende Hotbar unten auf der Karte, Paket `planning/`; Standardwerkzeug ist die Auswahl, Esc führt nach dem Platzieren dorthin zurück):
   - Zelte maßstabsgetreu platzieren (SG 300, SG 500, SG 20/30/50, Faltpavillons, eigenes Maß) inkl. gestrichelter Abspannung, Drehen per R / Strg+Mausrad / Rechtsklick; Mindestabstand wird geprüft und nur als Warnung gemeldet
   - **Fahrzeuge** maßstabsgetreu platzieren (GKW, MTW Sprinter, MTW T5/T6, MzKW, MzGW, FüKW, MLW, LKW-K, LKW Ladekran, WLF, Radlader, PKW, Anhänger u.a.) in Draufsicht mit Fahrerhaus bzw. Deichsel, dem passenden **THW-Fahrzeugzeichen** in der Mitte und eigenem Mindestabstand
   - **Raster**: Zelte/Fahrzeuge als Reihen × Spalten im Mindestabstand auf einen Klick setzen
   - **Hilfslinien**: beim Platzieren und Verschieben an Kanten und Mitten benachbarter Zelte/Fahrzeuge (auch im Mindestabstand) einrasten; Strg hält das Einrasten an
   - **Bearbeiten im Figma-Stil** wie bei den taktischen Zeichen: blauer Rahmen mit Eckpunkten und Maß-Badge, Hover-Umriss, Klick / Shift+Klick / Auswahlrahmen, Ziehen verschiebt (Badge zeigt den Abstand zum Nachbarn), an den Ecken ziehen dreht (Shift: 15°), Alt+Ziehen kopiert, Pfeiltasten schieben 0,5 m (Shift: 5 m), Entf löscht, R dreht, D dupliziert, Doppelklick / Enter bearbeitet die Bezeichnung, Rechtsklick-Menü
   - **Flächen-Kapazität**: Fläche zeichnen oder auswählen → Tabelle, wie viele Zelte bzw. Fahrzeuge je Typ hineinpassen, Vorschau auf der Karte und Übernahme per Klick
-  - **Stromversorgung**: Stromerzeuger (SEA 5/8/13 kVA, NEA 50/200 kVA) mit taktischem Zeichen, Leitungsroller 25 m / 50 m mit Längenbegrenzung und Reichweitenkreis (fängt Stromerzeuger, Verteiler, Leuchten und Leitungsenden), Verteiler 16 A
+  - **Stromversorgung**: Stromerzeuger (SEA 5/8/13 kVA, NEA 50/200 kVA) mit taktischem Zeichen, Leitungsroller 25 m / 50 m (fängt Stromerzeuger, Verteiler, Leuchten und Leitungsenden), Verteiler 16 A; lange Strecken werden automatisch in mehrere Trommeln aufgeteilt, Kupplungspunkte und Rest der letzten Trommel werden angezeigt
   - **Beleuchtung**: Flutlicht, LED-Strahler, Leuchtballone, Lichtmast mit taktischem Zeichen und ausgeleuchtetem Radius auf der Karte
   - Bilanz (Zelte/Zeltfläche, Fahrzeuge, Leitungslänge, Verteiler, Stromerzeuger, Beleuchtung) inkl. **Last je Stromerzeuger** über verbundene Leitungen und Hinweis auf nicht angeschlossene Leuchten
   - Speicherung in `<projekt>_objektplanung.gpkg` neben der Projektdatei; Katalog mit Maßen und Leistungen in `data/objektplanung.json`

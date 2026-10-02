@@ -360,3 +360,30 @@ def align_snap(moving: QgsGeometry, others: list[QgsGeometry], rotation: float, 
 
     dx, dy = rotate_offset(sx, sy, rotation)
     return AlignResult(dx=dx, dy=dy, guides=guides)
+
+
+def split_line(points: list[QgsPointXY], max_len: float) -> list[list[QgsPointXY]]:
+    """Linienzug (metrisch) in Stücke von höchstens ``max_len`` Metern teilen.
+
+    Jedes Stück entspricht einem Leitungsroller; aufeinanderfolgende Stücke
+    teilen sich den Kupplungspunkt. Ein Rest unter ``_EPS`` entfällt.
+    """
+    if len(points) < 2 or max_len <= 0:
+        return []
+    chunks = [[QgsPointXY(points[0])]]
+    used = 0.0
+    for a, b in zip(points, points[1:]):
+        seg = math.hypot(b.x() - a.x(), b.y() - a.y())
+        pos = 0.0
+        while used + (seg - pos) > max_len + _EPS:
+            pos += max_len - used
+            cut = point_along(a, b, pos)
+            chunks[-1].append(cut)
+            chunks.append([QgsPointXY(cut)])
+            used = 0.0
+        used += seg - pos
+        chunks[-1].append(QgsPointXY(b))
+    last = chunks[-1]
+    if sum(math.hypot(q.x() - p.x(), q.y() - p.y()) for p, q in zip(last, last[1:])) <= _EPS:
+        chunks.pop()
+    return chunks

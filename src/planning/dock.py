@@ -27,17 +27,18 @@ from .layers import ROLE_DISTRIBUTORS, ROLE_GENERATORS, ROLE_LIGHTS, ROLE_TENTS,
 
 _PLACE_HINT = (
     "Klick setzt {obj} · R / Shift+R dreht ±15° · Strg+Mausrad ±5° · Rechtsklick 90° · "
-    "Hilfslinien richten aus (Strg hält an) · Raster in der Hotbar · Esc beendet"
+    "Hilfslinien richten aus (Strg hält an) · Raster in der Hotbar · Esc zurück zur Auswahl"
 )
 _HINTS = {
     "tent": _PLACE_HINT.format(obj="Zelt"),
     "vehicle": _PLACE_HINT.format(obj="Fahrzeug (dicke Kante = Front)"),
     "area": "Eckpunkte anklicken · Rechtsklick / Enter / Doppelklick schließt ab · Rücktaste entfernt Punkt",
-    "cable": "Klick am Verteiler beginnen (wird gefangen) · Stützpunkte setzen · Rechtsklick / Enter beendet · "
+    "cable": "Am Stromerzeuger / Verteiler beginnen (wird gefangen) · Stützpunkte setzen, beliebig lang – "
+    "leere Trommeln werden automatisch angekuppelt (◆) · Rechtsklick / Enter beendet · "
     "Rücktaste entfernt Punkt · Esc verwirft",
-    "distributor": "Klick setzt Verteiler · Esc beendet",
-    "generator": "Klick setzt Stromerzeuger · Leitungen von hier aus verlegen · Esc beendet",
-    "light": "Klick setzt Leuchte (Kreis = ausgeleuchteter Bereich) · Esc beendet",
+    "distributor": "Klick setzt Verteiler · Esc zurück zur Auswahl",
+    "generator": "Klick setzt Stromerzeuger · Leitungen von hier aus verlegen · Esc zurück zur Auswahl",
+    "light": "Klick setzt Leuchte (Kreis = ausgeleuchteter Bereich) · Esc zurück zur Auswahl",
     "select": "Klick wählt aus · Shift+Klick ergänzt · Rahmen aufziehen wählt mehrere · Ziehen verschiebt "
     "(Alt+Ziehen kopiert) · an den Ecken ziehen dreht (Shift: 15°) · Pfeiltasten schieben 0,5 m (Shift: 5 m) · "
     "Entf löscht · D dupliziert · Doppelklick / Enter: Bezeichnung · Rechtsklick: Menü",
@@ -348,7 +349,7 @@ class PlanningDock(QDockWidget):
         if checked:
             self.controller.activate_tool(kind, type_id)
         else:
-            self.controller.deactivate_tool()
+            self.controller.back_to_select()
         self.sync_tool_buttons()
 
     def sync_tool_buttons(self):

@@ -147,6 +147,8 @@ class PlanningController(QObject):
             self.layers.selection_changed.connect(self.hotbar.refresh_selection)
         self.dock.setVisible(visible)
         self.hotbar.setVisible(visible)
+        if not visible:
+            self.deactivate_tool()
         if visible:
             self.dock.raise_()
             # Vorhandene Objektplanung im Projekt übernehmen, ohne neue Layer anzulegen
@@ -154,6 +156,9 @@ class PlanningController(QObject):
             self.dock.refresh_summary()
             self.dock.refresh_selection()
             self.hotbar.refresh_selection()
+            # Standardwerkzeug ist die Auswahl (Cursor)
+            if self.active_tool_kind()[0] is None:
+                self.activate_tool(TOOL_SELECT)
 
     def _sync_ui(self):
         if self.dock:
@@ -229,7 +234,10 @@ class PlanningController(QObject):
     # ------------------------------------------------------------------
 
     def activate_tool(self, kind: str, type_id: str | None = None) -> bool:
-        if not self._ensure_layers():
+        # Auswählen braucht keine Layer – beim bloßen Öffnen nichts im Projekt anlegen
+        if kind == TOOL_SELECT:
+            self.layers._adopt_project_layers()
+        elif not self._ensure_layers():
             self._sync_ui()
             return False
         if kind == TOOL_CABLE and type_id:
@@ -263,6 +271,13 @@ class PlanningController(QObject):
         tool = self.canvas.mapTool()
         if tool is not None and tool in self._tools.values():
             self.canvas.unsetMapTool(tool)
+
+    def back_to_select(self):
+        """Nach dem Platzieren (Esc / Werkzeug abwählen) zurück zum Auswahlwerkzeug, wie in Figma."""
+        if self.active_tool_kind()[0] == TOOL_SELECT:
+            self._sync_ui()
+            return
+        self.activate_tool(TOOL_SELECT)
 
     def active_tool_kind(self) -> tuple[str | None, str | None]:
         current = self.canvas.mapTool()
@@ -652,17 +667,24 @@ class PlanningController(QObject):
     # ------------------------------------------------------------------
 
     def place_cable(self, points: list[QgsPointXY], length_m: float) -> bool:
+        return self.place_cables([(points, length_m)])
+
+    def place_cables(self, pieces: list[tuple[list[QgsPointXY], float]]) -> bool:
+        """Eine Strecke aus mehreren Leitungsrollern: je Stück ``(Punkte im Layer-CRS, Länge m)`` ein Feature."""
         reel = self.current_reel()
-        if reel is None:
+        if reel is None or not pieces:
             return False
-        feat = self.layers.new_feature(ROLE_CABLES)
-        feat.setGeometry(QgsGeometry.fromPolylineXY(points))
-        feat.setAttribute("typ_id", reel.id)
-        feat.setAttribute("typ", reel.name)
-        feat.setAttribute("bezeichnung", "")
-        feat.setAttribute("max_laenge", reel.laenge)
-        feat.setAttribute("laenge", round(length_m, 1))
-        return self.layers.add_features(ROLE_CABLES, [feat])
+        features = []
+        for points, length_m in pieces:
+            feat = self.layers.new_feature(ROLE_CABLES)
+            feat.setGeometry(QgsGeometry.fromPolylineXY(points))
+            feat.setAttribute("typ_id", reel.id)
+            feat.setAttribute("typ", reel.name)
+            feat.setAttribute("bezeichnung", "")
+            feat.setAttribute("max_laenge", reel.laenge)
+            feat.setAttribute("laenge", round(length_m, 1))
+            features.append(feat)
+        return self.layers.add_features(ROLE_CABLES, features)
 
     def place_point(self, role: str, point: QgsPointXY) -> bool:
         obj = self.current_point_type(role)

@@ -167,7 +167,7 @@ class THWToolboxPlugin:
         self.iface.addPluginToMenu("THW Toolbox", self.mgrs_grid_action)
 
         # Objektplanung: Zelte, Flächen-Kapazität, Stromverteilung
-        planning_icon = QIcon(os.path.join(self.plugin_dir, "icons", "tent.svg"))
+        planning_icon = QIcon(os.path.join(self.plugin_dir, "icons", "objektplanung.svg"))
         self.planning_action = QAction(planning_icon, "Objektplanung", self.iface.mainWindow())
         self.planning_action.setCheckable(True)
         self.planning_action.triggered.connect(self._toggle_planning)

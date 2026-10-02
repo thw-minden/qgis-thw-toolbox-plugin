@@ -268,7 +268,7 @@ class PlanningHotbar(QFrame):
         if checked:
             self.controller.activate_tool(kind)
         else:
-            self.controller.deactivate_tool()
+            self.controller.back_to_select()
 
     def _current_type(self, kind: str) -> str | None:
         c = self.controller

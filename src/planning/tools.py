@@ -19,7 +19,7 @@ from qgis.PyQt.QtWidgets import QMenu, QToolTip
 from ..logging_utils import get_logger
 from ..tools.selection_frame import rotate_cursor
 from .catalog import fmt_m
-from .geometry import MetricFrame, circle_polygon, point_along
+from .geometry import MetricFrame, circle_polygon, split_line
 from .layers import (
     FOOTPRINT_ROLES,
     ROLE_CABLES,
@@ -86,7 +86,7 @@ def _collect(geoms: list[QgsGeometry]) -> QgsGeometry:
 
 
 class _PlanningTool(QgsMapTool):
-    """Gemeinsame Basis: Rubberbands aufräumen, Tooltip, Esc beendet."""
+    """Gemeinsame Basis: Rubberbands aufräumen, Tooltip, Esc führt zurück zur Auswahl."""
 
     def __init__(self, canvas, controller):
         super().__init__(canvas)
@@ -138,7 +138,7 @@ class _PlanningTool(QgsMapTool):
         event.ignore()
 
     def cancel(self):
-        self.canvas.unsetMapTool(self)
+        self.controller.back_to_select()
 
 
 # ----------------------------------------------------------------------
@@ -315,18 +315,23 @@ class PointTool(_PlanningTool):
 
 
 class CableTool(_PlanningTool):
-    """Leitung eines Leitungsrollers verlegen, maximal so lang wie die Trommel.
+    """Leitung verlegen, beliebig lang: die Strecke wird in Leitungsroller aufgeteilt.
 
     Klick setzt Stützpunkte (fängt Stromerzeuger, Verteiler, Leuchten und
-    Leitungsenden), Rechtsklick / Enter schließt ab, Rücktaste entfernt den
-    letzten Punkt. Der gestrichelte Kreis zeigt die Restreichweite.
+    Leitungsenden). Ist eine Trommel leer, geht es automatisch mit der
+    nächsten weiter – Kupplungspunkte (◆) zeigen, wo eine Trommel endet.
+    Rechtsklick / Enter / Doppelklick schließt ab, Rücktaste entfernt den
+    letzten Punkt. Der gestrichelte Kreis zeigt, wie weit die letzte
+    Trommel noch reicht.
     """
 
     def __init__(self, canvas, controller):
         super().__init__(canvas, controller)
         self._line = self._new_band(_line_type(), None, QColor(239, 108, 0), 3)
-        self._overflow = self._new_band(_line_type(), None, _BAD_LINE, 2, dashed=True)
         self._reach = self._new_band(_polygon_type(), QColor(0, 0, 0, 0), _HINT_LINE, 1, dashed=True)
+        self._couplings = self._new_band(Qgis.GeometryType.Point, QColor(255, 255, 255), QColor(33, 33, 33), 2)
+        self._couplings.setIcon(QgsRubberBand.IconType.ICON_FULL_DIAMOND)
+        self._couplings.setIconSize(11)
         self._snap_marker = QgsVertexMarker(canvas)
         self._snap_marker.setIconType(QgsVertexMarker.IconType.ICON_CIRCLE)
         self._snap_marker.setColor(QColor(13, 153, 255))
@@ -367,11 +372,7 @@ class CableTool(_PlanningTool):
         return point, False
 
     def _length_m(self, points: list[QgsPointXY]) -> float:
-        total = 0.0
-        pts = [self._frame.point_to_m(p) for p in points]
-        for a, b in zip(pts, pts[1:]):
-            total += math.hypot(b.x() - a.x(), b.y() - a.y())
-        return total
+        return _chunk_length([self._frame.point_to_m(p) for p in points])
 
     def canvasMoveEvent(self, event):
         layer = self._layer()
@@ -383,29 +384,20 @@ class CableTool(_PlanningTool):
             self._tooltip(event, f"{reel.name}: Startpunkt setzen (Stromerzeuger und Verteiler werden gefangen)")
             return
 
-        used = self._length_m(self._points)
-        rest = max(reel.laenge - used, 0.0)
-        last_m = self._frame.point_to_m(self._points[-1])
-        cursor_m = self._frame.point_to_m(cursor)
-        seg = math.hypot(cursor_m.x() - last_m.x(), cursor_m.y() - last_m.y())
+        route = self._points + [cursor]
+        route_m = [self._frame.point_to_m(p) for p in route]
+        total = _chunk_length(route_m)
+        count = reel_count(total, reel.laenge)
+        rest = count * reel.laenge - total
 
-        if seg > rest:
-            end = self._frame.point_from_m(point_along(last_m, cursor_m, rest))
-            self._overflow.setToGeometry(QgsGeometry.fromPolylineXY([end, cursor]), layer)
-            self._overflow.show()
-            total = reel.laenge
-        else:
-            end = cursor
-            self._overflow.reset(_line_type())
-            total = used + seg
-        self._line.setToGeometry(QgsGeometry.fromPolylineXY(self._points + [end]), layer)
-        self._reach.setToGeometry(self._frame.geom_from_m(circle_polygon(last_m, rest)), layer)
+        self._line.setToGeometry(QgsGeometry.fromPolylineXY(route), layer)
+        self._couplings.reset(Qgis.GeometryType.Point)
+        for chunk in split_line(route_m, reel.laenge)[1:]:
+            self._couplings.addPoint(self.toMapCoordinates(layer, self._frame.point_from_m(chunk[0])))
+        self._reach.setToGeometry(self._frame.geom_from_m(circle_polygon(route_m[-1], rest)), layer)
 
-        text = f"{reel.name}: {fmt_m(round(total, 1))} m von {fmt_m(reel.laenge)} m"
-        if seg > rest:
-            text += f"\n⚠ {fmt_m(round(used + seg - reel.laenge, 1))} m zu kurz"
-        else:
-            text += f" · Rest {fmt_m(round(reel.laenge - total, 1))} m"
+        text = f"{fmt_m(round(total, 1))} m · {count} × {reel.name}"
+        text += f"\nRest auf der letzten Trommel: {fmt_m(round(rest, 1))} m"
         self._tooltip(event, text)
 
     def canvasReleaseEvent(self, event):
@@ -428,18 +420,7 @@ class CableTool(_PlanningTool):
             self._frame = MetricFrame(layer.crs(), point)
             self._points = [point]
             return
-
-        used = self._length_m(self._points)
-        rest = reel.laenge - used
-        last_m = self._frame.point_to_m(self._points[-1])
-        point_m = self._frame.point_to_m(point)
-        seg = math.hypot(point_m.x() - last_m.x(), point_m.y() - last_m.y())
-        if seg <= _EPS_M:
-            return
-        if seg >= rest - _EPS_M:
-            # Trommel ist leer — Leitung endet hier
-            self._points.append(self._frame.point_from_m(point_along(last_m, point_m, rest)))
-            self._finish()
+        if self._length_m([self._points[-1], point]) <= _EPS_M:
             return
         self._points.append(point)
 
@@ -465,16 +446,35 @@ class CableTool(_PlanningTool):
         super().keyPressEvent(event)
 
     def _finish(self):
-        if len(self._points) >= 2:
-            self.controller.place_cable(list(self._points), self._length_m(self._points))
+        reel = self.controller.current_reel()
+        if len(self._points) >= 2 and reel is not None:
+            route_m = [self._frame.point_to_m(p) for p in self._points]
+            pieces = [
+                ([self._frame.point_from_m(p) for p in chunk], _chunk_length(chunk))
+                for chunk in split_line(route_m, reel.laenge)
+            ]
+            self.controller.place_cables(pieces)
         self._reset()
 
     def _reset(self):
         self._points = []
         self._frame = None
-        for band, typ in ((self._line, _line_type()), (self._overflow, _line_type()), (self._reach, _polygon_type())):
+        for band, typ in (
+            (self._line, _line_type()),
+            (self._reach, _polygon_type()),
+            (self._couplings, Qgis.GeometryType.Point),
+        ):
             band.reset(typ)
         self._snap_marker.hide()
+
+
+def reel_count(total_m: float, reel_m: float) -> int:
+    """So viele Trommeln braucht eine Strecke von ``total_m`` Metern (mindestens eine)."""
+    return max(1, math.ceil((total_m - _EPS_M) / reel_m))
+
+
+def _chunk_length(points_m: list[QgsPointXY]) -> float:
+    return sum(math.hypot(b.x() - a.x(), b.y() - a.y()) for a, b in zip(points_m, points_m[1:]))
 
 
 # ----------------------------------------------------------------------
@@ -954,8 +954,6 @@ class SelectTool(_PlanningTool):
                 self._end_gesture()
             elif has_selection:
                 self.controller.clear_selection()
-            else:
-                self.cancel()
         else:
             # Pfeiltasten ohne Auswahl → QGIS verschiebt die Karte
             event.ignore()
