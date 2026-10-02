@@ -1,8 +1,10 @@
-"""Dock der Lagerplanung: Zelte, Fahrzeuge, Flächen-Kapazität, Stromverteilung, Bilanz."""
+"""Dock der Objektplanung: Zelte, Fahrzeuge, Flächen-Kapazität, Strom, Beleuchtung, Auswahl, Bilanz."""
 
+from collections import Counter
 from dataclasses import dataclass
 
 from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QBrush, QColor
 from qgis.PyQt.QtWidgets import (
     QComboBox,
     QDockWidget,
@@ -11,6 +13,7 @@ from qgis.PyQt.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QScrollArea,
     QTreeWidget,
@@ -20,11 +23,11 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from .catalog import fmt_m
-from .layers import ROLE_TENTS, ROLE_VEHICLES
+from .layers import ROLE_DISTRIBUTORS, ROLE_GENERATORS, ROLE_LIGHTS, ROLE_TENTS, ROLE_VEHICLES
 
 _PLACE_HINT = (
     "Klick setzt {obj} · R / Shift+R dreht ±15° · Strg+Mausrad ±5° · Rechtsklick 90° · "
-    "Shift+Klick ignoriert Mindestabstand · Esc beendet"
+    "Hilfslinien richten aus (Strg hält an) · Raster in der Hotbar · Esc beendet"
 )
 _HINTS = {
     "tent": _PLACE_HINT.format(obj="Zelt"),
@@ -33,8 +36,20 @@ _HINTS = {
     "cable": "Klick am Verteiler beginnen (wird gefangen) · Stützpunkte setzen · Rechtsklick / Enter beendet · "
     "Rücktaste entfernt Punkt · Esc verwirft",
     "distributor": "Klick setzt Verteiler · Esc beendet",
-    "delete": "Element anklicken zum Löschen · Esc beendet",
+    "generator": "Klick setzt Stromerzeuger · Leitungen von hier aus verlegen · Esc beendet",
+    "light": "Klick setzt Leuchte (Kreis = ausgeleuchteter Bereich) · Esc beendet",
+    "select": "Klick wählt aus · Shift+Klick ergänzt · Rahmen aufziehen wählt mehrere · Ziehen verschiebt "
+    "(Alt+Ziehen kopiert) · an den Ecken ziehen dreht (Shift: 15°) · Pfeiltasten schieben 0,5 m (Shift: 5 m) · "
+    "Entf löscht · D dupliziert · Doppelklick / Enter: Bezeichnung · Rechtsklick: Menü",
 }
+_ROLE_TITLES = {
+    ROLE_TENTS: "Zelt",
+    ROLE_VEHICLES: "Fahrzeug",
+    ROLE_DISTRIBUTORS: "Verteiler",
+    ROLE_GENERATORS: "Stromerzeuger",
+    ROLE_LIGHTS: "Leuchte",
+}
+_WARN_BRUSH = QBrush(QColor(198, 40, 40))
 
 
 def _spin(minimum: float, maximum: float, step: float, suffix: str, decimals: int = 1) -> QDoubleSpinBox:
@@ -65,17 +80,19 @@ class _FootprintWidgets:
 
 class PlanningDock(QDockWidget):
     def __init__(self, controller, parent=None):
-        super().__init__("Lagerplanung", parent)
-        self.setObjectName("THWToolboxLagerplanung")
+        super().__init__("Objektplanung", parent)
+        self.setObjectName("THWToolboxObjektplanung")
         self.controller = controller
         self._tool_buttons: list[tuple[QPushButton, str, str | None]] = []
         self._footprints: dict[str, _FootprintWidgets] = {}
+        self._point_combos: dict[str, QComboBox] = {}
 
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.addWidget(self._build_footprint_group(ROLE_TENTS))
         layout.addWidget(self._build_footprint_group(ROLE_VEHICLES))
         layout.addWidget(self._build_power())
+        layout.addWidget(self._build_lights())
         layout.addWidget(self._build_edit())
         layout.addWidget(self._build_summary(), 1)
 
@@ -89,6 +106,7 @@ class PlanningDock(QDockWidget):
 
         for role in self._footprints:
             self._load_footprint(role)
+        controller.state_changed.connect(self._on_state_changed)
         self.sync_tool_buttons()
 
     # ------------------------------------------------------------------
@@ -175,15 +193,54 @@ class PlanningDock(QDockWidget):
             layout.addWidget(self._tool_button(reel.name, "cable", reel.id))
         for dist in self.controller.catalog.verteiler:
             layout.addWidget(self._tool_button(dist.name, "distributor", dist.id))
+        layout.addLayout(self._point_row(ROLE_GENERATORS, "generator", "Stromerzeuger setzen"))
+        layout.addWidget(_muted("Leitungen am Stromerzeuger beginnen – die Bilanz zeigt die Last je Aggregat."))
         return box
 
-    def _build_edit(self) -> QGroupBox:
-        box = QGroupBox("Bearbeiten")
+    def _build_lights(self) -> QGroupBox:
+        box = QGroupBox("Beleuchtung")
         layout = QVBoxLayout(box)
-        layout.addWidget(self._tool_button("Element löschen", "delete"))
-        layout.addWidget(
-            _muted("Verschieben, Drehen und Beschriften geht auch mit den QGIS-Werkzeugen (Gruppe „Lagerplanung“).")
+        layout.addLayout(self._point_row(ROLE_LIGHTS, "light", "Leuchte setzen"))
+        return box
+
+    def _point_row(self, role: str, kind: str, text: str) -> QHBoxLayout:
+        combo = QComboBox()
+        for obj in self.controller.point_types(role):
+            combo.addItem(obj.name, obj.id)
+        combo.currentIndexChanged.connect(
+            lambda index, r=role, c=combo: self.controller.select_point_type(r, c.itemData(index))
         )
+        self._point_combos[role] = combo
+        row = QHBoxLayout()
+        row.addWidget(combo, 1)
+        row.addWidget(self._tool_button(text, kind))
+        return row
+
+    def _build_edit(self) -> QGroupBox:
+        box = QGroupBox("Auswahl")
+        layout = QVBoxLayout(box)
+        layout.addWidget(self._tool_button("Auswählen / Verschieben", "select"))
+        self._selection_label = _muted("Nichts ausgewählt")
+        layout.addWidget(self._selection_label)
+        form = QFormLayout()
+        self._label_edit = QLineEdit()
+        self._label_edit.setPlaceholderText("z.B. Zelt 1, Küche, NEA Nord")
+        self._label_edit.editingFinished.connect(self._on_label_edited)
+        form.addRow("Bezeichnung:", self._label_edit)
+        layout.addLayout(form)
+        row = QHBoxLayout()
+        self._sel_buttons = []
+        for text, slot in (
+            ("Duplizieren", self.controller.duplicate_selection),
+            ("Drehen 15°", lambda: self.controller.rotate_selection(15)),
+            ("Löschen", self.controller.delete_selection),
+        ):
+            button = QPushButton(text)
+            button.clicked.connect(lambda _checked=False, f=slot: f())
+            row.addWidget(button)
+            self._sel_buttons.append(button)
+        layout.addLayout(row)
+        layout.addWidget(_muted("Auswahl mit den QGIS-Auswahlwerkzeugen funktioniert auch (Gruppe „Objektplanung“)."))
         return box
 
     def _build_summary(self) -> QGroupBox:
@@ -221,7 +278,7 @@ class PlanningDock(QDockWidget):
         self._load_footprint(role)
 
     def _on_dimensions_changed(self, role: str):
-        # Änderungen gelten für diese Sitzung; dauerhaft in data/lagerplanung.json
+        # Änderungen gelten für diese Sitzung; dauerhaft in data/objektplanung.json
         w = self._footprints[role]
         obj = self.controller.current_footprint(role)
         obj.laenge = w.length.value()
@@ -229,11 +286,59 @@ class PlanningDock(QDockWidget):
         if w.guy is not None:
             obj.abspannung = w.guy.value()
 
-    def show_rotation(self, value: float):
-        for w in self._footprints.values():
-            w.rotation.blockSignals(True)
-            w.rotation.setValue(round(value))
-            w.rotation.blockSignals(False)
+    def _on_state_changed(self):
+        value = round(self.controller.rotation)
+        for role, w in self._footprints.items():
+            if w.rotation.value() != value:
+                w.rotation.blockSignals(True)
+                w.rotation.setValue(value)
+                w.rotation.blockSignals(False)
+            if w.combo.itemData(w.combo.currentIndex()) != self.controller.selected_ids.get(role):
+                self._load_footprint(role)
+        for role, combo in self._point_combos.items():
+            index = combo.findData(self.controller.point_ids.get(role))
+            if index >= 0 and index != combo.currentIndex():
+                combo.blockSignals(True)
+                combo.setCurrentIndex(index)
+                combo.blockSignals(False)
+        self.sync_tool_buttons()
+
+    # ------------------------------------------------------------------
+    # Auswahl
+    # ------------------------------------------------------------------
+
+    def refresh_selection(self):
+        selected = self.controller.selection()
+        for button in self._sel_buttons:
+            button.setEnabled(bool(selected))
+        self._label_edit.setEnabled(bool(selected))
+        if not selected:
+            self._selection_label.setText("Nichts ausgewählt")
+            self._label_edit.clear()
+            return
+        counts = Counter(f.attribute("typ") or _ROLE_TITLES.get(role, role) for role, f in selected)
+        parts = [f"{n}× {name}" if n > 1 else name for name, n in counts.most_common()]
+        self._selection_label.setText(f"{len(selected)} ausgewählt: " + ", ".join(parts))
+        labels = {f.attribute("bezeichnung") or "" for _role, f in selected}
+        uniform = len(labels) == 1
+        self._label_edit.blockSignals(True)
+        self._label_edit.setText(next(iter(labels)) if uniform else "")
+        self._label_edit.setPlaceholderText(
+            "z.B. Zelt 1, Küche, NEA Nord" if uniform else "unterschiedlich – Eingabe gilt für alle"
+        )
+        self._label_edit.blockSignals(False)
+
+    def focus_label(self):
+        self.show()
+        self.raise_()
+        self._label_edit.setFocus()
+        self._label_edit.selectAll()
+
+    def _on_label_edited(self):
+        if not self._label_edit.isModified():
+            return
+        self._label_edit.setModified(False)
+        self.controller.set_selection_label(self._label_edit.text().strip())
 
     # ------------------------------------------------------------------
     # Werkzeuge
@@ -243,9 +348,7 @@ class PlanningDock(QDockWidget):
         if checked:
             self.controller.activate_tool(kind, type_id)
         else:
-            tool = self.controller.canvas.mapTool()
-            if tool is not None:
-                self.controller.canvas.unsetMapTool(tool)
+            self.controller.deactivate_tool()
         self.sync_tool_buttons()
 
     def sync_tool_buttons(self):
@@ -295,6 +398,45 @@ class PlanningDock(QDockWidget):
         )
         dists = data["verteiler"]
         section("Verteiler", [(k, v["anzahl"], "") for k, v in sorted(dists.items())], "")
+
+        gens = data["stromerzeuger"]
+        section(
+            "Stromerzeuger",
+            [(k, v["anzahl"], f"{fmt_m(v['leistung'])} kVA") for k, v in sorted(gens.items())],
+            f"{fmt_m(sum(v['leistung'] for v in gens.values()))} kVA",
+        )
+        lights = data["beleuchtung"]
+        section(
+            "Beleuchtung",
+            [(k, v["anzahl"], f"{fmt_m(round(v['leistung'] / 1000, 1))} kW") for k, v in sorted(lights.items())],
+            f"{fmt_m(round(sum(v['leistung'] for v in lights.values()) / 1000, 1))} kW",
+        )
+
+        # Last je Stromerzeuger (über Leitungen und Verteiler verbunden)
+        nets = data["netze"]
+        if nets or data["nicht_angeschlossen"]:
+            parent = QTreeWidgetItem(["Last je Stromerzeuger", "", ""])
+            font = parent.font(0)
+            font.setBold(True)
+            parent.setFont(0, font)
+            for net in nets:
+                load = (
+                    f"{fmt_m(round(net['last_w'] / 1000, 1))} kW / {fmt_m(net['kva'])} kVA"
+                    f" ({round(net['auslastung'] * 100)} %)"
+                )
+                child = QTreeWidgetItem([net["name"], f"{net['leuchten']} Leuchten", load])
+                if net["auslastung"] > 1.0:
+                    for col in range(3):
+                        child.setForeground(col, _WARN_BRUSH)
+                    child.setToolTip(2, "Überlastet: Last größer als 80 % der Nennleistung (cos φ ≈ 0,8)")
+                parent.addChild(child)
+            if data["nicht_angeschlossen"]:
+                child = QTreeWidgetItem(["Nicht angeschlossen", f"{data['nicht_angeschlossen']} Leuchten", ""])
+                for col in range(3):
+                    child.setForeground(col, _WARN_BRUSH)
+                parent.addChild(child)
+            self._summary.addTopLevelItem(parent)
+            parent.setExpanded(True)
 
         for col in range(3):
             self._summary.resizeColumnToContents(col)

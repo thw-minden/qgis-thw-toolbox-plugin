@@ -1,4 +1,4 @@
-"""Metrische Hilfsfunktionen für die Lagerplanung.
+"""Metrische Hilfsfunktionen für die Objektplanung.
 
 Alle Konstruktionen (Zelt-Rechtecke, Abstände, Flächenbelegung) laufen in
 einer lokalen UTM-Zone, damit Meterangaben unabhängig vom Projekt-CRS
@@ -249,3 +249,114 @@ def _pack_axis_aligned(usable: QgsGeometry, length: float, width: float, gap: fl
         if len(placed) > len(best):
             best = placed
     return best
+
+
+def rotate_offset(dx: float, dy: float, rotation: float) -> tuple[float, float]:
+    """Versatz in Objektachsen → Weltachsen (gleiche Drehrichtung wie ``tent_polygon``)."""
+    theta = math.radians(rotation)
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    return dx * cos_t + dy * sin_t, -dx * sin_t + dy * cos_t
+
+
+def grid_centers(
+    center: QgsPointXY, rows: int, cols: int, length: float, width: float, gap: float, rotation: float
+) -> list[QgsPointXY]:
+    """Mittelpunkte eines ``rows × cols``-Rasters um ``center`` (metrisch).
+
+    Spalten laufen entlang der Länge, Reihen entlang der Breite; zwischen
+    zwei Objekten liegt genau ``gap``.
+    """
+    step_x, step_y = length + gap, width + gap
+    x0 = -(cols - 1) * step_x / 2.0
+    y0 = -(rows - 1) * step_y / 2.0
+    result = []
+    for r in range(rows):
+        for c in range(cols):
+            dx, dy = rotate_offset(x0 + c * step_x, y0 + r * step_y, rotation)
+            result.append(QgsPointXY(center.x() + dx, center.y() + dy))
+    return result
+
+
+@dataclass
+class AlignResult:
+    dx: float = 0.0  # Weltachsen, metrisch
+    dy: float = 0.0
+    guides: list[QgsGeometry] = field(default_factory=list)  # Hilfslinien, metrisch
+
+
+def _to_local(p: QgsPointXY, rotation: float) -> tuple[float, float]:
+    theta = math.radians(rotation)
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    return p.x() * cos_t - p.y() * sin_t, p.x() * sin_t + p.y() * cos_t
+
+
+def _local_extent(geom: QgsGeometry, rotation: float) -> tuple[float, float, float, float]:
+    pts = [_to_local(QgsPointXY(v), rotation) for v in geom.vertices()]
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _from_local(x: float, y: float, rotation: float) -> QgsPointXY:
+    dx, dy = rotate_offset(x, y, rotation)
+    return QgsPointXY(dx, dy)
+
+
+def _best_shift(moving: tuple, others: list[tuple], gap: float, tol: float):
+    """Kleinste Verschiebung, mit der eine Kante/Mitte von ``moving`` auf die eines Nachbarn fällt.
+
+    ``moving`` / ``others``: (min, mitte, max) entlang einer Achse. Kanten
+    rasten außerdem im Abstand ``gap`` neben der Nachbarkante ein.
+    Liefert (shift, ziel, index des Nachbarn) oder None.
+    """
+    best = None
+    for i, (o_min, o_mid, o_max) in enumerate(others):
+        pairs = [
+            (moving[0], o_min),
+            (moving[1], o_mid),
+            (moving[2], o_max),
+            (moving[0], o_max),
+            (moving[2], o_min),
+        ]
+        if gap > 0:
+            pairs += [(moving[0], o_max + gap), (moving[2], o_min - gap)]
+        for m, target in pairs:
+            shift = target - m
+            if abs(shift) <= tol and (best is None or abs(shift) < abs(best[0]) - 1e-9):
+                best = (shift, target, i)
+    return best
+
+
+def align_snap(moving: QgsGeometry, others: list[QgsGeometry], rotation: float, gap: float, tol: float) -> AlignResult:
+    """Richtet ``moving`` an Kanten und Mitten der ``others`` aus (alles metrisch).
+
+    Gerechnet wird in den Achsen des bewegten Objekts (``rotation``), so
+    rasten gleich gedrehte Zelte sauber in Reihe ein. ``tol`` ist der
+    Fangabstand in Metern. Die Hilfslinien laufen über bewegtes Objekt
+    und Nachbar hinweg.
+    """
+    if moving is None or moving.isEmpty() or not others:
+        return AlignResult()
+    m = _local_extent(moving, rotation)
+    exts = [_local_extent(o, rotation) for o in others if o is not None and not o.isEmpty()]
+    if not exts:
+        return AlignResult()
+
+    hit_x = _best_shift((m[0], (m[0] + m[2]) / 2, m[2]), [(e[0], (e[0] + e[2]) / 2, e[2]) for e in exts], gap, tol)
+    hit_y = _best_shift((m[1], (m[1] + m[3]) / 2, m[3]), [(e[1], (e[1] + e[3]) / 2, e[3]) for e in exts], gap, tol)
+    sx = hit_x[0] if hit_x else 0.0
+    sy = hit_y[0] if hit_y else 0.0
+
+    guides = []
+    if hit_x:
+        _, x, i = hit_x
+        e = exts[i]
+        y_lo, y_hi = min(m[1] + sy, e[1]), max(m[3] + sy, e[3])
+        guides.append(QgsGeometry.fromPolylineXY([_from_local(x, y_lo, rotation), _from_local(x, y_hi, rotation)]))
+    if hit_y:
+        _, y, i = hit_y
+        e = exts[i]
+        x_lo, x_hi = min(m[0] + sx, e[0]), max(m[2] + sx, e[2])
+        guides.append(QgsGeometry.fromPolylineXY([_from_local(x_lo, y, rotation), _from_local(x_hi, y, rotation)]))
+
+    dx, dy = rotate_offset(sx, sy, rotation)
+    return AlignResult(dx=dx, dy=dy, guides=guides)

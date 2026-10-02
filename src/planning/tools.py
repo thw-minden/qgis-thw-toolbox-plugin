@@ -1,23 +1,35 @@
-"""Kartenwerkzeuge der Lagerplanung."""
+"""Kartenwerkzeuge der Objektplanung."""
 
 import math
 
 from qgis.core import (
     Qgis,
+    QgsCoordinateTransform,
     QgsFeatureRequest,
     QgsGeometry,
     QgsPointXY,
+    QgsProject,
     QgsRectangle,
 )
 from qgis.gui import QgsMapTool, QgsRubberBand, QgsVertexMarker
-from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QColor, QCursor
-from qgis.PyQt.QtWidgets import QToolTip
+from qgis.PyQt.QtCore import QPoint, QPointF, Qt
+from qgis.PyQt.QtGui import QColor, QCursor, QPolygonF
+from qgis.PyQt.QtWidgets import QMenu, QToolTip
 
 from ..logging_utils import get_logger
+from ..tools.selection_frame import rotate_cursor
 from .catalog import fmt_m
-from .geometry import MetricFrame, circle_polygon, point_along, tent_polygon
-from .layers import ROLE_CABLES, ROLE_DISTRIBUTORS, ROLE_TENTS, ROLE_VEHICLES
+from .geometry import MetricFrame, circle_polygon, point_along
+from .layers import (
+    FOOTPRINT_ROLES,
+    ROLE_CABLES,
+    ROLE_DISTRIBUTORS,
+    ROLE_GENERATORS,
+    ROLE_LIGHTS,
+    ROLE_TENTS,
+    ROLE_VEHICLES,
+)
+from .selection_overlay import HANDLE_PX, SelectionOverlay
 
 logger = get_logger(__name__)
 
@@ -26,12 +38,24 @@ _OK_LINE = QColor(27, 94, 32)
 _BAD_FILL = QColor(229, 57, 53, 90)
 _BAD_LINE = QColor(183, 28, 28)
 _HINT_LINE = QColor(66, 66, 66, 160)
-# Fangradius für Verteiler / Leitungsenden und Löschen (Pixel)
+_GUIDE_LINE = QColor(233, 30, 99)
+# Fangradius für Verteiler / Leitungsenden, Auswahl und Hilfslinien (Pixel)
 _SNAP_PX = 12
+_ALIGN_PX = 8
 _ROTATE_STEP_DEG = 15
 _FINE_ROTATE_STEP_DEG = 5
+# Mausweg, ab dem ein Klick auf ein Objekt als Ziehen gilt (Pixel)
+_DRAG_THRESHOLD_PX = 3
+# Greifbereich der Eckpunkte und Drehzone außerhalb der Ecken (Pixel, wie bei den taktischen Zeichen)
+_HANDLE_GRAB_PX = HANDLE_PX / 2.0 + 3.0
+_ROTATE_ZONE_PX = 22.0
+# Pfeiltasten verschieben die Auswahl um so viele Meter (mit Shift: groß)
+_NUDGE_M = 0.5
+_NUDGE_BIG_M = 5.0
 # Rundungstoleranz bei Abstandsprüfungen (Meter)
 _EPS_M = 0.01
+# Trefferreihenfolge: Punkte und Linien zuerst, sonst wären sie auf Zelten nicht greifbar
+_PICK_ORDER = (ROLE_GENERATORS, ROLE_DISTRIBUTORS, ROLE_LIGHTS, ROLE_CABLES, ROLE_VEHICLES, ROLE_TENTS)
 
 
 def _polygon_type():
@@ -52,6 +76,13 @@ def _band(canvas, geom_type, fill=None, line=None, width=2, dashed=False) -> Qgs
     if dashed:
         band.setLineStyle(Qt.PenStyle.DashLine)
     return band
+
+
+def _collect(geoms: list[QgsGeometry]) -> QgsGeometry:
+    geoms = [g for g in geoms if g is not None and not g.isEmpty()]
+    if not geoms:
+        return QgsGeometry()
+    return geoms[0] if len(geoms) == 1 else QgsGeometry.collectGeometry(geoms)
 
 
 class _PlanningTool(QgsMapTool):
@@ -78,10 +109,20 @@ class _PlanningTool(QgsMapTool):
         self._bands = []
 
     def _tooltip(self, event, text: str):
-        QToolTip.showText(self.canvas.mapToGlobal(event.pos()), text, self.canvas)
+        self._tooltip_at(event.pos(), text)
+
+    def _tooltip_at(self, pos: QPoint, text: str):
+        QToolTip.showText(self.canvas.mapToGlobal(pos), text, self.canvas)
 
     def _pixel_tolerance(self) -> float:
         return _SNAP_PX * self.canvas.mapUnitsPerPixel()
+
+    def _pixels_in_m(self, frame: MetricFrame, map_point: QgsPointXY, pixels: float) -> float:
+        """Wie viele Meter ``pixels`` Bildschirmpixel an ``map_point`` entsprechen."""
+        canvas_frame = MetricFrame(self.canvas.mapSettings().destinationCrs(), map_point)
+        offset = QgsPointXY(map_point.x() + pixels * self.canvas.mapUnitsPerPixel(), map_point.y())
+        a, b = canvas_frame.point_to_m(map_point), canvas_frame.point_to_m(offset)
+        return math.hypot(b.x() - a.x(), b.y() - a.y())
 
     def deactivate(self):
         self._dispose_bands()
@@ -101,17 +142,18 @@ class _PlanningTool(QgsMapTool):
 
 
 # ----------------------------------------------------------------------
-# Zelt / Fahrzeug platzieren
+# Zelt / Fahrzeug platzieren (einzeln oder als Raster)
 # ----------------------------------------------------------------------
 
 
 class FootprintTool(_PlanningTool):
-    """Zelt oder Fahrzeug (``role``) maßstabsgetreu platzieren.
+    """Zelt oder Fahrzeug (``role``) maßstabsgetreu platzieren, ggf. als Raster.
 
-    Vorschau folgt der Maus (grün = passt, rot = Mindestabstand verletzt).
-    R / Shift+R dreht um ±15°, Strg+Mausrad um ±5°, Rechtsklick um 90°.
-    Shift+Klick platziert auch bei Konflikt. Bei Fahrzeugen markiert eine
-    dicke Kante die Front.
+    Vorschau folgt der Maus (grün = passt, rot = Mindestabstand unterschritten,
+    gesetzt wird trotzdem). R / Shift+R dreht um ±15°, Strg+Mausrad um ±5°,
+    Rechtsklick um 90°. Hilfslinien richten an Nachbarn aus, Strg gedrückt
+    halten schaltet das Einrasten ab. Bei Fahrzeugen markiert eine dicke
+    Kante die Front.
     """
 
     def __init__(self, canvas, controller, role: str):
@@ -120,8 +162,13 @@ class FootprintTool(_PlanningTool):
         self._body = self._new_band(_polygon_type(), _OK_FILL, _OK_LINE, 2)
         self._guy = self._new_band(_polygon_type(), QColor(0, 0, 0, 0), _HINT_LINE, 1, dashed=True)
         self._front = self._new_band(_line_type(), None, _OK_LINE, 5)
-        self._last_map_point = None
-        self._last_event = None
+        self._guides = self._new_band(_line_type(), None, _GUIDE_LINE, 1, dashed=True)
+        self._last_map_point: QgsPointXY | None = None
+        # Nur die Pixelposition merken, nie das Event selbst: Qt löscht das
+        # C++-Objekt nach dem Handler, späterer Zugriff stürzt QGIS ab.
+        self._last_pos: QPoint | None = None
+        self._no_align = False
+        self._snapped_center: QgsPointXY | None = None  # Layer-CRS
 
     def activate(self):
         super().activate()
@@ -129,8 +176,9 @@ class FootprintTool(_PlanningTool):
         self._guy.show()
 
     def canvasMoveEvent(self, event):
-        self._last_map_point = event.mapPoint()
-        self._last_event = event
+        self._last_map_point = QgsPointXY(event.mapPoint())
+        self._last_pos = QPoint(event.pos())
+        self._no_align = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         self._update_preview()
 
     def _update_preview(self):
@@ -141,27 +189,51 @@ class FootprintTool(_PlanningTool):
         rotation = self.controller.rotation
         center = self.toLayerCoordinates(layer, self._last_map_point)
         frame = MetricFrame(layer.crs(), center)
-        body_m = tent_polygon(frame.point_to_m(center), obj.laenge, obj.breite, rotation)
-        conflict = self.controller.footprint_conflict(self.role, body_m, frame)
+        center_m = frame.point_to_m(center)
+        bodies = self.controller.grid_bodies_m(self.role, center_m)
+
+        guides = []
+        if not self._no_align:
+            tol = self._pixels_in_m(frame, self._last_map_point, _ALIGN_PX)
+            snap = self.controller.align(_collect(bodies), frame, rotation, self.controller.gaps[self.role], tol)
+            if snap and (snap.dx or snap.dy):
+                center_m = QgsPointXY(center_m.x() + snap.dx, center_m.y() + snap.dy)
+                bodies = self.controller.grid_bodies_m(self.role, center_m)
+            if snap:
+                guides = snap.guides
+        self._snapped_center = frame.point_from_m(center_m)
+
+        conflict = next(
+            (c for c in (self.controller.footprint_conflict(self.role, b, frame) for b in bodies) if c), None
+        )
 
         self._body.setFillColor(_BAD_FILL if conflict else _OK_FILL)
         self._body.setStrokeColor(_BAD_LINE if conflict else _OK_LINE)
-        self._body.setToGeometry(frame.geom_from_m(body_m), layer)
+        self._body.setToGeometry(frame.geom_from_m(_collect(bodies)), layer)
         if obj.abspannung > 0:
-            self._guy.setToGeometry(frame.geom_from_m(body_m.buffer(obj.abspannung, 2)), layer)
+            self._guy.setToGeometry(frame.geom_from_m(_collect([b.buffer(obj.abspannung, 2) for b in bodies])), layer)
         else:
             self._guy.reset(_polygon_type())
         if self.role == ROLE_VEHICLES:
-            ring = body_m.asPolygon()[0]
+            fronts = []
+            for b in bodies:
+                ring = b.asPolygon()[0]
+                fronts.append(QgsGeometry.fromPolylineXY([ring[1], ring[2]]))
             self._front.setStrokeColor(_BAD_LINE if conflict else _OK_LINE)
-            self._front.setToGeometry(frame.geom_from_m(QgsGeometry.fromPolylineXY([ring[1], ring[2]])), layer)
+            self._front.setToGeometry(frame.geom_from_m(_collect(fronts)), layer)
+        if guides:
+            self._guides.setToGeometry(frame.geom_from_m(_collect(guides)), layer)
+        else:
+            self._guides.reset(_line_type())
 
-        if self._last_event is not None:
+        if self._last_pos is not None:
             text = f"{obj.label()} · {fmt_m(rotation)}°"
+            if self.controller.grid_rows * self.controller.grid_cols > 1:
+                text += f" · Raster {self.controller.grid_rows} × {self.controller.grid_cols}"
             if conflict:
                 gap = fmt_m(self.controller.gaps[self.role])
                 text += f"\n⚠ Mindestabstand {gap} m unterschritten ({conflict})"
-            self._tooltip(self._last_event, text)
+            self._tooltip_at(self._last_pos, text)
 
     def canvasReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.RightButton:
@@ -170,9 +242,13 @@ class FootprintTool(_PlanningTool):
             return
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        force = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
         layer = self.controller.layers.layer(self.role)
-        self.controller.place_footprint(self.role, self.toLayerCoordinates(layer, event.mapPoint()), force)
+        if layer is None:
+            return
+        if self._snapped_center is None:
+            self._last_map_point = QgsPointXY(event.mapPoint())
+            self._update_preview()
+        self.controller.place_footprint(self.role, self._snapped_center)
         self._update_preview()
 
     def wheelEvent(self, event):
@@ -195,6 +271,45 @@ class FootprintTool(_PlanningTool):
 
 
 # ----------------------------------------------------------------------
+# Punkt-Objekte: Verteiler, Stromerzeuger, Beleuchtung
+# ----------------------------------------------------------------------
+
+
+class PointTool(_PlanningTool):
+    """Verteiler, Stromerzeuger oder Leuchte per Klick setzen.
+
+    Bei Leuchten zeigt ein Kreis den ausgeleuchteten Bereich.
+    """
+
+    def __init__(self, canvas, controller, role: str):
+        super().__init__(canvas, controller)
+        self.role = role
+        self._reach = self._new_band(_polygon_type(), QColor(255, 235, 59, 50), QColor(249, 168, 37), 1, dashed=True)
+
+    def canvasMoveEvent(self, event):
+        obj = self.controller.current_point_type(self.role)
+        layer = self.controller.layers.layer(self.role)
+        if obj is None or layer is None:
+            return
+        text = f"{obj.name} setzen"
+        if self.role == ROLE_LIGHTS:
+            point = self.toLayerCoordinates(layer, event.mapPoint())
+            frame = MetricFrame(layer.crs(), point)
+            self._reach.setToGeometry(frame.geom_from_m(circle_polygon(frame.point_to_m(point), obj.radius)), layer)
+            text += f" · {fmt_m(obj.leistung_w)} W · Radius {fmt_m(obj.radius)} m"
+        elif self.role == ROLE_GENERATORS:
+            text += f" · {fmt_m(obj.leistung_kva)} kVA"
+        self._tooltip(event, text)
+
+    def canvasReleaseEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        layer = self.controller.layers.layer(self.role)
+        if layer is not None:
+            self.controller.place_point(self.role, self.toLayerCoordinates(layer, event.mapPoint()))
+
+
+# ----------------------------------------------------------------------
 # Leitungsroller verlegen
 # ----------------------------------------------------------------------
 
@@ -202,9 +317,9 @@ class FootprintTool(_PlanningTool):
 class CableTool(_PlanningTool):
     """Leitung eines Leitungsrollers verlegen, maximal so lang wie die Trommel.
 
-    Klick setzt Stützpunkte (fängt Verteiler und Leitungsenden),
-    Rechtsklick / Enter schließt ab, Rücktaste entfernt den letzten Punkt.
-    Der gestrichelte Kreis zeigt die Restreichweite.
+    Klick setzt Stützpunkte (fängt Stromerzeuger, Verteiler, Leuchten und
+    Leitungsenden), Rechtsklick / Enter schließt ab, Rücktaste entfernt den
+    letzten Punkt. Der gestrichelte Kreis zeigt die Restreichweite.
     """
 
     def __init__(self, canvas, controller):
@@ -240,7 +355,7 @@ class CableTool(_PlanningTool):
         return self.controller.layers.cables
 
     def _snapped(self, map_point) -> tuple[QgsPointXY, bool]:
-        """Layer-Koordinate des Cursors, ggf. auf Verteiler/Leitungsende gefangen."""
+        """Layer-Koordinate des Cursors, ggf. auf Stromerzeuger/Verteiler/Leitungsende gefangen."""
         layer = self._layer()
         point = self.toLayerCoordinates(layer, map_point)
         target = self.controller.snap_target(map_point, self._pixel_tolerance(), layer.crs())
@@ -265,7 +380,7 @@ class CableTool(_PlanningTool):
             return
         cursor, _ = self._snapped(event.mapPoint())
         if not self._points:
-            self._tooltip(event, f"{reel.name}: Startpunkt setzen (Verteiler werden gefangen)")
+            self._tooltip(event, f"{reel.name}: Startpunkt setzen (Stromerzeuger und Verteiler werden gefangen)")
             return
 
         used = self._length_m(self._points)
@@ -363,25 +478,6 @@ class CableTool(_PlanningTool):
 
 
 # ----------------------------------------------------------------------
-# Verteiler setzen
-# ----------------------------------------------------------------------
-
-
-class DistributorTool(_PlanningTool):
-    def canvasMoveEvent(self, event):
-        dist = self.controller.current_distributor()
-        if dist:
-            self._tooltip(event, f"{dist.name} setzen")
-
-    def canvasReleaseEvent(self, event):
-        if event.button() != Qt.MouseButton.LeftButton:
-            return
-        layer = self.controller.layers.distributors
-        if layer is not None:
-            self.controller.place_distributor(self.toLayerCoordinates(layer, event.mapPoint()))
-
-
-# ----------------------------------------------------------------------
 # Fläche zeichnen (Kapazität prüfen)
 # ----------------------------------------------------------------------
 
@@ -456,36 +552,87 @@ class AreaTool(_PlanningTool):
 
 
 # ----------------------------------------------------------------------
-# Löschen
+# Auswählen und bearbeiten wie in Figma
 # ----------------------------------------------------------------------
 
 
-class DeleteTool(_PlanningTool):
-    """Zelt, Leitung oder Verteiler per Klick entfernen (Vorschau rot)."""
+class SelectTool(_PlanningTool):
+    """Objekte auswählen und bearbeiten, wie die taktischen Zeichen (Figma-Stil).
+
+    Klick wählt aus, Shift+Klick ergänzt/entfernt, Ziehen auf freier Fläche
+    zieht einen Auswahlrahmen auf. Die Auswahl bekommt einen blauen Rahmen
+    mit Eckpunkten: Ziehen im Rahmen verschiebt (Hilfslinien richten aus,
+    Strg schaltet das ab, Alt+Ziehen zieht eine Kopie heraus), Ziehen an
+    oder knapp außerhalb einer Ecke dreht (Shift rastet in 15°-Schritten).
+    Pfeiltasten schieben um 0,5 m (Shift: 5 m), Entf löscht, R dreht,
+    D dupliziert, Enter / Doppelklick bearbeitet die Bezeichnung,
+    Rechtsklick öffnet ein Kontextmenü, Esc hebt die Auswahl auf.
+    """
 
     def __init__(self, canvas, controller):
         super().__init__(canvas, controller)
-        self._hl_poly = self._new_band(_polygon_type(), _BAD_FILL, _BAD_LINE, 3)
-        self._hl_line = self._new_band(_line_type(), None, _BAD_LINE, 5)
-        self._hl_point = self._new_band(Qgis.GeometryType.Point, None, _BAD_LINE, 3)
-        self._hl_point.setIcon(QgsRubberBand.IconType.ICON_BOX)
-        self._hl_point.setIconSize(20)
+        self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+        self.overlay: SelectionOverlay | None = None
+        self._gesture: str | None = None  # move | rotate | marquee
+        self._started = False
+        self._alt = False
+        self._press_pos: QPoint | None = None
+        self._press_map: QgsPointXY | None = None
+        self._frame: MetricFrame | None = None  # metrisches System der laufenden Geste
+        self._items: list[tuple[str, int, QgsGeometry]] = []  # Auswahl, metrisch
+        self._frame_m: list[QgsPointXY] = []  # Rahmenecken, metrisch
+        self._pivot_m: QgsPointXY | None = None
+        self._pivot_px: QPointF | None = None
+        self._base_rotation: float | None = None
+        self._result: dict[str, dict[int, QgsGeometry]] = {}
+        self._rotation_delta = 0.0
 
-    def _find(self, map_point):
+    # -- Lebenszyklus --------------------------------------------------------
+
+    def activate(self):
+        super().activate()
+        self.overlay = SelectionOverlay(self.canvas)
+        self.controller.layers.selection_changed.connect(self._refresh_overlay)
+        self.controller.layers.changed.connect(self._refresh_overlay)
+        self._refresh_overlay()
+
+    def deactivate(self):
+        for signal in (self.controller.layers.selection_changed, self.controller.layers.changed):
+            try:
+                signal.disconnect(self._refresh_overlay)
+            except (TypeError, RuntimeError):
+                pass
+        if self.overlay is not None:
+            self.overlay.dispose()
+            self.overlay = None
+        super().deactivate()
+
+    def _refresh_overlay(self):
+        if self.overlay is None or (self._started and self._gesture in ("move", "rotate")):
+            return
+        geoms, frame, badge = self.controller.selection_overlay()
+        self.overlay.selected = geoms
+        self.overlay.frame = frame
+        self.overlay.badge = badge
+        self.overlay.ghosts = []
+        self.overlay.guides = []
+        self.overlay.refresh()
+
+    # -- Treffer -------------------------------------------------------------
+
+    def _find(self, map_point: QgsPointXY):
         tol = self._pixel_tolerance()
         rect = QgsRectangle(map_point.x() - tol, map_point.y() - tol, map_point.x() + tol, map_point.y() + tol)
-        # Punkte und Linien zuerst, sonst wären sie auf Zelten nicht greifbar
-        for role in (ROLE_DISTRIBUTORS, ROLE_CABLES, ROLE_VEHICLES, ROLE_TENTS):
+        for role in _PICK_ORDER:
             layer = self.controller.layers.layer(role)
             if layer is None:
                 continue
             layer_rect = self.toLayerCoordinates(layer, rect)
             probe = QgsGeometry.fromPointXY(self.toLayerCoordinates(layer, map_point))
-            request = QgsFeatureRequest().setFilterRect(layer_rect)
             best, best_d = None, None
-            for feat in layer.getFeatures(request):
+            for feat in layer.getFeatures(QgsFeatureRequest().setFilterRect(layer_rect)):
                 geom = feat.geometry()
-                if role in (ROLE_TENTS, ROLE_VEHICLES):
+                if role in FOOTPRINT_ROLES:
                     if not geom.contains(probe):
                         continue
                     d = 0.0
@@ -497,29 +644,320 @@ class DeleteTool(_PlanningTool):
                 return role, best
         return None
 
-    def canvasMoveEvent(self, event):
-        hit = self._find(event.mapPoint())
-        self._reset_highlight()
+    def _in_rect(self, rect: QgsRectangle) -> list[tuple[str, int]]:
+        hits = []
+        for role in _PICK_ORDER:
+            layer = self.controller.layers.layer(role)
+            if layer is None:
+                continue
+            layer_rect = self.toLayerCoordinates(layer, rect)
+            layer_box = QgsGeometry.fromRect(layer_rect)
+            for feat in layer.getFeatures(QgsFeatureRequest().setFilterRect(layer_rect)):
+                if feat.geometry().intersects(layer_box):
+                    hits.append((role, feat.id()))
+        return hits
+
+    def _frame_hit(self, pos: QPointF) -> str | None:
+        """``rotate`` an/knapp außerhalb einer Ecke, ``move`` im Rahmen, sonst None."""
+        corners = self.overlay.frame_px() if self.overlay else None
+        if not corners:
+            return None
+        handles = self.overlay.frame_has_handles()
+        if handles:
+            for c in corners:
+                if max(abs(pos.x() - c.x()), abs(pos.y() - c.y())) <= _HANDLE_GRAB_PX:
+                    return "rotate"
+        if QPolygonF(corners).containsPoint(pos, Qt.FillRule.OddEvenFill):
+            return "move"
+        if handles:
+            for c in corners:
+                if math.dist((pos.x(), pos.y()), (c.x(), c.y())) <= _ROTATE_ZONE_PX:
+                    return "rotate"
+        return None
+
+    def _to_canvas(self, role: str, geom: QgsGeometry) -> QgsGeometry:
+        layer = self.controller.layers.layer(role)
+        g = QgsGeometry(geom)
+        g.transform(
+            QgsCoordinateTransform(layer.crs(), self.canvas.mapSettings().destinationCrs(), QgsProject.instance())
+        )
+        return g
+
+    # -- Gesten --------------------------------------------------------------
+
+    def _prepare(self):
+        """Auswahl und Rahmen für Verschieben/Drehen metrisch vormerken."""
+        canvas_crs = self.canvas.mapSettings().destinationCrs()
+        self._frame = MetricFrame(canvas_crs, self._press_map)
+        self._items = []
+        self._base_rotation = None
+        selected = self.controller.selection()
+        for role, feat in selected:
+            if feat.hasGeometry():
+                layer = self.controller.layers.layer(role)
+                self._items.append((role, feat.id(), self._frame.geom_to_m_from(feat.geometry(), layer.crs())))
+        if len(selected) == 1 and selected[0][0] in FOOTPRINT_ROLES:
+            self._base_rotation = float(selected[0][1].attribute("rotation") or 0)
+        _geoms, corners, _badge = self.controller.selection_overlay()
+        self._frame_m = [self._frame.point_to_m(c) for c in corners] if corners else []
+        if self._frame_m:
+            cx = sum(p.x() for p in self._frame_m) / len(self._frame_m)
+            cy = sum(p.y() for p in self._frame_m) / len(self._frame_m)
+            self._pivot_m = QgsPointXY(cx, cy)
+            self._pivot_px = self.overlay.to_px(self._frame.point_from_m(self._pivot_m))
+        self._result = {}
+        self._rotation_delta = 0.0
+
+    def canvasPressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton or self.overlay is None:
+            return
+        self._press_pos = QPoint(event.pos())
+        self._press_map = QgsPointXY(event.mapPoint())
+        self._started = False
+        mods = event.modifiers()
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        self._alt = bool(mods & Qt.KeyboardModifier.AltModifier)
+
+        frame_hit = None if shift else self._frame_hit(QPointF(event.pos()))
+        if frame_hit == "rotate":
+            self._gesture = "rotate"
+            self._prepare()
+            return
+        hit = self._find(self._press_map)
         if hit is None:
-            QToolTip.hideText()
+            self._gesture = "move" if frame_hit == "move" else "marquee"
+            if self._gesture == "move":
+                self._prepare()
             return
         role, feat = hit
-        band = {ROLE_DISTRIBUTORS: self._hl_point, ROLE_CABLES: self._hl_line}.get(role, self._hl_poly)
-        band.setToGeometry(feat.geometry(), self.controller.layers.layer(role))
-        name = feat.attribute("bezeichnung") or feat.attribute("typ")
-        self._tooltip(event, f"Klick löscht: {name}")
+        if shift:
+            self.controller.select([(role, feat.id())], "toggle")
+            self._gesture = None
+            return
+        if feat.id() not in self.controller.selection_ids().get(role, set()):
+            self.controller.select([(role, feat.id())])
+        self._gesture = "move"
+        self._prepare()
+
+    def _past_threshold(self, pos: QPoint) -> bool:
+        if self._press_pos is None:
+            return False
+        return max(abs(pos.x() - self._press_pos.x()), abs(pos.y() - self._press_pos.y())) >= _DRAG_THRESHOLD_PX
+
+    def canvasMoveEvent(self, event):
+        if self.overlay is None:
+            return
+        pos = QPoint(event.pos())
+        map_point = QgsPointXY(event.mapPoint())
+        mods = event.modifiers()
+        if self._gesture and (self._started or self._past_threshold(pos)):
+            if not self._started:
+                self._started = True
+                self.overlay.hover = None
+                if self._gesture == "move" and self._alt:
+                    # Alt+Ziehen: Kopie liegt deckungsgleich, gezogen wird die Kopie
+                    self.controller.duplicate_selection(offset=False)
+                    self._prepare()
+            if self._gesture == "move":
+                self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+                self._update_move(map_point, bool(mods & Qt.KeyboardModifier.ControlModifier))
+            elif self._gesture == "rotate":
+                self._update_rotate(QPointF(pos), bool(mods & Qt.KeyboardModifier.ShiftModifier))
+            else:
+                self.overlay.marquee = (self._press_map, map_point)
+                self.overlay.refresh()
+            return
+        if event.buttons() != Qt.MouseButton.NoButton:
+            return
+
+        # Hover: Rahmen-Ecke → Drehen-Cursor, Objekt → dünner blauer Umriss
+        frame_hit = self._frame_hit(QPointF(pos))
+        hit = self._find(map_point)
+        hover = None
+        if hit is not None:
+            role, feat = hit
+            if feat.id() not in self.controller.selection_ids().get(role, set()):
+                hover = self._to_canvas(role, feat.geometry())
+        if frame_hit == "rotate":
+            self.setCursor(rotate_cursor())
+        elif hit is not None or frame_hit == "move":
+            self.setCursor(QCursor(Qt.CursorShape.SizeAllCursor if frame_hit == "move" else Qt.CursorShape.ArrowCursor))
+        else:
+            self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+        if (hover is None) != (self.overlay.hover is None) or hover is not None:
+            self.overlay.hover = hover
+            self.overlay.refresh()
+
+    def _show_ghosts(self, geoms_m: list[tuple[str, int, QgsGeometry]], frame_m: list[QgsPointXY], badge: str):
+        frame = self._frame
+        self._result = {}
+        ghosts = []
+        for role, fid, g in geoms_m:
+            layer = self.controller.layers.layer(role)
+            self._result.setdefault(role, {})[fid] = frame.geom_from_m(g, layer.crs())
+            ghosts.append(frame.geom_from_m(g))
+        self.overlay.ghosts = ghosts
+        self.overlay.frame = [frame.point_from_m(p) for p in frame_m] or None
+        self.overlay.badge = badge
+        self.overlay.refresh()
+
+    def _update_move(self, map_point: QgsPointXY, no_align: bool):
+        frame = self._frame
+        a, b = frame.point_to_m(self._press_map), frame.point_to_m(map_point)
+        dx, dy = b.x() - a.x(), b.y() - a.y()
+        exclude = self.controller.selection_ids()
+
+        footprints = [(r, g) for r, _fid, g in self._items if r in FOOTPRINT_ROLES]
+        guides = []
+        if footprints and not no_align:
+            moved = []
+            for _r, g in footprints:
+                g = QgsGeometry(g)
+                g.translate(dx, dy)
+                moved.append(g)
+            rotation = self._base_rotation or 0.0
+            gap = max(self.controller.gaps.get(r, 0.0) for r, _g in footprints)
+            tol = self._pixels_in_m(frame, map_point, _ALIGN_PX)
+            snap = self.controller.align(_collect(moved), frame, rotation, gap, tol, exclude=exclude)
+            if snap:
+                dx, dy = dx + snap.dx, dy + snap.dy
+                guides = snap.guides
+
+        moved_items = []
+        for role, fid, g in self._items:
+            g = QgsGeometry(g)
+            g.translate(dx, dy)
+            moved_items.append((role, fid, g))
+        frame_m = [QgsPointXY(p.x() + dx, p.y() + dy) for p in self._frame_m]
+
+        badge = f"{fmt_m(round(math.hypot(dx, dy), 1))} m verschoben"
+        if footprints:
+            moved_fp = _collect([g for r, _f, g in moved_items if r in FOOTPRINT_ROLES])
+            near = self.controller.nearest_gap(moved_fp, frame, exclude)
+            if near is not None:
+                gap = max(self.controller.gaps.get(r, 0.0) for r, _g in footprints)
+                warn = "⚠ " if near[0] < gap - _EPS_M else ""
+                badge = f"{warn}Abstand {fmt_m(round(near[0], 1))} m zu {near[1]}"
+        self.overlay.guides = [frame.geom_from_m(g) for g in guides]
+        self._show_ghosts(moved_items, frame_m, badge)
+
+    def _update_rotate(self, pos: QPointF, snap: bool):
+        pivot = self._pivot_px
+        if pivot is None:
+            return
+
+        def angle(p: QPointF) -> float:
+            return math.degrees(math.atan2(p.y() - pivot.y(), p.x() - pivot.x()))
+
+        press = QPointF(self._press_pos)
+        # Bildschirm-y zeigt nach unten → positive Winkel drehen im Uhrzeigersinn (wie QgsGeometry.rotate)
+        delta = (angle(pos) - angle(press) + 180.0) % 360.0 - 180.0
+        if snap:
+            base = self._base_rotation or 0.0
+            delta = round((base + delta) / _ROTATE_STEP_DEG) * _ROTATE_STEP_DEG - base
+        self._rotation_delta = delta
+
+        rotated = []
+        for role, fid, g in self._items:
+            g = QgsGeometry(g)
+            g.rotate(delta, self._pivot_m)
+            rotated.append((role, fid, g))
+        frame_m = []
+        for p in self._frame_m:
+            pg = QgsGeometry.fromPointXY(p)
+            pg.rotate(delta, self._pivot_m)
+            frame_m.append(pg.asPoint())
+        if self._base_rotation is not None:
+            badge = f"{fmt_m(round((self._base_rotation + delta) % 360.0))}°"
+        else:
+            badge = f"{'+' if delta >= 0 else ''}{fmt_m(round(delta))}°"
+        self._show_ghosts(rotated, frame_m, badge)
 
     def canvasReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.RightButton:
+            self._context_menu(QPoint(event.pos()), QgsPointXY(event.mapPoint()))
+            return
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        hit = self._find(event.mapPoint())
-        if hit is None:
-            return
-        role, feat = hit
-        self.controller.layers.delete_feature(role, feat.id())
-        self._reset_highlight()
+        gesture, started = self._gesture, self._started
+        if started and gesture == "move" and self._result:
+            self.controller.transform_selection(self._result)
+        elif started and gesture == "rotate" and self._result and abs(self._rotation_delta) > 1e-6:
+            self.controller.transform_selection(self._result, self._rotation_delta)
+        elif gesture == "marquee":
+            shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            if started:
+                hits = self._in_rect(QgsRectangle(self._press_map, QgsPointXY(event.mapPoint())))
+                self.controller.select(hits, "add" if shift else "replace")
+            elif not shift:
+                self.controller.clear_selection()
+        self._end_gesture()
 
-    def _reset_highlight(self):
-        self._hl_poly.reset(_polygon_type())
-        self._hl_line.reset(_line_type())
-        self._hl_point.reset(Qgis.GeometryType.Point)
+    def canvasDoubleClickEvent(self, event):
+        if self._find(QgsPointXY(event.mapPoint())) is not None:
+            self.controller.focus_label()
+
+    def _end_gesture(self):
+        self._gesture = None
+        self._started = False
+        self._press_pos = None
+        self._items = []
+        self._result = {}
+        self._rotation_delta = 0.0
+        if self.overlay is not None:
+            self.overlay.marquee = None
+        self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+        self._refresh_overlay()
+
+    def _context_menu(self, pos: QPoint, map_point: QgsPointXY):
+        hit = self._find(map_point)
+        if hit is not None and hit[1].id() not in self.controller.selection_ids().get(hit[0], set()):
+            self.controller.select([(hit[0], hit[1].id())])
+        if not self.controller.selection_ids():
+            return
+        menu = QMenu(self.canvas)
+        menu.addAction("Bezeichnung bearbeiten …\tEnter", self.controller.focus_label)
+        menu.addAction("Duplizieren\tD", self.controller.duplicate_selection)
+        menu.addAction("Drehen 90°", lambda: self.controller.rotate_selection(90))
+        menu.addAction("Drehen 15°\tR", lambda: self.controller.rotate_selection(15))
+        menu.addSeparator()
+        menu.addAction("Löschen\tEntf", self.controller.delete_selection)
+        menu.exec(self.canvas.mapToGlobal(pos))
+
+    # -- Tastatur -----------------------------------------------------------
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        has_selection = bool(self.controller.selection_ids())
+        nudge = {
+            Qt.Key.Key_Left: (-1, 0),
+            Qt.Key.Key_Right: (1, 0),
+            Qt.Key.Key_Up: (0, 1),
+            Qt.Key.Key_Down: (0, -1),
+        }
+        if key in nudge and has_selection and not ctrl:
+            step = _NUDGE_BIG_M if shift else _NUDGE_M
+            dx, dy = nudge[key]
+            self.controller.nudge_selection(dx * step, dy * step)
+        elif key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and has_selection:
+            self.controller.delete_selection()
+        elif key == Qt.Key.Key_R and not ctrl and has_selection:
+            self.controller.rotate_selection(-_ROTATE_STEP_DEG if shift else _ROTATE_STEP_DEG)
+        elif key == Qt.Key.Key_D and not ctrl and has_selection:
+            self.controller.duplicate_selection()
+        elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and has_selection:
+            self.controller.focus_label()
+        elif key == Qt.Key.Key_Escape:
+            if self._gesture:
+                self._end_gesture()
+            elif has_selection:
+                self.controller.clear_selection()
+            else:
+                self.cancel()
+        else:
+            # Pfeiltasten ohne Auswahl → QGIS verschiebt die Karte
+            event.ignore()
+            return
+        event.accept()
