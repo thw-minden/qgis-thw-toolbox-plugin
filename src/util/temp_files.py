@@ -1,4 +1,5 @@
 import glob
+import hashlib
 import os
 import shutil
 import time
@@ -111,7 +112,10 @@ def create_temp_svg_from_content(plugin_dir: str, svg_content: str, feature_id) 
     cache_dir = os.path.join(plugin_dir, "temp_files", "svg_cache")
     os.makedirs(cache_dir, exist_ok=True)
 
-    temp_path = os.path.join(cache_dir, f"feature_{feature_id}.svg")
+    # Inhalts-Hash im Namen: QGIS cached SVGs pro Pfad — nach einem Zeichen-Wechsel
+    # würde sonst noch eine Weile das alte Bild gezeichnet.
+    digest = hashlib.md5(svg_content.encode("utf-8")).hexdigest()[:10]
+    temp_path = os.path.join(cache_dir, f"feature_{feature_id}_{digest}.svg")
 
     try:
         with open(temp_path, "w", encoding="utf-8") as f:
