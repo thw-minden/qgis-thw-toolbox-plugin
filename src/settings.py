@@ -28,6 +28,12 @@ class THWToolboxSettings:
 
     @property
     def new_icon_scaling_with_map(self) -> bool:
+        """Initial `scale_with_map` value for new symbols.
+
+        Despite the name, True means a fixed screen size (millimetres) — same
+        inverted meaning as the feature attribute, see layer.renderer.size_unit.
+        Kept as-is so settings saved in existing projects stay valid.
+        """
         return self._new_icon_scaling_with_map
 
     @new_icon_scaling_with_map.setter
