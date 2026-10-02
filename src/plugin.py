@@ -35,6 +35,7 @@ from .layer.renderer import apply_renderer
 from .layout.mgrs_grid import build_mgrs_grid_layer
 from .logging_utils import get_logger
 from .paths import plugin_root
+from .planning.controller import PlanningController
 from .settings import THWToolboxSettings
 from .tools import style_library
 from .tools.canvas_drop_filter import CanvasDropFilter
@@ -76,6 +77,7 @@ class THWToolboxPlugin:
         # In dem Fall sollen wir die Layer-Entfernung still hinnehmen statt den
         # Nutzer mit der Deaktivierungs-Warnung zu konfrontieren.
         self._project_clearing = False
+        self.planning = None
 
         self.settings = THWToolboxSettings()
 
@@ -163,6 +165,14 @@ class THWToolboxPlugin:
         self.mgrs_grid_action.triggered.connect(self._add_mgrs_grid_layer)
         self.iface.addToolBarIcon(self.mgrs_grid_action)
         self.iface.addPluginToMenu("THW Toolbox", self.mgrs_grid_action)
+
+        # Lagerplanung: Zelte, Flächen-Kapazität, Stromverteilung
+        planning_icon = QIcon(os.path.join(self.plugin_dir, "icons", "tent.svg"))
+        self.planning_action = QAction(planning_icon, "Lagerplanung", self.iface.mainWindow())
+        self.planning_action.setCheckable(True)
+        self.planning_action.triggered.connect(self._toggle_planning)
+        self.iface.addToolBarIcon(self.planning_action)
+        self.iface.addPluginToMenu("THW Toolbox", self.planning_action)
 
         # Adress-Suche (Nominatim)
         search_icon = QIcon(os.path.join(self.plugin_dir, "icons", "search.svg"))
@@ -278,6 +288,13 @@ class THWToolboxPlugin:
             self.mgrs_grid_action = None
         if self.export_action:
             self.iface.removePluginMenu("THW Toolbox", self.export_action)
+        if getattr(self, "planning_action", None):
+            self.iface.removeToolBarIcon(self.planning_action)
+            self.iface.removePluginMenu("THW Toolbox", self.planning_action)
+            self.planning_action = None
+        if self.planning:
+            self.planning.unload()
+            self.planning = None
 
         if getattr(self, "dji_export_action", None):
             self.iface.removePluginMenu("THW Toolbox", self.dji_export_action)
@@ -819,6 +836,18 @@ class THWToolboxPlugin:
 
     def _open_template_dialog(self):
         TemplateDialog(self.plugin_dir, self.iface.mainWindow()).exec()
+
+    def _toggle_planning(self, checked: bool):
+        if self.planning is None:
+            self.planning = PlanningController(self.iface, self.plugin_dir)
+        self.planning.toggle_dock(checked)
+        if self.planning.dock:
+            # Schließen über das X des Docks soll den Toolbar-Button mitnehmen
+            try:
+                self.planning.dock.visibilityChanged.disconnect(self.planning_action.setChecked)
+            except (TypeError, RuntimeError):
+                pass
+            self.planning.dock.visibilityChanged.connect(self.planning_action.setChecked)
 
     def _add_mgrs_grid_layer(self):
         extent = self.canvas.extent()
