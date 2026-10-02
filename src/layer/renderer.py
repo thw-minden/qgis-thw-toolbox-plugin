@@ -30,6 +30,16 @@ _V_ANCHOR = {
 _BG_SCALE = 1.2
 
 
+def size_unit(scale_with_map) -> QgsUnitTypes.RenderUnit:
+    """Render unit of a feature's `size`, derived from its `scale_with_map` attribute.
+
+    The stored flag is historically inverted and kept that way so existing
+    GeoPackages render unchanged: True = millimetres (constant size on screen),
+    False = map units (the symbol grows and shrinks with the map).
+    """
+    return QgsUnitTypes.RenderUnit.RenderMillimeters if scale_with_map else QgsUnitTypes.RenderUnit.RenderMapUnits
+
+
 def apply_renderer(layer: QgsVectorLayer, plugin_dir: str) -> None:
     """Build a per-feature categorized renderer and apply it to `layer`.
 
@@ -127,13 +137,11 @@ def _build_feature_symbol(
         bg_layer.setColor(QColor(255, 255, 255))
         bg_layer.setStrokeColor(QColor(255, 255, 255))
         bg_layer.setStrokeWidth(0)
-        if not scale_with_map:
-            bg_layer.setSizeUnit(QgsUnitTypes.RenderUnit.RenderMapUnits)
+        bg_layer.setSizeUnit(size_unit(scale_with_map))
         sym.changeSymbolLayer(0, bg_layer)
 
     svg_layer = _resolve_svg_layer(plugin_dir, svg_path, svg_content, feat.id(), size)
-    if not scale_with_map:
-        svg_layer.setSizeUnit(QgsUnitTypes.RenderUnit.RenderMapUnits)
+    svg_layer.setSizeUnit(size_unit(scale_with_map))
     svg_layer.setAngle(rotation)
 
     h = _H_ANCHOR.get(origin_x, QgsMarkerSymbolLayer.HorizontalAnchorPoint.HCenter)

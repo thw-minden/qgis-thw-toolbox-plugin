@@ -1,7 +1,7 @@
 import os
 import time
 
-from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsProject
+from qgis.core import QgsCoordinateTransform, QgsProject
 from qgis.gui import QgsMapToolIdentify
 from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtGui import QIcon, QPixmap
@@ -23,6 +23,7 @@ from qgis.PyQt.QtWidgets import (
 
 from ..logging_utils import get_logger
 from ..paths import plugin_root
+from ..util.coordinates import WGS84, to_mgrs
 from .origin_point_widget import OriginPointWidget
 
 logger = get_logger(__name__)
@@ -62,18 +63,31 @@ class FeatureDock(QDockWidget):
         self.placeholder_label.setStyleSheet("QLabel { color: #666; padding: 20px; }")
         self.main_layout.addWidget(self.placeholder_label)
 
-        # UTM 32N Koordinaten mit Kopier-Button
+        # Position des Ankerpunkts (UTMREF + Breite/Länge) mit Kopier-Button
+        self.position_widget = QWidget()
+        position_layout = QVBoxLayout(self.position_widget)
+        position_layout.setContentsMargins(0, 0, 0, 0)
+
         coord_layout = QHBoxLayout()
-
-        self.utm32n_label = QLabel("")
-        self.utm32n_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        coord_layout.addWidget(self.utm32n_label)
-
+        self.utmref_label = QLabel("")
+        coord_layout.addWidget(self.utmref_label)
         self.btn_copy_coords = QPushButton("Kopieren")
         self.btn_copy_coords.setMaximumWidth(60)
         coord_layout.addWidget(self.btn_copy_coords)
+        position_layout.addLayout(coord_layout)
 
-        self.main_layout.addLayout(coord_layout)
+        self.latlon_label = QLabel("")
+        position_layout.addWidget(self.latlon_label)
+
+        # Koordinaten sind Links: Klick öffnet die Positionseingabe
+        for label in (self.utmref_label, self.latlon_label):
+            label.setTextFormat(Qt.TextFormat.RichText)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
+            label.setCursor(Qt.CursorShape.PointingHandCursor)
+            label.setToolTip("Klicken, um die Position per Koordinate zu setzen")
+            label.linkActivated.connect(self.on_edit_position)
+
+        self.main_layout.addWidget(self.position_widget)
 
         # Label und Darstellung
         label_layout = QHBoxLayout()
@@ -91,7 +105,8 @@ class FeatureDock(QDockWidget):
         size_layout.addWidget(self.size_label)
 
         self.size_spinbox = QSpinBox()
-        self.size_spinbox.setMinimum(10)
+        # Klein genug für Millimeter-Größen nach dem Umschalten von „Mit Karte skalieren“
+        self.size_spinbox.setMinimum(1)
         self.size_spinbox.setMaximum(2000)
         self.size_spinbox.setValue(50)
         self.size_spinbox.setSingleStep(1)
@@ -105,7 +120,7 @@ class FeatureDock(QDockWidget):
         slider_layout.addWidget(self.size_slider_label)
 
         self.size_slider = QSlider(Qt.Orientation.Horizontal)
-        self.size_slider.setMinimum(10)  # Minimale Größe
+        self.size_slider.setMinimum(1)  # Minimale Größe
         self.size_slider.setMaximum(200)  # Maximale Größe
         self.size_slider.setValue(50)  # Standardwert
         self.size_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
@@ -193,8 +208,7 @@ class FeatureDock(QDockWidget):
         self.placeholder_label.show()
 
         # Koordinaten und Steuerelemente verstecken
-        self.utm32n_label.hide()
-        self.btn_copy_coords.hide()
+        self.position_widget.hide()
         self.size_label.hide()
         self.size_spinbox.hide()
         self.size_slider_label.hide()
@@ -214,25 +228,30 @@ class FeatureDock(QDockWidget):
         # Dock-Titel ohne Koordinaten
         self.setWindowTitle("Marker Details")
 
-    def convert_to_utm32n(self, point, source_crs):
-        """Konvertiert Koordinaten zu UTM Zone 32N (EPSG:32632)"""
+    def _show_position(self, point, source_crs):
+        """Zeigt die aktuelle Marker-Position als UTMREF und Breite/Länge an."""
         try:
-            # UTM Zone 32N CRS (EPSG:32632)
-            utm_crs = QgsCoordinateReferenceSystem("EPSG:32632")
-
-            # Koordinatentransformation erstellen
-            transform = QgsCoordinateTransform(source_crs, utm_crs, QgsProject.instance())
-
-            # Koordinaten transformieren
-            utm_point = transform.transform(point)
-
-            # Formatierung der UTM-Koordinaten
-            easting = int(utm_point.x())
-            northing = int(utm_point.y())
-
-            return f"UTM 32N: {easting}E {northing}N"
+            wgs = QgsCoordinateTransform(source_crs, WGS84, QgsProject.instance()).transform(point)
         except Exception:
-            return "UTM 32N: Fehler"
+            logger.exception("Konnte Marker-Position nicht nach WGS84 umrechnen")
+            self.latlon_label.clear()
+            self.utmref_label.setText("UTMREF: Fehler")
+            self.current_utm_coords = ""
+            return
+
+        self.latlon_label.setText(f'Breite/Länge: <a href="edit">{wgs.y():.6f} {wgs.x():.6f}</a>')
+        try:
+            utmref = to_mgrs(wgs.y(), wgs.x())
+        except ValueError:
+            utmref = ""
+        self.utmref_label.setText(f'UTMREF: <a href="edit">{utmref or "–"}</a>')
+        self.current_utm_coords = utmref
+
+    def on_edit_position(self, _link=None):
+        """Klick auf die Koordinaten: Popup für „Breite Länge“ oder UTMREF öffnen."""
+        if not getattr(self, "feat", None):
+            return
+        self.layer_manager.open_position_dialog(self.feat.id())
 
     def show_feature(self, feat, layer_manager):
         self.feat = feat
@@ -286,24 +305,13 @@ class FeatureDock(QDockWidget):
 
         # Koordinaten anzeigen
         if feat.geometry():
-            point = feat.geometry().asPoint()
-            source_crs = layer_manager.layer.crs()
-
-            # Nur UTM 32N Koordinaten berechnen und anzeigen
-            utm32n_text = self.convert_to_utm32n(point, source_crs)
-
-            # Label aktualisieren
-            self.utm32n_label.setText(utm32n_text)
-            self.utm32n_label.show()
-
-            # UTM-Koordinaten für Kopier-Funktion speichern
-            self.current_utm_coords = utm32n_text
+            self._show_position(feat.geometry().asPoint(), layer_manager.layer.crs())
 
             # Dock-Titel ohne Koordinaten (nur "Marker Details")
             self.setWindowTitle("Marker Details")
 
         # Alle Steuerelemente anzeigen
-        self.btn_copy_coords.show()
+        self.position_widget.show()
         self.size_label.show()
         self.size_spinbox.show()
         self.size_slider_label.show()
@@ -322,20 +330,18 @@ class FeatureDock(QDockWidget):
         self.btn_delete.show()
 
         # SpinBox und Schieberegler auf aktuelle Größe setzen
-        current_size = int(feat.attribute("size"))
-        self.size_spinbox.blockSignals(True)
-        self.size_spinbox.setValue(current_size)
-        self.size_spinbox.blockSignals(False)
-        self.size_slider.blockSignals(True)
-        self.size_slider.setValue(current_size)
-        self.size_slider.blockSignals(False)
+        self._set_size_widgets(feat.attribute("size"))
 
-        # Checkbox auf aktuellen Wert setzen oder Standardwert verwenden
+        # Checkbox auf aktuellen Wert setzen oder Standardwert verwenden.
+        # Das gespeicherte Attribut ist invertiert (True = feste Bildschirmgröße),
+        # siehe layer.renderer.size_unit. Signale blockieren: Anzeigen ist kein Umschalten.
         try:
-            scale_with_map = feat.attribute("scale_with_map")
+            scale_with_map = bool(feat.attribute("scale_with_map"))
         except Exception:
             scale_with_map = False
-        self.scale_checkbox.setChecked(scale_with_map)
+        self.scale_checkbox.blockSignals(True)
+        self.scale_checkbox.setChecked(not scale_with_map)
+        self.scale_checkbox.blockSignals(False)
 
         # Label-Werte setzen
         try:
@@ -470,8 +476,8 @@ class FeatureDock(QDockWidget):
         self.show()
 
     def on_copy_coords(self):
-        """Kopiert die UTM 32N Koordinaten in die Zwischenablage"""
-        if hasattr(self, "current_utm_coords"):
+        """Kopiert die UTMREF-Koordinate in die Zwischenablage"""
+        if getattr(self, "current_utm_coords", ""):
             clipboard = QApplication.clipboard()
             clipboard.setText(self.current_utm_coords)
             # Kurze visuelle Bestätigung
@@ -488,7 +494,18 @@ class FeatureDock(QDockWidget):
         self.layer_manager.resize_feature(self.feat.id(), value)
 
     def on_scale_toggle(self, state):
-        self.layer_manager.toggle_scale(self.feat.id(), state == Qt.CheckState.Checked)
+        new_size = self.layer_manager.toggle_scale(self.feat.id(), state == Qt.CheckState.Checked)
+        # Größe wurde auf die neue Einheit (Meter ↔ Millimeter) umgerechnet
+        if new_size is not None:
+            self._set_size_widgets(new_size)
+
+    def _set_size_widgets(self, size):
+        """SpinBox und Schieberegler auf `size` setzen, ohne das Feature zu ändern."""
+        value = int(round(float(size or 0)))
+        for widget in (self.size_spinbox, self.size_slider):
+            widget.blockSignals(True)
+            widget.setValue(value)
+            widget.blockSignals(False)
 
     def on_spinbox_changed(self, value):
         """Synchronisiert den Schieberegler mit der SpinBox"""

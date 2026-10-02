@@ -2,6 +2,7 @@ import os
 
 from qgis.core import (
     Qgis,
+    QgsApplication,
     QgsCoordinateTransform,
     QgsProject,
     QgsVectorLayer,
@@ -40,12 +41,16 @@ from .tools.canvas_drop_filter import CanvasDropFilter
 from .tools.identify_tool import IdentifyTool
 from .tools.move_tool import MoveTool
 from .ui.config_dialog import ConfigDialog
+from .ui.marker_table_dialog import MarkerTableDialog
 from .ui.nominatim_search_dialog import NominatimSearchDialog
+from .ui.photo_target_dialog import PhotoTargetDialog
+from .ui.position_dialog import PositionDialog
 from .ui.setup_common import SETUP_MODE_WIZARD, get_setup_mode
 from .ui.setup_dialog import SetupDialog
 from .ui.setup_dialog_classic import ClassicSetupDialog
 from .ui.svg_dock import SvgDock
 from .ui.template_dialog import TemplateDialog
+from .util.coordinates import WGS84
 from .util.temp_files import cleanup_temp_files
 
 logger = get_logger(__name__)
@@ -65,6 +70,8 @@ class THWToolboxPlugin:
         self.move_tool = None
         self.action = None
         self.dock = None
+        self.marker_table = None
+        self.photo_target = None
         # True während QGIS das Projekt leert (Projekt schließen / anderes laden).
         # In dem Fall sollen wir die Layer-Entfernung still hinnehmen statt den
         # Nutzer mit der Deaktivierungs-Warnung zu konfrontieren.
@@ -166,6 +173,20 @@ class THWToolboxPlugin:
         self.iface.addToolBarIcon(self.search_action)
         self.iface.addPluginToMenu("THW Toolbox", self.search_action)
 
+        # Marker-Tabelle: mehrere Zeichen per Koordinate anlegen/bearbeiten
+        table_icon = QgsApplication.getThemeIcon("/mActionOpenTable.svg")
+        self.marker_table_action = QAction(table_icon, "Marker-Tabelle", self.iface.mainWindow())
+        self.marker_table_action.triggered.connect(self._open_marker_table)
+        self.iface.addToolBarIcon(self.marker_table_action)
+        self.iface.addPluginToMenu("THW Toolbox", self.marker_table_action)
+
+        # Zeichen aus Drohnenfoto: Zielkoordinate aus Foto-Metadaten + Klick ins Bild
+        photo_icon = QIcon(os.path.join(self.plugin_dir, "icons", "photo_target.svg"))
+        self.photo_target_action = QAction(photo_icon, "Zeichen aus Drohnenfoto", self.iface.mainWindow())
+        self.photo_target_action.triggered.connect(self._open_photo_target)
+        self.iface.addToolBarIcon(self.photo_target_action)
+        self.iface.addPluginToMenu("THW Toolbox", self.photo_target_action)
+
         # Export-Aktion hinzufügen
         self.export_action = QAction("Portables Paket exportieren", self.iface.mainWindow())
         self.export_action.triggered.connect(self._export_portable_package)
@@ -231,6 +252,22 @@ class THWToolboxPlugin:
         if self.search_action:
             self.iface.removeToolBarIcon(self.search_action)
             self.iface.removePluginMenu("THW Toolbox", self.search_action)
+        if getattr(self, "marker_table_action", None):
+            self.iface.removeToolBarIcon(self.marker_table_action)
+            self.iface.removePluginMenu("THW Toolbox", self.marker_table_action)
+            self.marker_table_action = None
+        if self.marker_table:
+            self.marker_table.close()
+            self.marker_table.deleteLater()
+            self.marker_table = None
+        if getattr(self, "photo_target_action", None):
+            self.iface.removeToolBarIcon(self.photo_target_action)
+            self.iface.removePluginMenu("THW Toolbox", self.photo_target_action)
+            self.photo_target_action = None
+        if self.photo_target:
+            self.photo_target.close()
+            self.photo_target.deleteLater()
+            self.photo_target = None
         if self.template_action:
             self.iface.removeToolBarIcon(self.template_action)
             self.iface.removePluginMenu("THW Toolbox", self.template_action)
@@ -319,9 +356,15 @@ class THWToolboxPlugin:
             if hasattr(self.ident_tool, "feature_dock"):
                 self.ident_tool.feature_dock.show()
                 self.ident_tool.feature_dock.raise_()
-        # MoveTool
+        # MoveTool — an die Aktion gekoppelt: Wechselt der Nutzer zu einem anderen
+        # QGIS-Werkzeug, wird das Toolbox-Symbol inaktiv und ein Klick darauf
+        # aktiviert die Auswahl der Zeichen wieder.
         if not self.move_tool:
             self.move_tool = MoveTool(self.canvas, self)
+            self.move_tool.setAction(self.action)
+        # Bestehende Tools können noch auf einen entfernten Layer zeigen
+        # (z. B. nach Projektwechsel) — auf den aktuellen Layer umhängen.
+        self._update_tool_references()
         self.canvas.setMapTool(self.move_tool)
 
         # Load the configuration settings
@@ -358,6 +401,12 @@ class THWToolboxPlugin:
         if self.ident_tool and hasattr(self.ident_tool, "feature_dock"):
             self.ident_tool.feature_dock.hide()
 
+        if self.marker_table:
+            self.marker_table.hide()
+
+        if self.photo_target:
+            self.photo_target.hide()
+
         # Plugin-Symbol als inaktiv markieren
         if self.action:
             self.action.setChecked(False)
@@ -367,6 +416,9 @@ class THWToolboxPlugin:
 
     def _on_project_cleared(self):
         self._project_clearing = False
+        # Gemerkte Zeichengröße gilt nur im Projekt (Karteneinheiten hängen vom CRS ab)
+        if self.feature_ops:
+            self.feature_ops.forget_last_size()
 
     def _on_layers_will_be_removed(self, layer_ids):
         """Wenn der Marker-Layer aus dem Projekt entfernt wird, Plugin sauber deaktivieren."""
@@ -379,7 +431,6 @@ class THWToolboxPlugin:
             our_id = None
 
         if our_id is None or our_id in layer_ids:
-            logger.debug("Marker-Layer wird entfernt, deaktiviere Plugin")
             # Referenzen löschen, bevor die Tools weiter darauf zugreifen
             self.layer = None
             if self.layer_manager:
@@ -389,7 +440,17 @@ class THWToolboxPlugin:
             if self.move_tool:
                 self.move_tool.layer = None
 
-            was_active = self.action is not None and self.action.isChecked()
+            # Geplanter Layer-Tausch (Speichern, CRS-Migration): der neue Layer kommt
+            # gleich über on_layer_replaced — Plugin aktiv lassen.
+            if self.layer_manager and self.layer_manager.replacing:
+                logger.debug("Marker-Layer wird ausgetauscht, Plugin bleibt aktiv")
+                return
+
+            logger.debug("Marker-Layer wird entfernt, deaktiviere Plugin")
+            # Aktion kann auch unchecked sein, wenn nur ein anderes Kartenwerkzeug gewählt wurde
+            was_active = (self.action is not None and self.action.isChecked()) or (
+                self.dock is not None and self.dock.isVisible()
+            )
             if was_active:
                 self.deactivate()
                 # Beim Projekt-Schließen/-Wechsel werden alle Layer entfernt —
@@ -518,6 +579,8 @@ class THWToolboxPlugin:
         self.layer = new_layer
         self._update_tool_references()
         self._init_renderer(new_layer)
+        if self.marker_table and self.marker_table.isVisible():
+            self.marker_table.refresh()
 
     def _update_tool_references(self):
         """Aktualisiert alle Tool-Referenzen auf den aktuellen Layer."""
@@ -542,6 +605,9 @@ class THWToolboxPlugin:
         if not self.feature_ops:
             return
 
+        # Drop-Punkt liegt im Karten-CRS, der Layer kann ein anderes haben
+        if self.layer:
+            point = self.canvas.mapSettings().mapToLayerCoordinates(self.layer, point)
         new_feature = self.feature_ops.place_feature(svg_path, point)
         if not new_feature:
             return
@@ -553,6 +619,10 @@ class THWToolboxPlugin:
         if self.ident_tool and hasattr(self.ident_tool, "feature_dock"):
             self.ident_tool.feature_dock.show_feature(new_feature, self)
         if self.move_tool:
+            # Nach dem Ablegen soll das Zeichen direkt greifbar sein, auch wenn
+            # zwischendurch ein anderes Kartenwerkzeug aktiv war.
+            if self.canvas.mapTool() != self.move_tool:
+                self.canvas.setMapTool(self.move_tool)
             self.move_tool.set_move_mode(True)
 
     # ------------------------------------------------------------------
@@ -575,8 +645,11 @@ class THWToolboxPlugin:
     def resize_feature(self, fid, size):
         self.feature_ops and self.feature_ops.resize(fid, size)
 
-    def toggle_scale(self, fid, value):
-        self.feature_ops and self.feature_ops.toggle_scale(fid, value)
+    def toggle_scale(self, fid, scales_with_map):
+        """Gibt die auf die neue Einheit umgerechnete Größe zurück (oder None)."""
+        if not self.feature_ops:
+            return None
+        return self.feature_ops.set_scales_with_map(fid, scales_with_map)
 
     def toggle_white_background(self, fid, value):
         self.feature_ops and self.feature_ops.toggle_white_background(fid, value)
@@ -592,6 +665,135 @@ class THWToolboxPlugin:
 
     def update_origin(self, fid, origin_x, origin_y):
         self.feature_ops and self.feature_ops.update_origin(fid, origin_x, origin_y)
+
+    def move_feature_to(self, fid, point, crs, center=True):
+        """Setzt den Marker mit seinem Ankerpunkt auf `point` (in `crs`), optional mit Karte dorthin.
+
+        Gibt das aktualisierte Feature zurück, oder None bei Fehler.
+        """
+        if not self.feature_ops or not self.layer:
+            return None
+        project = QgsProject.instance()
+        try:
+            layer_point = QgsCoordinateTransform(crs, self.layer.crs(), project).transform(point)
+            map_crs = self.canvas.mapSettings().destinationCrs()
+            map_point = QgsCoordinateTransform(crs, map_crs, project).transform(point)
+        except Exception:
+            logger.exception("Konnte Koordinate nicht in das Layer-/Karten-CRS umrechnen")
+            return None
+        if not self.feature_ops.move(fid, layer_point):
+            return None
+        if center:
+            self.canvas.setCenter(map_point)
+        self.canvas.refresh()
+        self.refresh_marker_views([fid])
+        return self.layer.getFeature(fid)
+
+    def open_position_dialog(self, fid):
+        """Popup nach Klick auf die Koordinaten in Marker Details: Position als „Breite Länge“ oder UTMREF."""
+        if not self.layer:
+            return
+        feat = self.layer.getFeature(fid)
+        if not feat.isValid() or not feat.hasGeometry():
+            return
+        try:
+            transform = QgsCoordinateTransform(self.layer.crs(), WGS84, QgsProject.instance())
+            current = transform.transform(feat.geometry().asPoint())
+        except Exception:
+            logger.exception("Konnte Marker-Position nicht nach WGS84 umrechnen")
+            current = None
+
+        point = PositionDialog.ask(self.iface.mainWindow(), current)
+        if point is None:
+            return
+        if self.move_feature_to(fid, point, WGS84) is None:
+            self._show_error_alert("Position setzen", "Die Koordinate konnte nicht übernommen werden.")
+
+    def create_marker(self, svg_path, point, crs, label=None, show_label=False):
+        """Legt einen Marker mit Ankerpunkt auf `point` (in `crs`) an, z. B. aus der Marker-Tabelle.
+
+        Anders als beim Drag & Drop bleibt die Karte stehen und es startet kein Verschiebe-Modus.
+        """
+        if not self.feature_ops or not self.layer:
+            return None
+        try:
+            layer_point = QgsCoordinateTransform(crs, self.layer.crs(), QgsProject.instance()).transform(point)
+        except Exception:
+            logger.exception("Konnte Koordinate nicht in das Layer-CRS umrechnen")
+            return None
+        feature = self.feature_ops.place_feature(svg_path, layer_point)
+        if not feature:
+            return None
+        if label:
+            self.feature_ops.set_label(feature.id(), label)
+        if show_label:
+            self.feature_ops.toggle_label(feature.id(), True)
+        self.refresh_marker_views([feature.id()])
+        return self.layer.getFeature(feature.id())
+
+    def change_marker_symbol(self, fid, svg_path) -> bool:
+        if not self.feature_ops or not self.feature_ops.change_symbol(fid, svg_path):
+            return False
+        self.refresh_marker_views([fid])
+        return True
+
+    def delete_markers(self, fids):
+        """Löscht mehrere Marker (ohne wie delete_feature den ganzen Symbolbaum neu zu laden)."""
+        if not self.feature_ops:
+            return
+        for fid in fids:
+            self.feature_ops.delete(fid)
+        self.refresh_marker_views(fids)
+        self.canvas.refresh()
+
+    def refresh_marker_views(self, fids):
+        """Symbolpalette („Verwendet“) und Marker Details nach Änderungen an `fids` aktualisieren."""
+        if hasattr(self, "svg_dock_widget"):
+            self.svg_dock_widget.refresh_marker_list()
+        dock = getattr(self.ident_tool, "feature_dock", None)
+        shown = getattr(dock, "feat", None)
+        # Nur eingreifen, wenn Marker Details gerade genau einen dieser Marker zeigt
+        if dock is None or shown is None or not dock.isVisible() or not dock.placeholder_label.isHidden():
+            return
+        if shown.id() not in fids:
+            return
+        feat = self.layer.getFeature(shown.id()) if self.layer else None
+        if feat is not None and feat.isValid():
+            dock.show_feature(feat, self)
+        else:
+            dock.show_placeholder()
+
+    def _open_marker_table(self):
+        if not self.layer:
+            self.activate()
+        if not self.layer:
+            self._show_error_alert(
+                "Marker-Tabelle",
+                "Keine Karte vorhanden.",
+                "Bitte zuerst eine Karte in das Projekt laden, dann die Marker-Tabelle öffnen.",
+            )
+            return
+        if self.marker_table is None:
+            self.marker_table = MarkerTableDialog(self, self._navigate_to_feature, self.iface.mainWindow())
+        self.marker_table.show()
+        self.marker_table.raise_()
+        self.marker_table.activateWindow()
+
+    def _open_photo_target(self):
+        if not self.layer:
+            self.activate()
+        if not self.layer:
+            self._show_error_alert(
+                "Zeichen aus Drohnenfoto",
+                "Keine Karte vorhanden.",
+                "Bitte zuerst eine Karte in das Projekt laden, dann das Drohnenfoto öffnen.",
+            )
+            return
+        if self.photo_target is None:
+            self.photo_target = PhotoTargetDialog(self, self.iface.mainWindow())
+        self.photo_target.show()
+        self.photo_target.raise_()
+        self.photo_target.activateWindow()
 
     def _on_labeling_dirty(self):
         """FeatureOperations callback after a label-affecting attribute change."""
@@ -643,7 +845,15 @@ class THWToolboxPlugin:
             self._open_setup_dialog(dialog.switch_to)
 
     def _open_config_dialog(self):
+        def new_icon_defaults():
+            s = self.settings
+            return s.new_icon_scaling_with_map, s.new_icon_fixed_size, s.new_icon_size
+
+        before = new_icon_defaults()
         if ConfigDialog(self.settings, self.iface.mainWindow()).exec_and_apply():
+            # Geänderte Standardgröße soll sofort gelten, nicht die zuletzt verstellte
+            if self.feature_ops and new_icon_defaults() != before:
+                self.feature_ops.forget_last_size()
             self.settings.save_settings(QgsProject.instance())
             if self.layer:
                 self._init_renderer(self.layer)

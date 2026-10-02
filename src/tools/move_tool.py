@@ -3,6 +3,7 @@ import time
 from qgis.core import QgsGeometry, QgsPointXY
 from qgis.gui import QgsMapTool
 from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtWidgets import QApplication
 
 from ._feature_search import find_nearest_feature
 
@@ -11,9 +12,11 @@ class MoveTool(QgsMapTool):
     """Map tool for dragging features and panning the canvas.
 
     On press: if the click is on a feature, that feature becomes draggable
-    (move mode); otherwise standard map panning starts. While dragging,
-    the layer is held in editing mode and committed on release. Hover
-    detection switches the cursor to indicate draggable features.
+    (move mode); otherwise standard map panning starts. Dragging starts once
+    the mouse moved past the system drag distance, so a plain click never
+    nudges the feature; while dragging, the layer is held in editing mode and
+    committed on release. Hover detection switches the cursor to indicate
+    draggable features.
     """
 
     def __init__(self, canvas, layer_manager):
@@ -22,6 +25,8 @@ class MoveTool(QgsMapTool):
         self.layer_manager = layer_manager
         self.layer = layer_manager.layer
         self.moving_feature = None
+        self.press_pos = None
+        self.dragging = False
         self.is_move_mode = False
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self.pan_start = None
@@ -75,6 +80,13 @@ class MoveTool(QgsMapTool):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
         if self.moving_feature:
+            if not self.dragging:
+                if (
+                    self.press_pos is not None
+                    and (event.pos() - self.press_pos).manhattanLength() < QApplication.startDragDistance()
+                ):
+                    return
+                self.dragging = True
             point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos().x(), event.pos().y())
             current_time = time.time() * 1000
 
@@ -90,7 +102,8 @@ class MoveTool(QgsMapTool):
                     self.layer.startEditing()
                     self.is_editing = True
 
-                self.layer.changeGeometry(self.moving_feature.id(), QgsGeometry.fromPointXY(point))
+                layer_point = self.toLayerCoordinates(self.layer, point)
+                self.layer.changeGeometry(self.moving_feature.id(), QgsGeometry.fromPointXY(layer_point))
                 self.last_pos = point
                 self.last_update_time = current_time
 
@@ -131,6 +144,8 @@ class MoveTool(QgsMapTool):
 
         if closest:
             self.moving_feature = closest
+            self.press_pos = event.pos()
+            self.dragging = False
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             if hasattr(self.layer_manager, "ident_tool") and hasattr(self.layer_manager.ident_tool, "feature_dock"):
                 self.layer_manager.ident_tool.feature_dock.show_feature(closest, self.layer_manager)
@@ -153,6 +168,7 @@ class MoveTool(QgsMapTool):
 
                 self.moving_feature = None
                 self.last_pos = None
+                self.dragging = False
                 self.setCursor(Qt.CursorShape.PointingHandCursor)
             elif self.is_panning:
                 self.is_panning = False
