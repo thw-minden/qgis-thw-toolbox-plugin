@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Hinzugefügt
+- **THW-Drucklayouts A0–A4 quer** (Standard der THW-Leitung) in `templates/` inkl. Logo und Nordpfeil
+- Druckvorlagen-Dialog fragt Ortsverband, Einheit, Bearbeiter, Einsatz und Einstufung (VS-NfD / nicht klassifiziert) ab; OV/Einheit/Bearbeiter werden in den Benutzereinstellungen, der Einsatz im Projekt gemerkt
+- Autovervollständigung für den Ortsverband aus `data/ovs.json` (670 OVs, Teilwortsuche)
+- Platzhalter der Vorlagen werden zu Layout-Variablen (`@thw_ov`, `@thw_einheit`, `@thw_einheit_kurz`, `@thw_bearbeiter`, `@thw_einsatz`), nachträglich in den Layout-Eigenschaften änderbar
+
+### Verbessert
+- **Einheitliche Legende**: jedes taktische Zeichen erscheint einmal, ungedreht und in fester Größe (max. Symbolgröße der Vorlage), unabhängig von Größe/Drehung auf der Karte (`layout/print_template.py`)
+
 ## [2.1.1]
 
 ### Verbessert
