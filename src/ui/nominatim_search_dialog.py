@@ -332,7 +332,7 @@ def _format_result(result):
         else:
             title = parts[0]
 
-    # Untertitel: PLZ + Ort + Land
+    # Untertitel: Ortsteil, PLZ + Ort, Gemeinde, Bundesland, Land
     sub_parts = []
     locality = address.get("city") or address.get("town") or address.get("village") or address.get("municipality")
     if locality:
@@ -341,6 +341,14 @@ def _format_result(result):
     suburb = address.get("suburb") or address.get("city_district")
     if suburb and suburb != locality:
         sub_parts.insert(0, suburb)
+    # Gemeinde + Bundesland, damit gleichnamige Orte unterscheidbar sind
+    # (z.B. Minden/NRW vs. Minden/Südeifel)
+    municipality = address.get("municipality")
+    if municipality and municipality != locality:
+        sub_parts.append(municipality)
+    state = address.get("state")
+    if state:
+        sub_parts.append(state)
     country = address.get("country")
     if country:
         sub_parts.append(country)
