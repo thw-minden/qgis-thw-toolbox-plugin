@@ -115,6 +115,16 @@ class MoveTool(QgsMapTool):
         self.moving_feature = None
 
     def deactivate(self):
+        """Beim Werkzeugwechsel angefangene Drags sauber beenden."""
+        if self.is_editing and self._layer_is_usable():
+            self.layer.commitChanges()
+        self.is_editing = False
+        self.moving_feature = None
+        self._transform = None
+        self._press_pos = None
+        self.is_panning = False
+        self._pan_dragged = False
+        self.last_pos = None
         self.clear_selection()
         super().deactivate()
 

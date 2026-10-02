@@ -436,7 +436,12 @@ class FeatureDock(QDockWidget):
         self.size_spinbox.valueChanged.connect(self.on_spinbox_changed)
         self.size_slider.valueChanged.connect(self.on_slider_changed)
 
+        # raise_() nur beim Aufdecken: sonst würde jedes Drag-Update (alle 300ms)
+        # ein angedocktes Nachbar-Panel wegdrängen.
+        was_hidden = not self.isVisible()
         self.show()
+        if was_hidden:
+            self.raise_()
 
     def _create_temp_svg_for_preview(self, svg_content):
         """Erstellt eine temporäre SVG-Datei für die Vorschau"""
