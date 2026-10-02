@@ -55,6 +55,18 @@ class MoveTool(QgsMapTool):
             self.setCursor(Qt.CursorShape.ArrowCursor)
         self.moving_feature = None
 
+    def deactivate(self):
+        """Beim Werkzeugwechsel angefangene Drags sauber beenden."""
+        if self.is_editing and self._layer_is_usable():
+            self.layer.commitChanges()
+        self.is_editing = False
+        self.moving_feature = None
+        self.is_panning = False
+        self.pan_start = None
+        self.last_center = None
+        self.last_pos = None
+        super().deactivate()
+
     def canvasMoveEvent(self, event):
         if not self._layer_is_usable():
             return

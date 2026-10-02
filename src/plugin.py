@@ -178,6 +178,10 @@ class THWToolboxPlugin:
         self.dji_mbtiles_action.triggered.connect(self._export_selected_layer_as_mbtiles)
         self.iface.addPluginToMenu("THW Toolbox", self.dji_mbtiles_action)
 
+        # Marker-Klicks verarbeitet nur unser MoveTool. Wechselt das
+        # Karten-Werkzeug, muss das Toolbar-Symbol das widerspiegeln.
+        self.canvas.mapToolSet.connect(self._on_map_tool_changed)
+
         # Verbinde Projekt-Events für automatisches Speichern
         QgsProject.instance().writeProject.connect(self._on_project_save)
         # Reagiere auf Layer-Entfernung, damit wir das Plugin sauber deaktivieren,
@@ -245,6 +249,11 @@ class THWToolboxPlugin:
         if getattr(self, "dji_mbtiles_action", None):
             self.iface.removePluginMenu("THW Toolbox", self.dji_mbtiles_action)
             self.dji_mbtiles_action = None
+
+        try:
+            self.canvas.mapToolSet.disconnect(self._on_map_tool_changed)
+        except (TypeError, RuntimeError):
+            pass
 
         # Trenne Projekt-Events
         QgsProject.instance().writeProject.disconnect(self._on_project_save)
@@ -320,6 +329,9 @@ class THWToolboxPlugin:
         # MoveTool
         if not self.move_tool:
             self.move_tool = MoveTool(self.canvas, self)
+        # Wiederverwendete Tools zeigen sonst weiter auf den Layer von damals
+        # (nach Projektwechsel sogar auf None) und reagieren auf keinen Klick mehr.
+        self._update_tool_references()
         self.canvas.setMapTool(self.move_tool)
 
         # Load the configuration settings
@@ -335,6 +347,26 @@ class THWToolboxPlugin:
             self.activate()
         else:
             self.deactivate()
+
+    def _on_map_tool_changed(self, new_tool, old_tool=None):
+        """Hält das Toolbar-Symbol mit dem aktiven Karten-Werkzeug im Gleichklang.
+
+        Klicks auf Marker verarbeitet ausschließlich unser MoveTool. Sobald ein
+        anderes QGIS-Werkzeug übernimmt (Verschieben im Bearbeitungsmodus, Pan,
+        Zoom, Identifizieren, Projektwechsel …), erreichen uns keine Klicks mehr.
+        Statt still nicht mehr zu reagieren, wird das Symbol entmarkiert — ein
+        Klick darauf holt das Marker-Werkzeug zurück. Docks und Layer bleiben
+        dabei unangetastet.
+        """
+        if not self.action or not self.move_tool:
+            return
+        try:
+            is_ours = new_tool == self.move_tool
+        except RuntimeError:
+            return
+        if self.action.isChecked() != is_ours:
+            logger.debug("Karten-Werkzeug gewechselt, Marker-Werkzeug aktiv: %s", is_ours)
+            self.action.setChecked(is_ours)
 
     def deactivate(self):
         """Deaktiviert das Plugin und setzt das Symbol zurück."""
