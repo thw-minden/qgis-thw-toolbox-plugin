@@ -58,6 +58,11 @@ class MapLayer:
 _CBM_WORLD = "Allg. Karten Weltweit"
 _CBM_AERIAL = "Luftbilder Weltweit"
 
+# basemap.de Vektor: alle Styles (Farbe/Grau/Binär) nutzen dieselben v2-Kacheln.
+# Die frühere v1-URL (tiles/v1/bm_web_vt) liefert inzwischen 404.
+_BASEMAPDE_TILES = "https://sgx.geodatenzentrum.de/gdz_basemapde_vektor/tiles/v2/bm_web_de_3857/{z}/{x}/{y}.pbf"
+_BASEMAPDE_STYLES = "https://sgx.geodatenzentrum.de/gdz_basemapde_vektor/styles"
+
 # ---------------------------------------------------------------------------
 # Basemap Definitions
 # ---------------------------------------------------------------------------
@@ -96,8 +101,8 @@ BASEMAPS: tuple[MapLayer, ...] = (
         key="basemapde_vektor",
         name="basemap.de Vektor (Farbe)",
         kind="vtile",
-        url="https://sgx.geodatenzentrum.de/gdz_basemapde_vektor/tiles/v1/bm_web_vt/{z}/{x}/{y}.pbf",
-        style_url="https://sgx.geodatenzentrum.de/gdz_basemapde_vektor/styles/bm_web_col.json",
+        url=_BASEMAPDE_TILES,
+        style_url=f"{_BASEMAPDE_STYLES}/bm_web_col.json",
         zmin=0,
         zmax=15,
         description="Vektorbasiskarte Deutschland (bmd)",
@@ -107,11 +112,40 @@ BASEMAPS: tuple[MapLayer, ...] = (
         key="basemapde_vektor_grau",
         name="basemap.de Vektor (Grau)",
         kind="vtile",
-        url="https://sgx.geodatenzentrum.de/gdz_basemapde_vektor/tiles/v1/bm_web_vt/{z}/{x}/{y}.pbf",
-        style_url="https://sgx.geodatenzentrum.de/gdz_basemapde_vektor/styles/bm_web_gry.json",
+        url=_BASEMAPDE_TILES,
+        style_url=f"{_BASEMAPDE_STYLES}/bm_web_gry.json",
         zmin=0,
         zmax=15,
         description="Vektorbasiskarte Grau",
+        category=_CBM_WORLD,
+    ),
+    MapLayer(
+        key="basemapde_vektor_binaer",
+        name="basemap.de Vektor (Binär)",
+        kind="vtile",
+        url=_BASEMAPDE_TILES,
+        style_url=f"{_BASEMAPDE_STYLES}/bm_web_bin.json",
+        zmin=0,
+        zmax=15,
+        description="Vektorbasiskarte Schwarz-Weiß – ideal für Ausdrucke und Overlays",
+        category=_CBM_WORLD,
+    ),
+    MapLayer(
+        key="basemapde_raster",
+        name="basemap.de Raster (Farbe)",
+        kind="wms",
+        url="https://sgx.geodatenzentrum.de/wms_basemapde",
+        wms_params={"layers": "de_basemapde_web_raster_farbe", "styles": "", "format": "image/png", "crs": ""},
+        description="basemap.de als Rasterkarte (WMS)",
+        category=_CBM_WORLD,
+    ),
+    MapLayer(
+        key="basemapde_raster_grau",
+        name="basemap.de Raster (Grau)",
+        kind="wms",
+        url="https://sgx.geodatenzentrum.de/wms_basemapde",
+        wms_params={"layers": "de_basemapde_web_raster_grau", "styles": "", "format": "image/png", "crs": ""},
+        description="basemap.de als Rasterkarte in Graustufen (WMS)",
         category=_CBM_WORLD,
     ),
     MapLayer(
@@ -181,10 +215,12 @@ BASEMAPS: tuple[MapLayer, ...] = (
     MapLayer(
         key="s2cloudless_eox",
         name="Sentinel-2 Cloudless (EOX)",
-        kind="wms",
-        url="https://tiles.maps.eox.at/wms",
-        wms_params={"layers": "s2cloudless-2023", "styles": "", "format": "image/jpeg", "crs": "EPSG:3857"},
-        description="Wolkenfreies Sentinel-2-Mosaik (EOX)",
+        kind="xyz",
+        # WMTS-REST-Kacheln (TileMatrix/TileRow/TileCol = z/y/x); der WMS lieferte
+        # für s2cloudless-2023 in EPSG:3857 nur Fehlerbilder.
+        url="https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2024_3857/default/g/{z}/{y}/{x}.jpg",
+        zmax=16,
+        description="Wolkenfreies Sentinel-2-Mosaik 2024 (EOX, CC BY-NC-SA)",
         category=_CBM_AERIAL,
     ),
     MapLayer(
@@ -194,6 +230,15 @@ BASEMAPS: tuple[MapLayer, ...] = (
         url="https://a.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png",
         zmax=20,
         description="Radwege-fokussierte OSM-Karte",
+        category=_CBM_WORLD,
+    ),
+    MapLayer(
+        key="osm_hot",
+        name="OSM Humanitarian (HOT)",
+        kind="xyz",
+        url="https://a.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png",
+        zmax=19,
+        description="OSM-Stil des Humanitarian OpenStreetMap Teams für Katastrophenhilfe",
         category=_CBM_WORLD,
     ),
 )
@@ -215,11 +260,95 @@ def basemaps_by_category() -> dict[str, list[MapLayer]]:
 # Additional Layer Definitions
 # ---------------------------------------------------------------------------
 
+_CAL_SITUATION = "Lage"
 _CAL_THEMED = "Fachdaten"
 _CAL_AERIAL_STATE = "Luftbilder Länder"
 _CAL_DRONE = "Drohne"
 
 ADD_LAYERS: tuple[MapLayer, ...] = (
+    MapLayer(
+        key="dwd_warnungen",
+        name="DWD Unwetterwarnungen (Landkreise)",
+        kind="wms",
+        url="https://maps.dwd.de/geoserver/dwd/wms",
+        wms_params={"layers": "Warnungen_Landkreise", "styles": "", "format": "image/png", "crs": "EPSG:3857"},
+        description="Aktuelle Wetterwarnungen des Deutschen Wetterdienstes je Landkreis",
+        category=_CAL_SITUATION,
+    ),
+    MapLayer(
+        key="dwd_warnungen_gemeinden",
+        name="DWD Unwetterwarnungen (Gemeinden)",
+        kind="wms",
+        url="https://maps.dwd.de/geoserver/dwd/wms",
+        wms_params={"layers": "Warnungen_Gemeinden", "styles": "", "format": "image/png", "crs": "EPSG:3857"},
+        description="Aktuelle Wetterwarnungen des Deutschen Wetterdienstes je Gemeinde",
+        category=_CAL_SITUATION,
+    ),
+    MapLayer(
+        key="dwd_radar",
+        name="DWD Niederschlagsradar",
+        kind="wms",
+        url="https://maps.dwd.de/geoserver/dwd/wms",
+        wms_params={"layers": "Niederschlagsradar", "styles": "", "format": "image/png", "crs": "EPSG:3857"},
+        description="Aktuelles Regenradar des Deutschen Wetterdienstes",
+        category=_CAL_SITUATION,
+    ),
+    MapLayer(
+        key="pegelonline",
+        name="Pegelonline Wasserstände (WSV)",
+        kind="wms",
+        url="https://www.pegelonline.wsv.de/webservices/gis/wms/aktuell/mnwmhw",
+        wms_params={"layers": "PegelonlineWMS", "styles": "", "format": "image/png", "crs": "EPSG:3857"},
+        description="Aktuelle Pegelstände an Bundeswasserstraßen, eingefärbt nach MNW/MHW",
+        category=_CAL_SITUATION,
+    ),
+    # Hochwassergefahrenkarten (HWRM-RL, Berichtszyklus 2019) der BfG: ein Dienst
+    # pro Szenario, jeweils mit dem einzigen Layer "0". Nur Ausdehnung, keine Wassertiefe.
+    MapLayer(
+        key="hwrm_fluss_haeufig",
+        name="Hochwasser Fluss – HQhäufig (BfG)",
+        kind="wms",
+        url="https://geoportal.bafg.de/arcgis1/services/HWRMRL/HWRMRL_DE_LH/MapServer/WMSServer",
+        wms_params={"layers": "0", "styles": "", "format": "image/png", "crs": "EPSG:3857"},
+        description="Überflutungsfläche bei häufigem Hochwasser (hohe Wahrscheinlichkeit)",
+        category=_CAL_SITUATION,
+    ),
+    MapLayer(
+        key="hwrm_fluss_hq100",
+        name="Hochwasser Fluss – HQ100 (BfG)",
+        kind="wms",
+        url="https://geoportal.bafg.de/arcgis1/services/HWRMRL/HWRMRL_DE_LM/MapServer/WMSServer",
+        wms_params={"layers": "0", "styles": "", "format": "image/png", "crs": "EPSG:3857"},
+        description="Überflutungsfläche bei 100-jährlichem Hochwasser (mittlere Wahrscheinlichkeit)",
+        category=_CAL_SITUATION,
+    ),
+    MapLayer(
+        key="hwrm_fluss_extrem",
+        name="Hochwasser Fluss – HQextrem (BfG)",
+        kind="wms",
+        url="https://geoportal.bafg.de/arcgis1/services/HWRMRL/HWRMRL_DE_LL/MapServer/WMSServer",
+        wms_params={"layers": "0", "styles": "", "format": "image/png", "crs": "EPSG:3857"},
+        description="Überflutungsfläche bei Extremhochwasser (niedrige Wahrscheinlichkeit)",
+        category=_CAL_SITUATION,
+    ),
+    MapLayer(
+        key="hwrm_kueste_hq100",
+        name="Hochwasser Küste – HQ100 (BfG)",
+        kind="wms",
+        url="https://geoportal.bafg.de/arcgis1/services/HWRMRL/HWRMRL_DE_SM/MapServer/WMSServer",
+        wms_params={"layers": "0", "styles": "", "format": "image/png", "crs": "EPSG:3857"},
+        description="Überflutungsfläche bei Sturmflut (mittlere Wahrscheinlichkeit)",
+        category=_CAL_SITUATION,
+    ),
+    MapLayer(
+        key="openfiremap_hydranten",
+        name="Hydranten (OpenFireMap)",
+        kind="xyz",
+        url="https://openfiremap.de/hytiles/{z}/{x}/{y}.png",
+        zmax=18,
+        description="Hydranten und Löschwasserentnahmestellen aus OSM (Overlay, erst ab Zoom 13)",
+        category=_CAL_SITUATION,
+    ),
     MapLayer(
         key="mgrs_grid",
         name="MGRS/UTMRef Gitter",
@@ -260,6 +389,24 @@ ADD_LAYERS: tuple[MapLayer, ...] = (
         url="https://geodienste.bfn.de/ogc/wms/schutzgebiet",
         wms_params={"layers": "Naturschutzgebiete", "styles": "", "format": "image/png", "crs": ""},
         description="INSPIRE-Schutzgebiete (Bundesamt für Naturschutz)",
+        category=_CAL_THEMED,
+    ),
+    MapLayer(
+        key="vg250",
+        name="Verwaltungsgrenzen (BKG VG250)",
+        kind="wms",
+        url="https://sgx.geodatenzentrum.de/wms_vg250",
+        wms_params={"layers": "vg250_lan,vg250_krs,vg250_gem", "styles": "", "format": "image/png", "crs": ""},
+        description="Grenzen von Ländern, Kreisen und Gemeinden",
+        category=_CAL_THEMED,
+    ),
+    MapLayer(
+        key="basemapde_schummerung",
+        name="basemap.de Geländeschummerung",
+        kind="wms",
+        url="https://sgx.geodatenzentrum.de/wms_basemapde_schummerung",
+        wms_params={"layers": "de_basemapde_web_raster_hillshade", "styles": "", "format": "image/png", "crs": ""},
+        description="Geländerelief als Overlay, z.B. über der Binär- oder Graukarte",
         category=_CAL_THEMED,
     ),
     MapLayer(
@@ -371,8 +518,100 @@ ADD_LAYERS: tuple[MapLayer, ...] = (
         name="Hessen – DOP",
         kind="wms",
         url="https://www.gds-srv.hessen.de/cgi-bin/lika-services/ogc-free-images.ows",
-        wms_params={"layers": "he_dop20_rgb", "styles": "", "format": "image/png", "crs": ""},
-        description="Orthophotos Hessen 20cm RGB (HVBG, Open Data)",
+        # he_dop20_rgb liefert nur weiße Bilder, he_dop_rgb ist die funktionierende Gruppe
+        wms_params={"layers": "he_dop_rgb", "styles": "", "format": "image/png", "crs": ""},
+        description="Orthophotos Hessen RGB (HVBG, Open Data)",
+        category=_CAL_AERIAL_STATE,
+    ),
+    MapLayer(
+        key="bb_dop",
+        name="Brandenburg – DOP",
+        kind="wms",
+        url="https://isk.geobasis-bb.de/mapproxy/dop20c/service/wms",
+        wms_params={"layers": "bebb_dop20c", "styles": "", "format": "image/png", "crs": ""},
+        description="Digitale Orthophotos Brandenburg/Berlin 20cm (LGB, Open Data)",
+        category=_CAL_AERIAL_STATE,
+    ),
+    MapLayer(
+        key="sl_dop",
+        name="Saarland – DOP",
+        kind="wms",
+        url="https://geoportal.saarland.de/freewms/dop2023",
+        wms_params={"layers": "sl_dop20_rgb", "styles": "", "format": "image/png", "crs": ""},
+        description="Digitale Orthophotos Saarland 2023 (LVGL, Open Data)",
+        category=_CAL_AERIAL_STATE,
+    ),
+    MapLayer(
+        key="be_dop",
+        name="Berlin – TrueDOP",
+        kind="wms",
+        url="https://gdi.berlin.de/services/wms/truedop_2024",
+        wms_params={"layers": "truedop_2024", "styles": "", "format": "image/png", "crs": ""},
+        description="Echte Orthophotos Berlin 2024 (SenStadt, dl-de/zero-2-0)",
+        category=_CAL_AERIAL_STATE,
+    ),
+    MapLayer(
+        key="th_dop",
+        name="Thüringen – DOP",
+        kind="wms",
+        url="https://www.geoproxy.geoportal-th.de/geoproxy/services/DOP",
+        wms_params={"layers": "th_dop", "styles": "", "format": "image/png", "crs": ""},
+        description="Digitale Orthophotos Thüringen (© GDI-Th, CC BY 4.0)",
+        category=_CAL_AERIAL_STATE,
+    ),
+    MapLayer(
+        key="st_dop",
+        name="Sachsen-Anhalt – DOP",
+        kind="wms",
+        url="https://www.geodatenportal.sachsen-anhalt.de/wss/service/ST_LVermGeo_DOP_WMS_OpenData/guest",
+        wms_params={"layers": "lsa_lvermgeo_dop20_2", "styles": "", "format": "image/png", "crs": ""},
+        description="Digitale Orthophotos Sachsen-Anhalt 20cm (© GeoBasis-DE / LVermGeo ST)",
+        category=_CAL_AERIAL_STATE,
+    ),
+    MapLayer(
+        key="mv_dop",
+        name="Mecklenburg-Vorpommern – DOP",
+        kind="wms",
+        url="https://www.geodaten-mv.de/dienste/adv_dop",
+        wms_params={"layers": "mv_dop", "styles": "", "format": "image/png", "crs": ""},
+        description="Digitale Orthophotos M-V (© GeoBasis-DE/M-V)",
+        category=_CAL_AERIAL_STATE,
+    ),
+    MapLayer(
+        key="sh_dop",
+        name="Schleswig-Holstein – DOP",
+        kind="wms",
+        url="https://dienste.gdi-sh.de/WMS_SH_DOP20col_OpenGBD",
+        wms_params={"layers": "sh_dop20_rgb", "styles": "", "format": "image/png", "crs": ""},
+        description="Digitale Orthophotos SH 20cm (© GeoBasis-DE/LVermGeo SH, CC BY 4.0)",
+        category=_CAL_AERIAL_STATE,
+    ),
+    MapLayer(
+        key="hh_dop",
+        name="Hamburg – DOP",
+        kind="wms",
+        url="https://geodienste.hamburg.de/wms_dop_zeitreihe_belaubt",
+        wms_params={"layers": "dop_zeitreihe_belaubt", "styles": "", "format": "image/png", "crs": ""},
+        description="Digitale Orthophotos Hamburg, aktuellster Jahrgang (LGV, dl-de/by-2-0)",
+        category=_CAL_AERIAL_STATE,
+    ),
+    MapLayer(
+        key="hb_dop",
+        name="Bremen – DOP",
+        kind="wms",
+        url="https://geodienste.bremen.de/wms_dop_lb",
+        wms_params={"layers": "dop10_2025_HB,dop10_2025_BHV", "styles": "", "format": "image/png", "crs": ""},
+        description="Digitale Orthophotos Bremen und Bremerhaven 2025 10cm (Landesamt GeoInformation Bremen, CC BY)",
+        category=_CAL_AERIAL_STATE,
+    ),
+    MapLayer(
+        key="rp_dop",
+        name="Rheinland-Pfalz – DOP",
+        kind="wms",
+        url="https://geo4.service24.rlp.de/wms/rp_dop20.fcgi",
+        # PNG kommt hier nur als 256-Farben-Palette, JPEG liefert die volle Farbtiefe
+        wms_params={"layers": "rp_dop20", "styles": "", "format": "image/jpeg", "crs": ""},
+        description="Digitale Orthophotos RLP 20cm (© GeoBasis-DE / LVermGeoRP, dl-de/by-2-0)",
         category=_CAL_AERIAL_STATE,
     ),
     MapLayer(
@@ -470,7 +709,13 @@ def qgis_connection_exists(basemap: MapLayer) -> bool:
     connection_groups = s.childGroups()
     s.endGroup()
 
-    return basemap.name in connection_groups
+    if basemap.name not in connection_groups:
+        return False
+
+    # Verbindungen mit veralteter URL (z.B. nach Umzug eines Dienstes) gelten als
+    # nicht installiert, damit der Setup-Dialog sie neu schreibt.
+    stored_url = s.value(f"{group_path}/{basemap.name}/url", "")
+    return stored_url == basemap.url
 
 
 def exists_in_project(basemap: MapLayer) -> bool:
