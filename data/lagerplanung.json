@@ -1,0 +1,41 @@
+{
+  "_hinweis": "Richtwerte für die Lagerplanung. Maße in Metern (Grundfläche ohne Abspannung). Bitte vor dem Einsatz mit den Herstellerangaben / der STAN abgleichen. Die Werte lassen sich hier oder direkt im Dock anpassen.",
+  "zelte": [
+    {"id": "sg300", "name": "Zelt SG 300", "laenge": 6.0, "breite": 5.0, "abspannung": 1.5},
+    {"id": "sg500", "name": "Zelt SG 500", "laenge": 10.0, "breite": 5.0, "abspannung": 1.5},
+    {"id": "sg20", "name": "Zelt SG 20", "laenge": 5.0, "breite": 4.0, "abspannung": 1.5},
+    {"id": "sg30", "name": "Zelt SG 30", "laenge": 6.0, "breite": 5.0, "abspannung": 1.5},
+    {"id": "sg50", "name": "Zelt SG 50", "laenge": 9.0, "breite": 5.6, "abspannung": 1.5},
+    {"id": "pav33", "name": "Faltpavillon 3 x 3 m", "laenge": 3.0, "breite": 3.0, "abspannung": 0.5},
+    {"id": "pav36", "name": "Faltpavillon 3 x 6 m", "laenge": 6.0, "breite": 3.0, "abspannung": 0.5},
+    {"id": "pav48", "name": "Faltpavillon 4 x 8 m", "laenge": 8.0, "breite": 4.0, "abspannung": 0.5}
+  ],
+  "_hinweis_fahrzeuge": "Fahrzeugmaße = Länge über alles × Breite ohne Spiegel, Anhänger inkl. Deichsel. Richtwerte – je nach Fahrgestell/Baujahr abweichend, bitte mit Fahrzeugschein abgleichen. Spiegel und Türen über den Mindestabstand berücksichtigen.",
+  "fahrzeuge": [
+    {"id": "gkw", "name": "GKW (Gerätekraftwagen)", "laenge": 8.6, "breite": 2.55},
+    {"id": "mtw_sprinter", "name": "MTW Sprinter", "laenge": 5.95, "breite": 2.0},
+    {"id": "mtw_sprinter_lang", "name": "MTW Sprinter lang", "laenge": 7.0, "breite": 2.0},
+    {"id": "mtw_t5", "name": "MTW VW T5/T6", "laenge": 4.9, "breite": 1.9},
+    {"id": "mtw_t5_lang", "name": "MTW VW T5/T6 lang", "laenge": 5.3, "breite": 1.9},
+    {"id": "mzkw", "name": "MzKW (Mehrzweckkraftwagen)", "laenge": 8.0, "breite": 2.55},
+    {"id": "mzgw", "name": "MzGW (Mehrzweckgerätewagen)", "laenge": 7.9, "breite": 2.5},
+    {"id": "fuekw", "name": "FüKW (Führungskraftwagen)", "laenge": 7.0, "breite": 2.4},
+    {"id": "mlw", "name": "MLW (Mannschaftslastwagen)", "laenge": 8.0, "breite": 2.5},
+    {"id": "lkw_k", "name": "LKW-K (Kipper)", "laenge": 7.5, "breite": 2.55},
+    {"id": "lkw_lkr", "name": "LKW mit Ladekran", "laenge": 9.0, "breite": 2.55},
+    {"id": "wlf", "name": "WLF (Wechselladerfahrzeug)", "laenge": 8.5, "breite": 2.55},
+    {"id": "brmg", "name": "Radlader (BRmG)", "laenge": 7.0, "breite": 2.5},
+    {"id": "pkw", "name": "PKW / Kombi", "laenge": 4.8, "breite": 1.9},
+    {"id": "anh_nea", "name": "Anhänger NEA 50 kVA", "laenge": 4.5, "breite": 2.1},
+    {"id": "anh_lima", "name": "Anhänger Lichtmast", "laenge": 4.0, "breite": 1.8},
+    {"id": "anh_plane", "name": "Anhänger Plane 2 t", "laenge": 5.0, "breite": 2.1},
+    {"id": "anh_tieflader", "name": "Anhänger Tieflader 12 t", "laenge": 9.5, "breite": 2.55}
+  ],
+  "leitungsroller": [
+    {"id": "lr25", "name": "Leitungsroller 25 m", "laenge": 25.0, "farbe": "#ef6c00"},
+    {"id": "lr50", "name": "Leitungsroller 50 m", "laenge": 50.0, "farbe": "#1565c0"}
+  ],
+  "verteiler": [
+    {"id": "v16", "name": "Verteiler 16 A", "farbe": "#fbc02d"}
+  ]
+}

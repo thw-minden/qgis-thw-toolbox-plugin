@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Hinzugefügt
+- **Lagerplanung** (neues Dock + Toolbar-Button, Paket `planning/`):
+  - Zelte maßstabsgetreu platzieren (SG 300, SG 500, SG 20/30/50, Faltpavillons, eigenes Maß) inkl. gestrichelter Abspannung, Drehen per R / Strg+Mausrad / Rechtsklick und Mindestabstands-Prüfung
+  - **Fahrzeuge** maßstabsgetreu platzieren (GKW, MTW Sprinter, MTW T5/T6, MzKW, MzGW, FüKW, MLW, LKW-K, LKW Ladekran, WLF, Radlader, PKW, Anhänger u.a.) mit Front-Markierung und eigenem Mindestabstand
+  - **Flächen-Kapazität**: Fläche zeichnen oder auswählen → Tabelle, wie viele Zelte bzw. Fahrzeuge je Typ hineinpassen, Vorschau auf der Karte und Übernahme per Klick
+  - **Stromversorgung**: Leitungsroller 25 m / 50 m als Leitung mit Längenbegrenzung und Reichweitenkreis (fängt Verteiler und Leitungsenden), Verteiler 16 A als Punkt
+  - Bilanz (Anzahl Zelte/Zeltfläche, verlegte Leitungslänge, Verteiler) und Löschen-Werkzeug
+  - Speicherung in `<projekt>_lagerplanung.gpkg` neben der Projektdatei; Katalog mit Maßen in `data/lagerplanung.json`
+
 ## [2.1.1]
 
 ### Verbessert
