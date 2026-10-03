@@ -13,6 +13,11 @@
 - Textgröße von Beschreibungen (Punkt, Linie, Polygon) mit dem Verschieben-Werkzeug über vier Eck-Anfasser am Beschreibungsrahmen skalieren (1–50 mm, Textrand wird mitskaliert; Punktbeschreibungen skalieren um ihre Mitte, Linien-/Polygonbeschreibungen um ihre Unterkante)
 - Auch Beschreibungen von Punkten lassen sich frei verschieben (beim Verschieben des Punktes bleibt der Abstand erhalten); beim Überfahren, Verschieben oder Skalieren einer Beschreibung wird das zugehörige Objekt hervorgehoben
 - Doppelklick auf eine Beschreibung (Verschieben-Werkzeug) öffnet den Bearbeiten-Dialog des zugehörigen Punktes, der Linie oder des Polygons
+- Längenanzeige beim Zeichnen von Linien und Polygonen: neben dem Mauszeiger erscheinen die Länge des aktuellen Segments sowie die Gesamtlänge bzw. Umfang und Fläche (m², ab 1 ha zusätzlich in ha; ellipsoidisch gemessen)
+- Bearbeiten-Dialog zeigt unter den Optionen einen Kasten „Messwerte“: Länge (Linien) bzw. Umfang und Fläche (Polygone); gemeinsame Zahlenformatierung in `util/units.py`
+- Punkte können im Bearbeiten-Dialog einen Radius in Metern erhalten: maßstabsgetreuer, halbtransparenter Kreis um den Punkt (z. B. Gefahren- oder Sperrbereich); Umfang und Fläche des Kreises erscheinen unter „Messwerte“; der Radius kann bereits beim Setzen des Punktes angegeben werden (Standard: kein Radius)
+- Bei gesetztem Radius ist die Füllfarbe des Kreises im Bearbeiten-Dialog wählbar (Standard: Punktfarbe mit 25 % Deckkraft, folgt der Punktfarbe bis zur eigenen Wahl)
+- Option im Bearbeiten-Dialog, Maße auf der Karte anzuzeigen: Radius eines Punktes (über dem Kreis), Segmentlängen einer Linie bzw. Kantenlängen eines Polygons (mittig an jeder Kante, entlang der Kante ausgerichtet); die Beschriftungen werden bei jeder Geometrieänderung automatisch aktualisiert
 
 ## [2.1.1]
 

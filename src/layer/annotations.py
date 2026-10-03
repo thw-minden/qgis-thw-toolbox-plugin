@@ -1,4 +1,5 @@
 import json
+import math
 from dataclasses import dataclass
 
 from qgis.core import (
@@ -14,6 +15,7 @@ from qgis.core import (
     QgsAnnotationPointTextItem,
     QgsAnnotationPolygonItem,
     QgsCoordinateReferenceSystem,
+    QgsDistanceArea,
     QgsFillSymbol,
     QgsGeometry,
     QgsLineString,
@@ -25,6 +27,7 @@ from qgis.core import (
     QgsProject,
     QgsRectangle,
     QgsRenderContext,
+    QgsSimpleMarkerSymbolLayer,
     QgsTextFormat,
     QgsTextRenderer,
     QgsVertexId,
@@ -33,6 +36,7 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
 
 from ..logging_utils import get_logger
+from ..util.units import format_meters
 
 logger = get_logger(__name__)
 
@@ -41,16 +45,23 @@ ANNOTATION_LAYER_DISPLAY_NAME = "THW Toolbox Annotationen"
 # Custom property marking our annotation layer (survives renaming by the user)
 _LAYER_PROPERTY = "thw_toolbox/annotation_layer"
 # Custom property holding per-item metadata as JSON:
-# {item_id: {"n": running number, "name": legacy list-only name, "label_id": linked description item}}
+# {item_id: {"n": running number, "name": legacy list-only name, "label_id": linked description item,
+#            "radius_m": radius circle of a point in meters (optional),
+#            "show_dims": show radius / edge lengths on the map, "dim_ids": the generated length labels}}
 _META_PROPERTY = "thw_toolbox/annotation_items"
 
 # Fallback when an item's line width cannot be read (e.g. restyled with native QGIS tools)
 DEFAULT_LINE_WIDTH_MM = 0.8
 MARKER_SIZE_MM = 3.0
 TEXT_SIZE_MM = 3.5
+# Size of the generated measurement labels (radius, edge lengths)
+DIMENSION_TEXT_SIZE_MM = 2.5
 # Allowed range when scaling descriptions with the move tool
 MIN_TEXT_SIZE_MM = 1.0
 MAX_TEXT_SIZE_MM = 50.0
+
+# Opacity of a point's radius circle fill relative to the point color
+_RADIUS_FILL_OPACITY = 0.25
 
 # Gap between the marker edge and the start of a new point description
 _POINT_LABEL_GAP_MM = 1.0
@@ -86,8 +97,10 @@ class AnnotationEntry:
     number: int
     name: str  # the description shown on the map
     line_color: QColor
-    fill_color: QColor | None  # None for unfilled polygons and non-polygons
+    fill_color: QColor | None  # polygon fill or a point's radius circle fill; None if unfilled / not applicable
     line_width: float | None = None  # mm; only for lines and polygons
+    radius_m: float | None = None  # radius circle in meters; only for points (0 = none)
+    show_dimensions: bool = False  # radius / edge lengths shown on the map
 
     @property
     def short_title(self) -> str:
@@ -96,6 +109,15 @@ class AnnotationEntry:
     @property
     def title(self) -> str:
         return f"{self.short_title}: {self.name}" if self.name else self.short_title
+
+
+@dataclass
+class Measurements:
+    """Real-world dimensions of an object; None where not applicable (e.g. no area for lines)."""
+
+    length_m: float | None = None
+    perimeter_m: float | None = None
+    area_m2: float | None = None
 
 
 @dataclass
@@ -151,19 +173,23 @@ def add_point(
     color: QColor,
     description: str = "",
     units_per_mm: float = 0.0,
+    radius_m: float = 0.0,
 ) -> None:
-    """Add a marker at ``point`` (layer CRS), optionally with a text description.
+    """Add a marker at ``point`` (layer CRS), optionally with a text description and a radius circle.
 
     ``units_per_mm`` (map units per millimetre at the current scale, see
     ``map_units_per_mm``) places the description next to instead of on the marker.
+    ``radius_m`` > 0 adds a true-to-scale circle with the default fill.
     """
+    radius = radius_m if radius_m > 0 else 0.0
     marker = QgsAnnotationMarkerItem(QgsPoint(point))
-    marker.setSymbol(_marker_symbol(color))
+    marker.setSymbol(_marker_symbol(color, radius))
     marker.setZIndex(_Z_MARKER)
     marker_id = layer.addItem(marker)
 
     meta = _read_meta(layer)
     _register(meta, marker_id)
+    meta[marker_id]["radius_m"] = radius
     _set_description(layer, meta, marker_id, KIND_POINT, description, units_per_mm)
     _write_meta(layer, meta)
     _finish(layer)
@@ -210,12 +236,19 @@ def list_entries(layer: QgsAnnotationLayer) -> list[AnnotationEntry]:
     """
     items = layer.items()
     meta = _read_meta(layer)
+    # Measurement labels of objects deleted outside the plugin would otherwise show up as stray texts
+    orphaned = [d for item_id, m in meta.items() if item_id not in items for d in m.get("dim_ids", []) if d in items]
+    for dim_id in orphaned:
+        layer.removeItem(dim_id)
+    if orphaned:
+        items = layer.items()
+        _finish(layer)
     changed = _prune_meta(meta, items)
 
-    linked_labels = {m.get("label_id") for m in meta.values() if m.get("label_id")}
+    hidden = {m.get("label_id") for m in meta.values() if m.get("label_id")} | _dimension_ids(meta)
     entries = []
     for item_id, item in items.items():
-        if item_id in linked_labels:
+        if item_id in hidden:
             continue
         kind = _kind_of(item)
         if kind is None:
@@ -243,12 +276,18 @@ def update_entry(
     fill_color: QColor | None,
     line_width: float | None = None,
     units_per_mm: float = 0.0,
+    radius_m: float | None = None,
+    show_dimensions: bool | None = None,
 ) -> None:
-    """Apply new colors, line width and text to an object.
+    """Apply new colors, line width, radius, text and measurement display to an object.
 
     Replaces the item's symbol with the plugin's default style. ``line_width``
     (mm) only applies to lines and polygons; None keeps the default width.
-    ``units_per_mm`` positions a newly created point description (see ``add_point``).
+    ``radius_m`` only applies to points: a true-to-scale circle around the
+    marker (0/None = none), filled with ``fill_color`` (None = derived from the
+    point color). ``units_per_mm`` positions a newly created point description
+    (see ``add_point``). ``show_dimensions`` toggles the radius / edge length
+    labels on the map (None keeps the current setting).
     """
     width_mm = line_width if line_width is not None else DEFAULT_LINE_WIDTH_MM
     item = layer.item(item_id)
@@ -260,7 +299,9 @@ def update_entry(
     _register(meta, item_id)
     name = name.strip()
     if kind == KIND_POINT:
-        item.setSymbol(_marker_symbol(line_color))
+        radius = radius_m if radius_m and radius_m > 0 else 0.0
+        item.setSymbol(_marker_symbol(line_color, radius, fill_color))
+        meta[item_id]["radius_m"] = radius
         _set_description(layer, meta, item_id, kind, name, units_per_mm)
     elif kind == KIND_LINE:
         item.setSymbol(_line_symbol(line_color, width_mm))
@@ -278,16 +319,21 @@ def update_entry(
         fmt = item.format()
         fmt.setColor(line_color)
         item.setFormat(fmt)
+    if kind != KIND_TEXT:
+        if show_dimensions is not None:
+            meta[item_id]["show_dims"] = bool(show_dimensions)
+        _refresh_dimensions(layer, meta, item_id)
     _write_meta(layer, meta)
     _finish(layer)
 
 
 def delete_entry(layer: QgsAnnotationLayer, item_id: str) -> None:
-    """Remove an object, including its linked description."""
+    """Remove an object, including its linked description and measurement labels."""
     meta = _read_meta(layer)
-    label_id = meta.get(item_id, {}).get("label_id")
-    if label_id and layer.item(label_id):
-        layer.removeItem(label_id)
+    item_meta = meta.get(item_id, {})
+    for linked_id in [item_meta.get("label_id"), *item_meta.get("dim_ids", [])]:
+        if linked_id and layer.item(linked_id):
+            layer.removeItem(linked_id)
     layer.removeItem(item_id)
     meta.pop(item_id, None)
     _write_meta(layer, meta)
@@ -304,6 +350,44 @@ def entry_geometry(layer: QgsAnnotationLayer, item_id: str) -> QgsGeometry | Non
     if isinstance(geometry, QgsPointXY):
         return QgsGeometry.fromPointXY(geometry)
     return QgsGeometry(geometry.clone())
+
+
+# ----------------------------------------------------------------------
+# Measuring
+# ----------------------------------------------------------------------
+
+
+def distance_area(crs: QgsCoordinateReferenceSystem) -> QgsDistanceArea:
+    """Ellipsoidal measurement for geometries in ``crs``, using the project's ellipsoid setting."""
+    project = QgsProject.instance()
+    da = QgsDistanceArea()
+    da.setSourceCrs(crs, project.transformContext())
+    da.setEllipsoid(project.ellipsoid())
+    return da
+
+
+def measure_entry(layer: QgsAnnotationLayer, item_id: str) -> Measurements:
+    """Length of a line, perimeter and area of a polygon or a point's radius circle (meters / m²).
+
+    Empty for texts and points without radius.
+    """
+    kind = item_kind(layer, item_id)
+    if kind == KIND_POINT:
+        radius = _read_meta(layer).get(item_id, {}).get("radius_m") or 0.0
+        if radius <= 0:
+            return Measurements()
+        return Measurements(perimeter_m=2 * math.pi * radius, area_m2=math.pi * radius**2)
+    geom = entry_geometry(layer, item_id) if kind in (KIND_LINE, KIND_POLYGON) else None
+    if geom is None or geom.isEmpty():
+        return Measurements()
+
+    da = distance_area(layer.crs())
+    if kind == KIND_LINE:
+        return Measurements(length_m=da.convertLengthMeasurement(da.measureLength(geom), Qgis.DistanceUnit.Meters))
+    return Measurements(
+        perimeter_m=da.convertLengthMeasurement(da.measurePerimeter(geom), Qgis.DistanceUnit.Meters),
+        area_m2=da.convertAreaMeasurement(da.measureArea(geom), Qgis.AreaUnit.SquareMeters),
+    )
 
 
 # ----------------------------------------------------------------------
@@ -352,6 +436,7 @@ def move_node(layer: QgsAnnotationLayer, handle: NodeHandle, new_point: QgsPoint
         dx = new_point.x() - handle.point.x()
         dy = new_point.y() - handle.point.y()
         layer.applyEditV2(QgsAnnotationItemEditOperationTranslateItem(label_id, dx, dy), context)
+    _update_dimensions(layer, handle.item_id)
     _finish(layer)
     return True
 
@@ -399,8 +484,16 @@ def label_bounds(layer: QgsAnnotationLayer, label_id: str, context: QgsRenderCon
 
 
 def description_labels(layer: QgsAnnotationLayer) -> list[str]:
-    """Ids of all texts that can be moved and scaled — every description plus standalone texts."""
-    return [item_id for item_id, item in layer.items().items() if isinstance(item, QgsAnnotationPointTextItem)]
+    """Ids of all texts that can be moved and scaled — every description plus standalone texts.
+
+    Generated measurement labels are excluded; they are placed automatically.
+    """
+    dimensions = _dimension_ids(_read_meta(layer))
+    return [
+        item_id
+        for item_id, item in layer.items().items()
+        if isinstance(item, QgsAnnotationPointTextItem) and item_id not in dimensions
+    ]
 
 
 def label_owner(layer: QgsAnnotationLayer, label_id: str) -> str | None:
@@ -485,6 +578,7 @@ def add_node(layer: QgsAnnotationLayer, item_id: str, point: QgsPointXY) -> bool
     if result != Qgis.AnnotationItemEditOperationResult.Success:
         logger.warning("Stützpunkt konnte nicht eingefügt werden (%s): %s", item_id, result)
         return False
+    _update_dimensions(layer, item_id)
     _finish(layer)
     return True
 
@@ -520,6 +614,7 @@ def delete_node(layer: QgsAnnotationLayer, handle: NodeHandle) -> bool:
     if result != Qgis.AnnotationItemEditOperationResult.Success:
         logger.warning("Stützpunkt konnte nicht entfernt werden (%s): %s", handle.item_id, result)
         return False
+    _update_dimensions(layer, handle.item_id)
     _finish(layer)
     return True
 
@@ -561,9 +656,16 @@ def _entry_for(layer, meta, item_id, item, kind) -> AnnotationEntry:
     line_width = None
 
     symbol_layer = item.symbol().symbolLayer(0) if hasattr(item, "symbol") and item.symbol() else None
+    radius_m = None
     if kind == KIND_POINT:
-        if symbol_layer is not None and hasattr(symbol_layer, "fillColor"):
-            line_color = symbol_layer.fillColor()
+        # The marker dot is the top-most layer; a radius circle (if any) sits below it
+        symbol = item.symbol()
+        dot = symbol.symbolLayer(symbol.symbolLayerCount() - 1) if symbol else None
+        if dot is not None and hasattr(dot, "fillColor"):
+            line_color = dot.fillColor()
+        radius_m = item_meta.get("radius_m") or 0.0
+        if symbol is not None and symbol.symbolLayerCount() > 1 and hasattr(symbol.symbolLayer(0), "fillColor"):
+            fill_color = symbol.symbolLayer(0).fillColor()
     elif kind == KIND_LINE:
         line_width = DEFAULT_LINE_WIDTH_MM
         if symbol_layer is not None:
@@ -586,7 +688,17 @@ def _entry_for(layer, meta, item_id, item, kind) -> AnnotationEntry:
         if label is not None:
             name = _strip_indent(label.text())
 
-    return AnnotationEntry(item_id, kind, item_meta["n"], name, line_color, fill_color, line_width)
+    return AnnotationEntry(
+        item_id,
+        kind,
+        item_meta["n"],
+        name,
+        line_color,
+        fill_color,
+        line_width,
+        radius_m,
+        bool(item_meta.get("show_dims")),
+    )
 
 
 def _set_description(layer, meta, item_id: str, kind: str, description: str, units_per_mm: float = 0.0) -> None:
@@ -637,6 +749,100 @@ def _label_anchor(layer, item_id: str, kind: str) -> QgsPointXY | None:
     return geom.asPoint()
 
 
+def _dimension_ids(meta: dict) -> set[str]:
+    return {dim_id for m in meta.values() for dim_id in m.get("dim_ids", [])}
+
+
+def _update_dimensions(layer, item_id: str) -> None:
+    """Rebuild the measurement labels of ``item_id`` after its geometry changed (no-op if not shown)."""
+    meta = _read_meta(layer)
+    item_meta = meta.get(item_id)
+    if item_meta and (item_meta.get("show_dims") or item_meta.get("dim_ids")):
+        _refresh_dimensions(layer, meta, item_id)
+        _write_meta(layer, meta)
+
+
+def _refresh_dimensions(layer, meta: dict, item_id: str) -> None:
+    """Recreate the measurement labels of an item according to its "show_dims" flag.
+
+    Points get their radius above the circle, lines and polygons the length of
+    every edge at its midpoint, rotated along the edge (always readable upright).
+    """
+    item_meta = meta.get(item_id)
+    if item_meta is None:
+        return
+    for dim_id in item_meta.get("dim_ids", []):
+        if layer.item(dim_id):
+            layer.removeItem(dim_id)
+    item_meta["dim_ids"] = []
+    if not item_meta.get("show_dims"):
+        return
+
+    kind = item_kind(layer, item_id)
+    geom = entry_geometry(layer, item_id)
+    if geom is None or geom.isEmpty():
+        return
+    da = distance_area(layer.crs())
+
+    labels: list[tuple[str, QgsPointXY, float]] = []  # (text, anchor in layer CRS, angle)
+    if kind == KIND_POINT:
+        radius = item_meta.get("radius_m") or 0.0
+        center = geom.asPoint()
+        units_per_meter = _layer_units_per_meter(da, center)
+        if radius > 0 and units_per_meter > 0:
+            top = QgsPointXY(center.x(), center.y() + radius * units_per_meter)
+            labels.append((f"r = {format_meters(radius)}", top, 0.0))
+    elif kind in (KIND_LINE, KIND_POLYGON):
+        vertices = geom.asPolyline() if kind == KIND_LINE else geom.asPolygon()[0]
+        for a, b in zip(vertices, vertices[1:]):
+            length = da.convertLengthMeasurement(da.measureLine(a, b), Qgis.DistanceUnit.Meters)
+            middle = QgsPointXY((a.x() + b.x()) / 2, (a.y() + b.y()) / 2)
+            labels.append((format_meters(length), middle, _upright_angle(a, b)))
+
+    for text, anchor, angle in labels:
+        text_item = QgsAnnotationPointTextItem(text, anchor)
+        text_item.setFormat(_dimension_format())
+        text_item.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        text_item.setAngle(angle)
+        if kind != KIND_POINT:
+            # The angle is computed in map coordinates; keep it aligned with the edge on a rotated map
+            text_item.setRotationMode(Qgis.SymbolRotationMode.RespectMapRotation)
+        text_item.setZIndex(_Z_TEXT)
+        item_meta["dim_ids"].append(layer.addItem(text_item))
+
+
+def _layer_units_per_meter(da: QgsDistanceArea, point: QgsPointXY) -> float:
+    """Local scale at ``point``: how many layer CRS units one meter on the ground spans (east-west)."""
+    meters_per_unit = da.convertLengthMeasurement(
+        da.measureLine(point, QgsPointXY(point.x() + 1, point.y())), Qgis.DistanceUnit.Meters
+    )
+    return 1 / meters_per_unit if meters_per_unit > 0 else 0.0
+
+
+def _upright_angle(a: QgsPointXY, b: QgsPointXY) -> float:
+    """Text angle along segment a→b (degrees, clockwise as point-text items expect), never upside down."""
+    angle = math.degrees(math.atan2(b.y() - a.y(), b.x() - a.x()))  # counter-clockwise from east
+    if angle > 90:
+        angle -= 180
+    elif angle < -90:
+        angle += 180
+    return -angle
+
+
+def _dimension_format() -> QgsTextFormat:
+    fmt = QgsTextFormat()
+    fmt.setSize(DIMENSION_TEXT_SIZE_MM)
+    fmt.setSizeUnit(Qgis.RenderUnit.Millimeters)
+    fmt.setColor(QColor(30, 30, 30))
+    buffer = fmt.buffer()
+    buffer.setEnabled(True)
+    buffer.setSize(0.6)
+    buffer.setSizeUnit(Qgis.RenderUnit.Millimeters)
+    buffer.setColor(QColor(255, 255, 255))
+    fmt.setBuffer(buffer)
+    return fmt
+
+
 def _strip_indent(text: str) -> str:
     return text[len(_LEGACY_INDENT) :] if text.startswith(_LEGACY_INDENT) else text
 
@@ -683,7 +889,18 @@ def _register_and_finish(layer, item_id: str) -> None:
     _finish(layer)
 
 
-def _marker_symbol(color: QColor) -> QgsMarkerSymbol:
+def default_radius_fill(color: QColor) -> QColor:
+    """Fill of a point's radius circle unless chosen explicitly: the point color, mostly transparent."""
+    fill = QColor(color)
+    fill.setAlphaF(color.alphaF() * _RADIUS_FILL_OPACITY)
+    return fill
+
+
+def _marker_symbol(color: QColor, radius_m: float = 0.0, fill_color: QColor | None = None) -> QgsMarkerSymbol:
+    """Marker dot in ``color``; with ``radius_m`` > 0 plus a true-to-scale circle of that radius below it.
+
+    The circle is outlined in ``color`` and filled with ``fill_color`` (default: ``default_radius_fill``).
+    """
     symbol = QgsMarkerSymbol.createSimple(
         {
             "name": "circle",
@@ -693,6 +910,16 @@ def _marker_symbol(color: QColor) -> QgsMarkerSymbol:
         }
     )
     symbol.symbolLayer(0).setFillColor(color)
+
+    if radius_m > 0:
+        circle = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Circle, 2 * radius_m)
+        # Meters on the ground, independent of the layer CRS and the map scale
+        circle.setSizeUnit(Qgis.RenderUnit.MetersInMapUnits)
+        circle.setFillColor(fill_color if fill_color is not None else default_radius_fill(color))
+        circle.setStrokeColor(color)
+        circle.setStrokeWidth(DEFAULT_LINE_WIDTH_MM)
+        circle.setStrokeWidthUnit(Qgis.RenderUnit.Millimeters)
+        symbol.insertSymbolLayer(0, circle)
     return symbol
 
 

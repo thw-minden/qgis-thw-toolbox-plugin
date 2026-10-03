@@ -282,7 +282,12 @@ class THWToolboxPlugin:
             return
 
         self._flash_annotation(layer, item_id)
-        dialog = AnnotationEditDialog(entry, QColor(self.settings.annotation_fill_color), self.iface.mainWindow())
+        dialog = AnnotationEditDialog(
+            entry,
+            QColor(self.settings.annotation_fill_color),
+            annotations.measure_entry(layer, item_id),
+            self.iface.mainWindow(),
+        )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             if dialog.deleted:
                 annotations.delete_entry(layer, item_id)
@@ -295,6 +300,8 @@ class THWToolboxPlugin:
                     dialog.fill_color(),
                     dialog.line_width(),
                     annotations.map_units_per_mm(self.canvas.mapSettings()),
+                    dialog.radius_m(),
+                    dialog.show_dimensions(),
                 )
         self._refresh_annotation_list()
 

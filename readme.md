@@ -34,8 +34,13 @@ Ein QGIS-Plugin für das einfache Hinzufügen und Verwalten von taktischen Zeich
 
 ### Annotationen
 
-- **Punkt setzen** - optional mit Beschreibungstext
+- **Punkt setzen** - optional mit Beschreibungstext und Radius (Standard: kein Radius)
 - **Linie zeichnen** - Linksklick setzt Stützpunkte, Rechtsklick/Enter beendet, Rücktaste entfernt den letzten Punkt, Esc bricht ab
+- **Längenanzeige** - beim Zeichnen zeigt ein Hinweis am Mauszeiger die Länge des aktuellen Segments und die Gesamtlänge (Linie) bzw. Umfang und Fläche (Polygon)
+- **Messwerte im Bearbeiten-Dialog** - Länge einer Linie bzw. Umfang und Fläche eines Polygons
+- **Radius für Punkte** - im Bearbeiten-Dialog einstellbarer, maßstabsgetreuer Kreis in Metern um einen Punkt
+- **Radius-Füllfarbe** - bei gesetztem Radius frei wählbar inkl. Transparenz
+- **Maße auf der Karte** - pro Objekt zuschaltbar: Radius eines Punktes, Segment- bzw. Kantenlängen von Linien und Polygonen; aktualisieren sich beim Bearbeiten automatisch
 - **Polygon zeichnen** - wahlweise nur Umriss oder gefüllt
 - **Speicherung im Projekt** - Annotationen liegen im Layer „THW Toolbox Annotationen“ und werden mit der Projektdatei gespeichert; Bearbeiten/Löschen über die QGIS-Annotationswerkzeuge
 - **Standardfarben und Linienbreite** - Linien- und Füllfarbe inkl. Transparenz sowie Linienbreite im Einstellungs-Dialog; pro Objekt im Bearbeiten-Dialog änderbar

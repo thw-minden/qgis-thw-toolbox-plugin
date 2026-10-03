@@ -1,13 +1,15 @@
 from collections.abc import Callable
 
-from qgis.core import Qgis, QgsCoordinateTransform, QgsPointLocator, QgsPointXY, QgsProject
+from qgis.core import Qgis, QgsCoordinateTransform, QgsDistanceArea, QgsPointLocator, QgsPointXY, QgsProject
 from qgis.gui import QgsMapTool, QgsRubberBand, QgsSnapIndicator
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import QPoint, Qt
 from qgis.PyQt.QtGui import QColor
-from qgis.PyQt.QtWidgets import QInputDialog, QLineEdit
+from qgis.PyQt.QtWidgets import QDialog, QLabel
 
 from ..layer import annotations
 from ..logging_utils import get_logger
+from ..ui.annotation_dialog import PointCreateDialog
+from ..util.units import format_area, format_meters
 
 logger = get_logger(__name__)
 
@@ -24,6 +26,10 @@ _HINTS = {
     "Rücktaste = letzten Punkt entfernen, Esc = abbrechen.",
 }
 _HINTS[MODE_POLYGON_FILLED] = _HINTS[MODE_POLYGON]
+
+# Offset of the length label from the cursor (pixels)
+_LENGTH_LABEL_OFFSET = QPoint(16, 16)
+
 
 # Minimum vertex count per mode before a shape can be finished
 _MIN_POINTS = {MODE_LINE: 2, MODE_POLYGON: 3, MODE_POLYGON_FILLED: 3}
@@ -54,6 +60,7 @@ class AnnotationTool(QgsMapTool):
         self._points: list[QgsPointXY] = []  # canvas CRS
         self._rubber_band: QgsRubberBand | None = None
         self._snap_indicator = QgsSnapIndicator(canvas)
+        self._length_label: QLabel | None = None  # floating length readout next to the cursor
         self.setCursor(Qt.CursorShape.CrossCursor)
 
     # ------------------------------------------------------------------
@@ -77,6 +84,7 @@ class AnnotationTool(QgsMapTool):
         self._snap_indicator.setMatch(e.mapPointMatch())
         if self._points:
             self._update_rubber_band(point)
+            self._update_length_label(point, e.pos())
 
     def canvasReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
@@ -86,6 +94,7 @@ class AnnotationTool(QgsMapTool):
                 return
             self._points.append(point)
             self._update_rubber_band(point)
+            self._update_length_label(point, e.pos())
         elif e.button() == Qt.MouseButton.RightButton:
             self._finish_shape()
 
@@ -97,6 +106,8 @@ class AnnotationTool(QgsMapTool):
         elif key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete) and self._points:
             self._points.pop()
             self._update_rubber_band(None)
+            # Shown again with the next mouse move, when the cursor position is known
+            self._hide_length_label()
             e.accept()
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self._points:
             self._finish_shape()
@@ -134,9 +145,72 @@ class AnnotationTool(QgsMapTool):
 
     def _reset(self):
         self._points = []
+        self._hide_length_label()
         if self._rubber_band is not None:
             self.canvas.scene().removeItem(self._rubber_band)
             self._rubber_band = None
+
+    def dispose(self):
+        """Remove widgets owned by the tool (call on plugin unload)."""
+        self._reset()
+        if self._length_label is not None:
+            self._length_label.deleteLater()
+            self._length_label = None
+
+    # ------------------------------------------------------------------
+    # Length readout
+    # ------------------------------------------------------------------
+
+    def _measure_m(self, da: QgsDistanceArea, a: QgsPointXY, b: QgsPointXY) -> float:
+        return da.convertLengthMeasurement(da.measureLine(a, b), Qgis.DistanceUnit.Meters)
+
+    def _update_length_label(self, hover_point: QgsPointXY, pos: QPoint):
+        """Show the current segment length and the total length (lines) or perimeter and area (polygons)."""
+        if not self._points:
+            self._hide_length_label()
+            return
+        da = annotations.distance_area(self.canvas.mapSettings().destinationCrs())
+        preview = self._points + [hover_point]
+        segments = [self._measure_m(da, a, b) for a, b in zip(preview, preview[1:])]
+        lines = [f"Segment: {format_meters(segments[-1])}"]
+        if self.mode == MODE_LINE:
+            if len(segments) > 1:
+                lines.append(f"Gesamt: {format_meters(sum(segments))}")
+        elif len(preview) >= 3:
+            closing = self._measure_m(da, preview[-1], preview[0])
+            lines.append(f"Umfang: {format_meters(sum(segments) + closing)}")
+            area = da.convertAreaMeasurement(da.measurePolygon(preview + [preview[0]]), Qgis.AreaUnit.SquareMeters)
+            lines.append(f"Fläche: {format_area(area)}")
+
+        label = self._ensure_length_label()
+        label.setText("\n".join(lines))
+        label.adjustSize()
+        # Keep the label inside the canvas: flip to the other side of the cursor near the edges
+        viewport = self.canvas.viewport()
+        x = pos.x() + _LENGTH_LABEL_OFFSET.x()
+        y = pos.y() + _LENGTH_LABEL_OFFSET.y()
+        if x + label.width() > viewport.width():
+            x = pos.x() - _LENGTH_LABEL_OFFSET.x() - label.width()
+        if y + label.height() > viewport.height():
+            y = pos.y() - _LENGTH_LABEL_OFFSET.y() - label.height()
+        label.move(x, y)
+        label.show()
+        label.raise_()
+
+    def _ensure_length_label(self) -> QLabel:
+        if self._length_label is None:
+            label = QLabel(self.canvas.viewport())
+            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            label.setStyleSheet(
+                "QLabel { background: rgba(255, 255, 255, 230); color: black; border: 1px solid #666;"
+                " border-radius: 3px; padding: 2px 5px; }"
+            )
+            self._length_label = label
+        return self._length_label
+
+    def _hide_length_label(self):
+        if self._length_label is not None:
+            self._length_label.hide()
 
     def _to_layer_crs(self, layer, points: list[QgsPointXY]) -> list[QgsPointXY] | None:
         canvas_crs = self.canvas.mapSettings().destinationCrs()
@@ -159,14 +233,8 @@ class AnnotationTool(QgsMapTool):
         layer = self._target_layer()
         if layer is None:
             return
-        description, ok = QInputDialog.getText(
-            self.canvas.window(),
-            "Punkt setzen",
-            "Beschreibung (optional):",
-            QLineEdit.EchoMode.Normal,
-            "",
-        )
-        if not ok:
+        dialog = PointCreateDialog(self.canvas.window())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         pts = self._to_layer_crs(layer, [point])
         if pts:
@@ -174,8 +242,9 @@ class AnnotationTool(QgsMapTool):
                 layer,
                 pts[0],
                 self._line_color(),
-                description,
+                dialog.description(),
                 annotations.map_units_per_mm(self.canvas.mapSettings()),
+                dialog.radius_m(),
             )
             self._notify_created()
 
