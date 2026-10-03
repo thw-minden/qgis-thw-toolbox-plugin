@@ -4,12 +4,13 @@ from qgis.core import Qgis, QgsCoordinateTransform, QgsDistanceArea, QgsPointLoc
 from qgis.gui import QgsMapTool, QgsRubberBand, QgsSnapIndicator
 from qgis.PyQt.QtCore import QPoint, Qt
 from qgis.PyQt.QtGui import QColor
-from qgis.PyQt.QtWidgets import QDialog, QLabel
+from qgis.PyQt.QtWidgets import QDialog
 
 from ..layer import annotations
 from ..logging_utils import get_logger
 from ..ui.annotation_dialog import PointCreateDialog
 from ..util.units import format_area, format_meters
+from .cursor_label import CursorLabel
 
 logger = get_logger(__name__)
 
@@ -26,9 +27,6 @@ _HINTS = {
     "Rücktaste = letzten Punkt entfernen, Esc = abbrechen.",
 }
 _HINTS[MODE_POLYGON_FILLED] = _HINTS[MODE_POLYGON]
-
-# Offset of the length label from the cursor (pixels)
-_LENGTH_LABEL_OFFSET = QPoint(16, 16)
 
 
 # Minimum vertex count per mode before a shape can be finished
@@ -60,7 +58,7 @@ class AnnotationTool(QgsMapTool):
         self._points: list[QgsPointXY] = []  # canvas CRS
         self._rubber_band: QgsRubberBand | None = None
         self._snap_indicator = QgsSnapIndicator(canvas)
-        self._length_label: QLabel | None = None  # floating length readout next to the cursor
+        self._length_label = CursorLabel(canvas)  # floating length readout next to the cursor
         self.setCursor(Qt.CursorShape.CrossCursor)
 
     # ------------------------------------------------------------------
@@ -153,9 +151,7 @@ class AnnotationTool(QgsMapTool):
     def dispose(self):
         """Remove widgets owned by the tool (call on plugin unload)."""
         self._reset()
-        if self._length_label is not None:
-            self._length_label.deleteLater()
-            self._length_label = None
+        self._length_label.dispose()
 
     # ------------------------------------------------------------------
     # Length readout
@@ -182,35 +178,10 @@ class AnnotationTool(QgsMapTool):
             area = da.convertAreaMeasurement(da.measurePolygon(preview + [preview[0]]), Qgis.AreaUnit.SquareMeters)
             lines.append(f"Fläche: {format_area(area)}")
 
-        label = self._ensure_length_label()
-        label.setText("\n".join(lines))
-        label.adjustSize()
-        # Keep the label inside the canvas: flip to the other side of the cursor near the edges
-        viewport = self.canvas.viewport()
-        x = pos.x() + _LENGTH_LABEL_OFFSET.x()
-        y = pos.y() + _LENGTH_LABEL_OFFSET.y()
-        if x + label.width() > viewport.width():
-            x = pos.x() - _LENGTH_LABEL_OFFSET.x() - label.width()
-        if y + label.height() > viewport.height():
-            y = pos.y() - _LENGTH_LABEL_OFFSET.y() - label.height()
-        label.move(x, y)
-        label.show()
-        label.raise_()
-
-    def _ensure_length_label(self) -> QLabel:
-        if self._length_label is None:
-            label = QLabel(self.canvas.viewport())
-            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-            label.setStyleSheet(
-                "QLabel { background: rgba(255, 255, 255, 230); color: black; border: 1px solid #666;"
-                " border-radius: 3px; padding: 2px 5px; }"
-            )
-            self._length_label = label
-        return self._length_label
+        self._length_label.show_at("\n".join(lines), pos)
 
     def _hide_length_label(self):
-        if self._length_label is not None:
-            self._length_label.hide()
+        self._length_label.hide()
 
     def _to_layer_crs(self, layer, points: list[QgsPointXY]) -> list[QgsPointXY] | None:
         canvas_crs = self.canvas.mapSettings().destinationCrs()
@@ -245,6 +216,7 @@ class AnnotationTool(QgsMapTool):
                 dialog.description(),
                 annotations.map_units_per_mm(self.canvas.mapSettings()),
                 dialog.radius_m(),
+                self.settings.annotation_mgrs_resolution_m,
             )
             self._notify_created()
 

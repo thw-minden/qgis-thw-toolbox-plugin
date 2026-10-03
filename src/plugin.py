@@ -236,6 +236,7 @@ class THWToolboxPlugin:
                     self._show_status_hint,
                     on_moved=self._refresh_annotation_list,
                     on_edit=self._edit_annotation,
+                    mgrs_resolution=lambda: self.settings.annotation_mgrs_resolution_m,
                 ),
             ),
         ):
@@ -264,7 +265,7 @@ class THWToolboxPlugin:
         layer = annotations.find_annotation_layer()
         if layer is None:
             return None
-        annotations.remove_legacy_indents(layer, self.canvas.mapSettings())
+        annotations.migrate_legacy_labels(layer, self.canvas.mapSettings())
         return annotations.list_entries(layer)
 
     def _refresh_annotation_list(self):
@@ -287,11 +288,22 @@ class THWToolboxPlugin:
             QColor(self.settings.annotation_fill_color),
             annotations.measure_entry(layer, item_id),
             self.iface.mainWindow(),
+            vertices=annotations.vertex_points(layer, item_id),
+            crs=layer.crs(),
+            mgrs_resolution_m=self.settings.annotation_mgrs_resolution_m,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             if dialog.deleted:
                 annotations.delete_entry(layer, item_id)
             else:
+                # Geometry first, so description ($POS) and measurement labels use the new vertices
+                vertices = dialog.edited_vertices()
+                if vertices is not None and not annotations.set_vertices(
+                    layer, item_id, vertices, self.settings.annotation_mgrs_resolution_m
+                ):
+                    self.iface.messageBar().pushMessage(
+                        "Annotation", "Koordinaten konnten nicht übernommen werden.", Qgis.MessageLevel.Warning
+                    )
                 annotations.update_entry(
                     layer,
                     item_id,
@@ -302,6 +314,7 @@ class THWToolboxPlugin:
                     annotations.map_units_per_mm(self.canvas.mapSettings()),
                     dialog.radius_m(),
                     dialog.show_dimensions(),
+                    self.settings.annotation_mgrs_resolution_m,
                 )
         self._refresh_annotation_list()
 
@@ -801,6 +814,11 @@ class THWToolboxPlugin:
             self.settings.save_settings(QgsProject.instance())
             if self.layer:
                 self._init_renderer(self.layer)
+            # $POS in point descriptions follows the (possibly changed) MGRS resolution
+            annotation_layer = annotations.find_annotation_layer()
+            if annotation_layer is not None:
+                annotations.refresh_positions(annotation_layer, self.settings.annotation_mgrs_resolution_m)
+                self._refresh_annotation_list()
 
     def _pick_vector_layers(self, title: str) -> list[QgsVectorLayer] | None:
         """Open a checkbox-list dialog for selecting one or more vector layers.

@@ -15,7 +15,9 @@ from qgis.PyQt.QtCore import QPointF, Qt
 from qgis.PyQt.QtGui import QColor
 
 from ..layer import annotations
+from ..layout.mgrs_grid import point_to_mgrs
 from ..logging_utils import get_logger
+from .cursor_label import CursorLabel
 
 logger = get_logger(__name__)
 
@@ -25,8 +27,9 @@ _PICK_TOLERANCE_PX = 10
 _CORNER_TOLERANCE_PX = 8
 
 _HINT = (
-    "Annotation bearbeiten: Punkt/Stützpunkt/Beschreibung ziehen = verschieben, Ecke der Beschreibung ziehen = "
-    "Textgröße ändern, Doppelklick auf Beschreibung = bearbeiten, Linksklick auf Linie/Umriss = Stützpunkt "
+    "Annotation bearbeiten: Punkt/Stützpunkt/Beschreibung ziehen = verschieben, Schwerpunkt ⊕ ziehen = ganze "
+    "Linie/Fläche verschieben, Ecke der Beschreibung ziehen = "
+    "Textgröße ändern, Doppelklick auf Punkt/Beschreibung/⊕ = bearbeiten, Linksklick auf Linie/Umriss = Stützpunkt "
     "einfügen, Rechtsklick auf Stützpunkt = entfernen, Esc = abbrechen."
 )
 _HINT_MIN_VERTICES = (
@@ -75,7 +78,9 @@ class AnnotationMoveTool(QgsMapTool):
       line/polygon descriptions around their anchor (bottom center).
     - While a description is hovered, moved or scaled, the object it belongs to
       is highlighted.
-    - Double-click on a description opens the edit dialog of its object.
+    - Every line and polygon shows its center of mass (⊕) while the tool is active;
+      dragging it moves the whole object, including its description.
+    - Double-click on a point, a description or a center of mass opens the edit dialog of its object.
     - Left-click on a line or polygon outline inserts a vertex there; keeping the
       button pressed drags the new vertex right away.
     - Right-click on a line/polygon vertex removes it, unless the minimum
@@ -88,6 +93,7 @@ class AnnotationMoveTool(QgsMapTool):
         show_hint: Callable[[str], None] | None = None,
         on_moved: Callable[[], None] | None = None,
         on_edit: Callable[[str], None] | None = None,
+        mgrs_resolution: Callable[[], float] | None = None,
     ):
         super().__init__(canvas)
         self.canvas = canvas
@@ -95,6 +101,8 @@ class AnnotationMoveTool(QgsMapTool):
         self._on_moved = on_moved
         # Called with an item id to open the edit dialog of that object
         self._on_edit = on_edit
+        # Current MGRS resolution (m) for $POS in point descriptions — read when a point is moved
+        self._mgrs_resolution = mgrs_resolution or (lambda: 1.0)
         self._layer = None
 
         # Hover state — at most one of these is set
@@ -105,6 +113,8 @@ class AnnotationMoveTool(QgsMapTool):
         self._hover_label: tuple[str, QgsRectangle] | None = None
         # (item_id, point on the outline in layer CRS) when hovering a line/polygon outline
         self._hover_segment: tuple[str, QgsPointXY] | None = None
+        # (item_id, center of mass in layer CRS) when hovering a line/polygon's center of mass
+        self._hover_centroid: tuple[str, QgsPointXY] | None = None
 
         # Drag state — at most one of these is set
         self._dragging: annotations.NodeHandle | None = None
@@ -116,11 +126,20 @@ class AnnotationMoveTool(QgsMapTool):
         # while scaling a description
         self._scaling_label: tuple[str, QgsRectangle, QgsPointXY, float, bool] | None = None
         self._scale_factor: float | None = None
+        # (item_id, geometry, center of mass) — layer CRS — while moving a whole line/polygon
+        self._dragging_item: tuple[str, QgsGeometry, QgsPointXY] | None = None
+        self._item_offset: tuple[float, float] | None = None
+
+        # Center-of-mass markers (circle + cross = ⊕) of all lines/polygons while the tool is active
+        self._centroid_markers: list[QgsVertexMarker] = []
+        self._watched_layer = None  # annotation layer whose repaints refresh the markers
 
         self._rubber_band: QgsRubberBand | None = None
         self._hover_band: QgsRubberBand | None = None  # frame of the hovered description
         self._owner_band: QgsRubberBand | None = None  # object the hovered/edited description belongs to
         self._corner_markers: list[QgsVertexMarker] = []
+
+        self._coordinate_label = CursorLabel(canvas)  # MGRS coordinate of the dragged vertex
 
         self._hover_marker = QgsVertexMarker(canvas)
         self._hover_marker.setIconSize(14)
@@ -138,16 +157,25 @@ class AnnotationMoveTool(QgsMapTool):
         self._hint(_HINT)
         layer = annotations.find_annotation_layer()
         if layer is not None:
-            # Old point descriptions carry leading spaces that would show up inside the frame
-            annotations.remove_legacy_indents(layer, self.canvas.mapSettings())
+            # Old point descriptions carry leading spaces / left alignment
+            annotations.migrate_legacy_labels(layer, self.canvas.mapSettings())
+            # Every edit (here, in the dialog or the dock) repaints the layer — keep the ⊕ markers in sync
+            layer.repaintRequested.connect(self._refresh_centroids)
+            self._watched_layer = layer
+        self._refresh_centroids()
 
     def deactivate(self):
         self._cancel_drag()
         self._clear_hover()
+        self._unwatch_layer()
+        self._clear_centroids()
         self._hint("")
         super().deactivate()
 
     def canvasMoveEvent(self, e):
+        if self._dragging_item is not None:
+            self._drag_item_to(e.snapPoint(), e.pos())
+            return
         if self._scaling_label is not None:
             self._scale_label_to(e.mapPoint())
             return
@@ -163,6 +191,7 @@ class AnnotationMoveTool(QgsMapTool):
             return
         self._drag_target = target
         self._hover_marker.setCenter(e.snapPoint())
+        self._show_drag_coordinate(target, e.pos())
         geom = annotations.preview_moved_node(self._layer, self._dragging, target)
         if geom is not None:
             self._show_preview(geom)
@@ -174,6 +203,13 @@ class AnnotationMoveTool(QgsMapTool):
             self._start_drag(self._hover_node)
         elif self._hover_corner is not None:
             self._start_scaling(*self._hover_corner)
+        elif self._hover_centroid is not None:
+            item_id, center = self._hover_centroid
+            geom = annotations.entry_geometry(self._layer, item_id)
+            if geom is not None:
+                self._dragging_item = (item_id, geom, center)
+                self._item_offset = None
+                self._hover_marker.hide()
         elif self._hover_label is not None:
             label_id, rect = self._hover_label
             grab = self._to_layer_crs(e.mapPoint())
@@ -197,7 +233,12 @@ class AnnotationMoveTool(QgsMapTool):
         if e.button() != Qt.MouseButton.LeftButton:
             return
 
-        if self._scaling_label is not None:
+        if self._dragging_item is not None:
+            item_id, offset = self._dragging_item[0], self._item_offset
+            self._cancel_drag()
+            if offset is not None and annotations.translate_item(self._layer, item_id, *offset):
+                self._notify()
+        elif self._scaling_label is not None:
             label_id, _rect, pivot, _grab_dist, around_center = self._scaling_label
             factor = self._scale_factor
             self._cancel_drag()
@@ -214,7 +255,11 @@ class AnnotationMoveTool(QgsMapTool):
             handle, target = self._dragging, self._drag_target
             self._cancel_drag()
             # A click without moving leaves the item untouched
-            if target is not None and self._layer is not None and annotations.move_node(self._layer, handle, target):
+            if (
+                target is not None
+                and self._layer is not None
+                and annotations.move_node(self._layer, handle, target, self._mgrs_resolution())
+            ):
                 self._notify()
         else:
             return
@@ -226,12 +271,20 @@ class AnnotationMoveTool(QgsMapTool):
         # The preceding press/release pair may have started a (zero-length) label drag
         self._cancel_drag()
         self._update_hover(e.pos())
-        hit = self._hover_label or self._hover_corner
-        if hit is None:
-            return
-        label_id = hit[0]
-        # Descriptions open their point/line/polygon; standalone texts open themselves
-        target_id = annotations.label_owner(self._layer, label_id) or label_id
+        if self._hover_node is not None:
+            # Only a point's marker opens the dialog — line/polygon vertices stay drag-only
+            if annotations.item_kind(self._layer, self._hover_node.item_id) != annotations.KIND_POINT:
+                return
+            target_id = self._hover_node.item_id
+        elif self._hover_centroid is not None:
+            target_id = self._hover_centroid[0]
+        else:
+            hit = self._hover_label or self._hover_corner
+            if hit is None:
+                return
+            label_id = hit[0]
+            # Descriptions open their point/line/polygon; standalone texts open themselves
+            target_id = annotations.label_owner(self._layer, label_id) or label_id
         self._clear_hover()
         self._on_edit(target_id)
 
@@ -246,6 +299,9 @@ class AnnotationMoveTool(QgsMapTool):
     def dispose(self):
         """Remove canvas items owned by the tool (call on plugin unload)."""
         self._cancel_drag()
+        self._unwatch_layer()
+        self._clear_centroids()
+        self._coordinate_label.dispose()
         self._clear_label_frame()
         self._clear_owner()
         if self._hover_marker is not None:
@@ -257,7 +313,12 @@ class AnnotationMoveTool(QgsMapTool):
     # ------------------------------------------------------------------
 
     def _is_dragging(self) -> bool:
-        return self._dragging is not None or self._dragging_label is not None or self._scaling_label is not None
+        return (
+            self._dragging is not None
+            or self._dragging_label is not None
+            or self._scaling_label is not None
+            or self._dragging_item is not None
+        )
 
     def _start_drag(self, handle: annotations.NodeHandle):
         self._dragging = handle
@@ -290,6 +351,28 @@ class AnnotationMoveTool(QgsMapTool):
         factor = annotations.clamp_label_scale(self._layer, label_id, pivot.distance(target) / grab_dist)
         self._scale_factor = factor
         self._show_preview(QgsGeometry.fromRect(_scaled_rect(rect, pivot, factor)))
+
+    def _show_drag_coordinate(self, layer_point: QgsPointXY, pos):
+        """MGRS coordinate of the dragged vertex next to the cursor (project resolution)."""
+        try:
+            mgrs = point_to_mgrs(layer_point, self._layer.crs(), self._mgrs_resolution())
+        except Exception:
+            logger.exception("MGRS-Koordinate konnte nicht berechnet werden")
+            mgrs = None
+        self._coordinate_label.show_at(mgrs or "außerhalb UTM", pos)
+
+    def _drag_item_to(self, map_point: QgsPointXY, pos):
+        """Preview the whole line/polygon moved so its center of mass sits at the cursor."""
+        target = self._to_layer_crs(map_point)
+        if target is None:
+            return
+        _item_id, geom, center = self._dragging_item
+        dx, dy = target.x() - center.x(), target.y() - center.y()
+        self._item_offset = (dx, dy)
+        moved = QgsGeometry(geom)
+        moved.translate(dx, dy)
+        self._show_preview(moved)
+        self._show_drag_coordinate(target, pos)
 
     def _drag_label_to(self, map_point: QgsPointXY):
         """Preview the dragged description at the cursor (offset relative to the grab point)."""
@@ -326,20 +409,23 @@ class AnnotationMoveTool(QgsMapTool):
     def _update_hover(self, pos):
         """Highlight what is under ``pos``.
 
-        Priority: node, then a description frame corner, then a description,
-        then a line/polygon outline.
+        Priority: node, then a description frame corner, then a center of mass,
+        then a description, then a line/polygon outline.
         """
         self._layer = annotations.find_annotation_layer()
         self._hover_node = self._hover_corner = self._hover_label = self._hover_segment = None
+        self._hover_centroid = None
         if self._layer:
             self._hover_node = self._node_at(pos)
             if self._hover_node is None:
                 frames = self._label_frames()
                 self._hover_corner = self._corner_at(pos, frames)
                 if self._hover_corner is None:
-                    self._hover_label = self._label_at(pos, frames)
-                    if self._hover_label is None:
-                        self._hover_segment = self._segment_at(pos)
+                    self._hover_centroid = self._centroid_at(pos)
+                    if self._hover_centroid is None:
+                        self._hover_label = self._label_at(pos, frames)
+                        if self._hover_label is None:
+                            self._hover_segment = self._segment_at(pos)
 
         self._clear_label_frame()
         self._clear_owner()
@@ -352,6 +438,11 @@ class AnnotationMoveTool(QgsMapTool):
             self._show_owner(label_id)
             self._show_label_frame(rect)
             self.canvas.setCursor(_CORNER_CURSORS[corner_index])
+        elif self._hover_centroid is not None:
+            item_id, center = self._hover_centroid
+            self._show_hover_marker(center, QgsVertexMarker.IconType.ICON_CIRCLE)
+            self._highlight_item(item_id)
+            self.canvas.setCursor(Qt.CursorShape.SizeAllCursor)
         elif self._hover_label is not None:
             label_id, rect = self._hover_label
             self._hover_marker.hide()
@@ -366,6 +457,7 @@ class AnnotationMoveTool(QgsMapTool):
 
     def _clear_hover(self):
         self._hover_node = self._hover_corner = self._hover_label = self._hover_segment = None
+        self._hover_centroid = None
         self._clear_label_frame()
         self._clear_owner()
         if self._hover_marker is not None:
@@ -388,6 +480,48 @@ class AnnotationMoveTool(QgsMapTool):
             if dist is not None and dist <= best_dist:
                 best, best_dist = handle, dist
         return best
+
+    def _centroid_at(self, pos) -> tuple[str, QgsPointXY] | None:
+        """Nearest line/polygon center of mass within the pick tolerance of ``pos``."""
+        best, best_dist = None, _PICK_TOLERANCE_PX
+        for item_id, center in annotations.centroids(self._layer):
+            dist = self._pixel_distance(center, pos)
+            if dist is not None and dist <= best_dist:
+                best, best_dist = (item_id, center), dist
+        return best
+
+    def _refresh_centroids(self, *_args):
+        """Place a ⊕ marker on the center of mass of every line and polygon."""
+        self._clear_centroids()
+        layer = annotations.find_annotation_layer()
+        if layer is None:
+            return
+        self._layer = layer
+        for _item_id, center in annotations.centroids(layer):
+            canvas_point = self._to_canvas_crs(center)
+            if canvas_point is None:
+                continue
+            for icon_type in (QgsVertexMarker.IconType.ICON_CIRCLE, QgsVertexMarker.IconType.ICON_CROSS):
+                marker = QgsVertexMarker(self.canvas)
+                marker.setIconType(icon_type)
+                marker.setIconSize(12)
+                marker.setPenWidth(2)
+                marker.setColor(_HIGHLIGHT)
+                marker.setCenter(canvas_point)
+                self._centroid_markers.append(marker)
+
+    def _clear_centroids(self):
+        for marker in self._centroid_markers:
+            self.canvas.scene().removeItem(marker)
+        self._centroid_markers = []
+
+    def _unwatch_layer(self):
+        if self._watched_layer is not None:
+            try:
+                self._watched_layer.repaintRequested.disconnect(self._refresh_centroids)
+            except (TypeError, RuntimeError):
+                pass  # already disconnected or the layer was deleted
+            self._watched_layer = None
 
     def _label_frames(self) -> list[tuple[str, QgsRectangle]]:
         """(label_id, text extent in layer CRS) for every description at the current map scale."""
@@ -504,7 +638,12 @@ class AnnotationMoveTool(QgsMapTool):
     def _show_owner(self, label_id: str):
         """Highlight the point/line/polygon the description ``label_id`` belongs to."""
         owner_id = annotations.label_owner(self._layer, label_id)
-        geom = annotations.entry_geometry(self._layer, owner_id) if owner_id else None
+        if owner_id:
+            self._highlight_item(owner_id)
+
+    def _highlight_item(self, item_id: str):
+        """Thick blue outline/fill on a point/line/polygon."""
+        geom = annotations.entry_geometry(self._layer, item_id)
         if geom is None or geom.isEmpty():
             return
         self._clear_owner()
@@ -529,6 +668,9 @@ class AnnotationMoveTool(QgsMapTool):
         self._label_offset = None
         self._scaling_label = None
         self._scale_factor = None
+        self._dragging_item = None
+        self._item_offset = None
+        self._coordinate_label.hide()
         if self._rubber_band is not None:
             self.canvas.scene().removeItem(self._rubber_band)
             self._rubber_band = None

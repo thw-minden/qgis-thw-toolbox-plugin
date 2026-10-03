@@ -35,6 +35,7 @@ from qgis.core import (
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
 
+from ..layout.mgrs_grid import point_to_mgrs
 from ..logging_utils import get_logger
 from ..util.units import format_meters
 
@@ -47,7 +48,12 @@ _LAYER_PROPERTY = "thw_toolbox/annotation_layer"
 # Custom property holding per-item metadata as JSON:
 # {item_id: {"n": running number, "name": legacy list-only name, "label_id": linked description item,
 #            "radius_m": radius circle of a point in meters (optional),
-#            "show_dims": show radius / edge lengths on the map, "dim_ids": the generated length labels}}
+#            "show_dims": show radius / edge lengths on the map, "dim_ids": the generated length labels,
+#            "desc_template": point description as entered, with POSITION_PLACEHOLDER (optional)}}
+
+# Placeholder in point descriptions, replaced on the map by the point's MGRS coordinate
+POSITION_PLACEHOLDER = "$POS"
+_POSITION_UNAVAILABLE = "(Position außerhalb UTM)"
 _META_PROPERTY = "thw_toolbox/annotation_items"
 
 # Fallback when an item's line width cannot be read (e.g. restyled with native QGIS tools)
@@ -63,11 +69,11 @@ MAX_TEXT_SIZE_MM = 50.0
 # Opacity of a point's radius circle fill relative to the point color
 _RADIUS_FILL_OPACITY = 0.25
 
-# Gap between the marker edge and the start of a new point description
+# Gap between the marker edge and a new point description (placed centered above the marker)
 _POINT_LABEL_GAP_MM = 1.0
 
 # Earlier versions pushed point descriptions away from the marker with two
-# leading en spaces. They are removed by ``remove_legacy_indents``.
+# leading en spaces. They are removed by ``migrate_legacy_labels``.
 _LEGACY_INDENT = "  "
 
 # Vertices that must remain so editing never deletes a whole line/polygon
@@ -101,6 +107,7 @@ class AnnotationEntry:
     line_width: float | None = None  # mm; only for lines and polygons
     radius_m: float | None = None  # radius circle in meters; only for points (0 = none)
     show_dimensions: bool = False  # radius / edge lengths shown on the map
+    map_text: str = ""  # description as shown on the map ($POS resolved); empty = same as name
 
     @property
     def short_title(self) -> str:
@@ -108,7 +115,10 @@ class AnnotationEntry:
 
     @property
     def title(self) -> str:
-        return f"{self.short_title}: {self.name}" if self.name else self.short_title
+        # Multi-line descriptions are shown on one line in lists
+        text = self.map_text or self.name
+        name = " / ".join(line.strip() for line in text.splitlines() if line.strip())
+        return f"{self.short_title}: {name}" if name else self.short_title
 
 
 @dataclass
@@ -174,12 +184,14 @@ def add_point(
     description: str = "",
     units_per_mm: float = 0.0,
     radius_m: float = 0.0,
+    mgrs_resolution_m: float = 1.0,
 ) -> None:
     """Add a marker at ``point`` (layer CRS), optionally with a text description and a radius circle.
 
     ``units_per_mm`` (map units per millimetre at the current scale, see
     ``map_units_per_mm``) places the description next to instead of on the marker.
     ``radius_m`` > 0 adds a true-to-scale circle with the default fill.
+    ``$POS`` in the description is replaced by the MGRS coordinate at ``mgrs_resolution_m``.
     """
     radius = radius_m if radius_m > 0 else 0.0
     marker = QgsAnnotationMarkerItem(QgsPoint(point))
@@ -190,7 +202,7 @@ def add_point(
     meta = _read_meta(layer)
     _register(meta, marker_id)
     meta[marker_id]["radius_m"] = radius
-    _set_description(layer, meta, marker_id, KIND_POINT, description, units_per_mm)
+    _set_description(layer, meta, marker_id, KIND_POINT, description, units_per_mm, mgrs_resolution_m)
     _write_meta(layer, meta)
     _finish(layer)
 
@@ -278,6 +290,7 @@ def update_entry(
     units_per_mm: float = 0.0,
     radius_m: float | None = None,
     show_dimensions: bool | None = None,
+    mgrs_resolution_m: float = 1.0,
 ) -> None:
     """Apply new colors, line width, radius, text and measurement display to an object.
 
@@ -287,7 +300,8 @@ def update_entry(
     marker (0/None = none), filled with ``fill_color`` (None = derived from the
     point color). ``units_per_mm`` positions a newly created point description
     (see ``add_point``). ``show_dimensions`` toggles the radius / edge length
-    labels on the map (None keeps the current setting).
+    labels on the map (None keeps the current setting). ``$POS`` in a point
+    description is replaced by the MGRS coordinate at ``mgrs_resolution_m``.
     """
     width_mm = line_width if line_width is not None else DEFAULT_LINE_WIDTH_MM
     item = layer.item(item_id)
@@ -302,7 +316,7 @@ def update_entry(
         radius = radius_m if radius_m and radius_m > 0 else 0.0
         item.setSymbol(_marker_symbol(line_color, radius, fill_color))
         meta[item_id]["radius_m"] = radius
-        _set_description(layer, meta, item_id, kind, name, units_per_mm)
+        _set_description(layer, meta, item_id, kind, name, units_per_mm, mgrs_resolution_m)
     elif kind == KIND_LINE:
         item.setSymbol(_line_symbol(line_color, width_mm))
         _set_description(layer, meta, item_id, kind, name)
@@ -418,12 +432,15 @@ def preview_moved_node(layer: QgsAnnotationLayer, handle: NodeHandle, new_point:
     return results.representativeGeometry() if results else None
 
 
-def move_node(layer: QgsAnnotationLayer, handle: NodeHandle, new_point: QgsPointXY) -> bool:
+def move_node(
+    layer: QgsAnnotationLayer, handle: NodeHandle, new_point: QgsPointXY, mgrs_resolution_m: float = 1.0
+) -> bool:
     """Move ``handle`` to ``new_point`` (layer CRS).
 
     A point's description moves along, keeping its (possibly user-adjusted)
     offset; descriptions of lines/polygons stay where they are — they are
-    positioned independently of the vertices.
+    positioned independently of the vertices. A ``$POS`` in a point's
+    description is updated to the new position (at ``mgrs_resolution_m``).
     """
     context = QgsAnnotationItemEditContext()
     result = layer.applyEditV2(_move_operation(handle, new_point), context)
@@ -436,6 +453,7 @@ def move_node(layer: QgsAnnotationLayer, handle: NodeHandle, new_point: QgsPoint
         dx = new_point.x() - handle.point.x()
         dy = new_point.y() - handle.point.y()
         layer.applyEditV2(QgsAnnotationItemEditOperationTranslateItem(label_id, dx, dy), context)
+        _update_position_text(layer, handle.item_id, mgrs_resolution_m)
     _update_dimensions(layer, handle.item_id)
     _finish(layer)
     return True
@@ -447,13 +465,25 @@ def map_units_per_mm(map_settings) -> float:
     return context.convertToMapUnits(1.0, Qgis.RenderUnit.Millimeters)
 
 
-def remove_legacy_indents(layer: QgsAnnotationLayer, map_settings) -> bool:
-    """Drop the leading en spaces older versions put in front of point descriptions.
+def migrate_legacy_labels(layer: QgsAnnotationLayer, map_settings) -> bool:
+    """Bring point descriptions of older versions up to date without moving them visually.
 
-    The text is shifted right by the width the spaces took up at the scale of
-    ``map_settings``, so it stays where it was visually. Returns True if anything changed.
+    - Drop the leading en spaces older versions put in front of point descriptions;
+      the text is shifted right by the width the spaces took up.
+    - Switch left-aligned point descriptions to centered text; the anchor moves
+      right by half the text width.
+
+    Widths are measured at the scale of ``map_settings``. Returns True if anything changed.
     """
     context = QgsRenderContext.fromMapSettings(map_settings)
+    changed = _remove_legacy_indents(layer, context)
+    changed = _center_point_labels(layer, context) or changed
+    if changed:
+        _finish(layer)
+    return changed
+
+
+def _remove_legacy_indents(layer: QgsAnnotationLayer, context: QgsRenderContext) -> bool:
     changed = False
     for item in layer.items().values():
         if not isinstance(item, QgsAnnotationPointTextItem) or not item.text().startswith(_LEGACY_INDENT):
@@ -472,8 +502,27 @@ def remove_legacy_indents(layer: QgsAnnotationLayer, map_settings) -> bool:
                 QgsPointXY(point.x() + context.convertToMapUnits(indent_px, Qgis.RenderUnit.Pixels), point.y())
             )
         changed = True
-    if changed:
-        _finish(layer)
+    return changed
+
+
+def _center_point_labels(layer: QgsAnnotationLayer, context: QgsRenderContext) -> bool:
+    meta = _read_meta(layer)
+    point_labels = [
+        m["label_id"] for item_id, m in meta.items() if m.get("label_id") and item_kind(layer, item_id) == KIND_POINT
+    ]
+    changed = False
+    for label_id in point_labels:
+        item = layer.item(label_id)
+        if not isinstance(item, QgsAnnotationPointTextItem):
+            continue
+        if item.alignment() & Qt.AlignmentFlag.AlignHCenter:
+            continue
+        width_px = QgsTextRenderer.textWidth(context, item.format(), item.text().split("\n"))
+        point = QgsPointXY(item.point())
+        shift = context.convertToMapUnits(width_px / 2, Qgis.RenderUnit.Pixels)
+        item.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        item.setPoint(QgsPointXY(point.x() + shift, point.y()))
+        changed = True
     return changed
 
 
@@ -619,6 +668,91 @@ def delete_node(layer: QgsAnnotationLayer, handle: NodeHandle) -> bool:
     return True
 
 
+def centroids(layer: QgsAnnotationLayer) -> list[tuple[str, QgsPointXY]]:
+    """(item_id, center of mass in layer CRS) of every line and polygon.
+
+    Lines use the length-weighted center, polygons the area centroid (which can lie
+    outside a strongly concave polygon).
+    """
+    result = []
+    for item_id, geom in edge_geometries(layer):
+        center = geom.centroid()
+        if center is not None and not center.isEmpty():
+            result.append((item_id, center.asPoint()))
+    return result
+
+
+def translate_item(layer: QgsAnnotationLayer, item_id: str, dx: float, dy: float) -> bool:
+    """Shift a whole line/polygon by ``dx``/``dy`` (layer CRS units).
+
+    Its description moves along; edge length labels are rebuilt.
+    """
+    if item_kind(layer, item_id) not in (KIND_LINE, KIND_POLYGON):
+        return False
+    context = QgsAnnotationItemEditContext()
+    result = layer.applyEditV2(QgsAnnotationItemEditOperationTranslateItem(item_id, dx, dy), context)
+    if result != Qgis.AnnotationItemEditOperationResult.Success:
+        logger.warning("Verschieben der Annotation %s fehlgeschlagen: %s", item_id, result)
+        return False
+    label_id = _read_meta(layer).get(item_id, {}).get("label_id")
+    if label_id and layer.item(label_id):
+        layer.applyEditV2(QgsAnnotationItemEditOperationTranslateItem(label_id, dx, dy), context)
+    _update_dimensions(layer, item_id)
+    _finish(layer)
+    return True
+
+
+def min_vertices(kind: str) -> int:
+    """Smallest vertex count an object of ``kind`` may have (0 for kinds without editable vertices)."""
+    return {KIND_POINT: 1, KIND_LINE: MIN_LINE_VERTICES, KIND_POLYGON: MIN_POLYGON_VERTICES}.get(kind, 0)
+
+
+def vertex_points(layer: QgsAnnotationLayer, item_id: str) -> list[QgsPointXY]:
+    """Vertices of a point/line/polygon in layer CRS (polygon ring without the repeated closing vertex)."""
+    kind = item_kind(layer, item_id)
+    geom = entry_geometry(layer, item_id) if kind in (KIND_POINT, KIND_LINE, KIND_POLYGON) else None
+    if geom is None or geom.isEmpty():
+        return []
+    if kind == KIND_POINT:
+        return [geom.asPoint()]
+    if kind == KIND_LINE:
+        return list(geom.asPolyline())
+    ring = list(geom.asPolygon()[0])
+    return ring[:-1] if len(ring) > 1 and ring[0] == ring[-1] else ring
+
+
+def set_vertices(
+    layer: QgsAnnotationLayer, item_id: str, points: list[QgsPointXY], mgrs_resolution_m: float = 1.0
+) -> bool:
+    """Replace the vertices of a point/line/polygon (layer CRS).
+
+    Refuses (returns False, nothing changed) if fewer than ``min_vertices`` are given.
+    Points are moved like with the move tool, so their description and ``$POS`` follow.
+    """
+    kind = item_kind(layer, item_id)
+    if kind is None or len(points) < max(1, min_vertices(kind)):
+        return False
+
+    if kind == KIND_POINT:
+        current = vertex_points(layer, item_id)
+        if not current:
+            return False
+        return move_node(layer, NodeHandle(item_id, QgsVertexId(0, 0, 0), current[0]), points[0], mgrs_resolution_m)
+
+    # Replace the item by an edited copy, so the layer's spatial index is updated as well
+    new_item = layer.item(item_id).clone()
+    if kind == KIND_LINE:
+        new_item.setGeometry(QgsLineString([QgsPoint(p) for p in points]))
+    else:
+        polygon = QgsPolygon()
+        polygon.setExteriorRing(QgsLineString([QgsPoint(p) for p in [*points, points[0]]]))
+        new_item.setGeometry(polygon)
+    layer.replaceItem(item_id, new_item)
+    _update_dimensions(layer, item_id)
+    _finish(layer)
+    return True
+
+
 def _move_operation(handle: NodeHandle, new_point: QgsPointXY) -> QgsAnnotationItemEditOperationMoveNode:
     return QgsAnnotationItemEditOperationMoveNode(
         handle.item_id, handle.vertex_id, QgsPoint(handle.point), QgsPoint(new_point)
@@ -683,10 +817,14 @@ def _entry_for(layer, meta, item_id, item, kind) -> AnnotationEntry:
         line_color = item.format().color()
         name = _strip_indent(item.text())
 
+    map_text = ""
     if kind != KIND_TEXT:
         label = layer.item(item_meta.get("label_id", "")) if item_meta.get("label_id") else None
         if label is not None:
             name = _strip_indent(label.text())
+            if item_meta.get("desc_template"):
+                # Edit the template ($POS), list/show the resolved text
+                map_text, name = name, item_meta["desc_template"]
 
     return AnnotationEntry(
         item_id,
@@ -698,15 +836,28 @@ def _entry_for(layer, meta, item_id, item, kind) -> AnnotationEntry:
         line_width,
         radius_m,
         bool(item_meta.get("show_dims")),
+        map_text,
     )
 
 
-def _set_description(layer, meta, item_id: str, kind: str, description: str, units_per_mm: float = 0.0) -> None:
+def _set_description(
+    layer,
+    meta,
+    item_id: str,
+    kind: str,
+    description: str,
+    units_per_mm: float = 0.0,
+    mgrs_resolution_m: float = 1.0,
+) -> None:
     """Create, update or remove the description text linked to an item.
 
-    New point descriptions start to the upper right of the marker (offset by
-    the marker radius plus a gap, converted with ``units_per_mm``); descriptions
-    of lines and polygons are centered on the line's midpoint or inside the area.
+    For points, ``$POS`` is kept in ``desc_template`` and replaced on the map by
+    the MGRS coordinate (``mgrs_resolution_m``), so it can be updated later.
+
+    All descriptions use centered text. New point descriptions sit centered
+    above the marker (offset by the marker radius plus a gap, converted with
+    ``units_per_mm``); descriptions of lines and polygons are centered on the
+    line's midpoint or inside the area.
     """
     description = description.strip()
     label_id = meta[item_id].get("label_id", "")
@@ -716,7 +867,14 @@ def _set_description(layer, meta, item_id: str, kind: str, description: str, uni
         if label is not None:
             layer.removeItem(label_id)
         meta[item_id]["label_id"] = ""
+        meta[item_id].pop("desc_template", None)
         return
+
+    if kind == KIND_POINT and POSITION_PLACEHOLDER in description:
+        meta[item_id]["desc_template"] = description
+        description = _resolve_position(layer, item_id, description, mgrs_resolution_m)
+    else:
+        meta[item_id].pop("desc_template", None)
 
     if label is not None:
         label.setText(description)
@@ -726,13 +884,44 @@ def _set_description(layer, meta, item_id: str, kind: str, description: str, uni
     if anchor is None:
         return
     if kind == KIND_POINT:
+        # The anchor is the baseline of the last line, so the text extends upwards from here
         offset = (MARKER_SIZE_MM / 2 + _POINT_LABEL_GAP_MM) * units_per_mm
-        anchor = QgsPointXY(anchor.x() + offset, anchor.y())
+        anchor = QgsPointXY(anchor.x(), anchor.y() + offset)
     text_item = QgsAnnotationPointTextItem(description, anchor)
     text_item.setFormat(_description_format())
-    text_item.setAlignment(Qt.AlignmentFlag.AlignLeft if kind == KIND_POINT else Qt.AlignmentFlag.AlignHCenter)
+    text_item.setAlignment(Qt.AlignmentFlag.AlignHCenter)
     text_item.setZIndex(_Z_TEXT)
     meta[item_id]["label_id"] = layer.addItem(text_item)
+
+
+def _resolve_position(layer, item_id: str, template: str, mgrs_resolution_m: float) -> str:
+    """``template`` with ``$POS`` replaced by the MGRS coordinate of the point ``item_id``."""
+    geom = entry_geometry(layer, item_id)
+    mgrs = None
+    if geom is not None and not geom.isEmpty():
+        try:
+            mgrs = point_to_mgrs(geom.asPoint(), layer.crs(), mgrs_resolution_m)
+        except Exception:
+            logger.exception("MGRS-Koordinate konnte nicht berechnet werden")
+    return template.replace(POSITION_PLACEHOLDER, mgrs or _POSITION_UNAVAILABLE)
+
+
+def _update_position_text(layer, item_id: str, mgrs_resolution_m: float) -> None:
+    """Re-render a point description containing ``$POS`` (after a move or resolution change)."""
+    item_meta = _read_meta(layer).get(item_id, {})
+    template = item_meta.get("desc_template")
+    label = layer.item(item_meta.get("label_id", "")) if item_meta.get("label_id") else None
+    if template and label is not None:
+        label.setText(_resolve_position(layer, item_id, template, mgrs_resolution_m))
+
+
+def refresh_positions(layer: QgsAnnotationLayer, mgrs_resolution_m: float) -> None:
+    """Re-render all ``$POS`` descriptions, e.g. after the MGRS resolution setting changed."""
+    templated = [item_id for item_id, m in _read_meta(layer).items() if m.get("desc_template")]
+    for item_id in templated:
+        _update_position_text(layer, item_id, mgrs_resolution_m)
+    if templated:
+        _finish(layer)
 
 
 def _label_anchor(layer, item_id: str, kind: str) -> QgsPointXY | None:

@@ -35,6 +35,9 @@ Ein QGIS-Plugin für das einfache Hinzufügen und Verwalten von taktischen Zeich
 ### Annotationen
 
 - **Punkt setzen** - optional mit Beschreibungstext und Radius (Standard: kein Radius)
+- **Mehrzeilige Beschreibungen** - Enter fügt eine neue Zeile ein, Strg+Enter bestätigt den Dialog
+- **Position in der Beschreibung** - `$POS` in einer Punktbeschreibung zeigt die MGRS-/UTMRef-Koordinate des Punktes (z. B. `32U MB 12345 98765`) und wandert beim Verschieben mit; Auflösung (0,1 m bis 100 m) im Einstellungs-Dialog
+- **Koordinaten im Bearbeiten-Dialog** - einklappbare Liste der MGRS-Koordinaten aller Punkte; im Bearbeiten-Modus Koordinaten eingeben, Punkte einfügen oder löschen (Linien behalten mind. 2, Polygone mind. 3 Punkte)
 - **Linie zeichnen** - Linksklick setzt Stützpunkte, Rechtsklick/Enter beendet, Rücktaste entfernt den letzten Punkt, Esc bricht ab
 - **Längenanzeige** - beim Zeichnen zeigt ein Hinweis am Mauszeiger die Länge des aktuellen Segments und die Gesamtlänge (Linie) bzw. Umfang und Fläche (Polygon)
 - **Messwerte im Bearbeiten-Dialog** - Länge einer Linie bzw. Umfang und Fläche eines Polygons
@@ -46,6 +49,7 @@ Ein QGIS-Plugin für das einfache Hinzufügen und Verwalten von taktischen Zeich
 - **Standardfarben und Linienbreite** - Linien- und Füllfarbe inkl. Transparenz sowie Linienbreite im Einstellungs-Dialog; pro Objekt im Bearbeiten-Dialog änderbar
 - **Annotationen-Tab im Dock** - Liste aller Objekte; Klick hebt das Objekt hervor und öffnet einen Dialog für Text, Farben, Füllung und Löschen
 - **Verschieben** - Punkte und einzelne Stützpunkte von Linien/Polygonen anklicken (oder in die Nähe) und ziehen; Esc bricht ab
+- **Ganze Linie/Fläche verschieben** - am Schwerpunkt (⊕) ziehen; die Beschreibung wandert mit
 - **Stützpunkte einfügen/entfernen** - mit dem Verschieben-Werkzeug fügt ein Linksklick auf eine Linie/einen Umriss einen Stützpunkt ein, ein Rechtsklick auf einen Stützpunkt entfernt ihn (mind. 2 bei Linien, 3 bei Polygonen bleiben erhalten)
 - **Beschreibungen** - Punkte, Linien und Polygone können eine Beschreibung auf der Karte tragen; sie lässt sich mit dem Verschieben-Werkzeug frei positionieren (die Beschreibung eines Punktes wandert beim Verschieben des Punktes mit), das zugehörige Objekt wird dabei hervorgehoben
 - **Textgröße** - beim Überfahren einer Beschreibung erscheinen vier Eck-Anfasser; Ziehen an einer Ecke vergrößert oder verkleinert den Text

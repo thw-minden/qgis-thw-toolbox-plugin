@@ -1,6 +1,7 @@
+from qgis.core import QgsCoordinateReferenceSystem, QgsPointXY
 from qgis.gui import QgsColorButton
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtGui import QColor, QKeySequence
 from qgis.PyQt.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -9,22 +10,30 @@ from qgis.PyQt.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QLabel,
-    QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QVBoxLayout,
 )
+
+try:  # Qt6 (QGIS 4)
+    from qgis.PyQt.QtGui import QShortcut
+except ImportError:  # Qt5 (QGIS 3)
+    from qgis.PyQt.QtWidgets import QShortcut
 
 from ..layer.annotations import (
     KIND_LINE,
     KIND_POINT,
     KIND_POLYGON,
     KIND_TEXT,
+    POSITION_PLACEHOLDER,
     AnnotationEntry,
     Measurements,
     default_radius_fill,
+    min_vertices,
 )
 from ..util.units import format_area, format_meters
 from .config_dialog import line_width_spinbox
+from .coordinate_box import CoordinateBox, InvalidCoordinateError
 
 _DIMENSION_LABELS = {
     KIND_POINT: "Radius auf der Karte anzeigen",
@@ -41,8 +50,8 @@ class AnnotationEditDialog(QDialog):
     """Edit text and colors of one annotation object, or delete it.
 
     After ``exec()`` returns Accepted, either ``deleted`` is True or the
-    new values are available via ``name()``, ``line_color()``, ``line_width()``, ``radius_m()`` and
-    ``fill_color()``.
+    new values are available via ``name()``, ``line_color()``, ``line_width()``, ``radius_m()``,
+    ``fill_color()`` and ``edited_vertices()``.
     """
 
     def __init__(
@@ -51,18 +60,22 @@ class AnnotationEditDialog(QDialog):
         default_fill_color: QColor,
         measurements: Measurements | None = None,
         parent=None,
+        vertices: list[QgsPointXY] | None = None,
+        crs: QgsCoordinateReferenceSystem | None = None,
+        mgrs_resolution_m: float = 1.0,
     ):
         super().__init__(parent)
         self.deleted = False
+        self._edited_vertices: list[QgsPointXY] | None = None
         self._kind = entry.kind
         self.setWindowTitle(f"{entry.short_title} bearbeiten")
-        self.setMinimumWidth(320)
+        # Wide enough for the coordinate box's three buttons side by side
+        self.setMinimumWidth(480)
 
         layout = QVBoxLayout(self)
 
         # Label above the text field so the field can use the full dialog width
-        self._name_edit = QLineEdit(entry.name)
-        self._name_edit.setPlaceholderText("optional")
+        self._name_edit = description_edit(entry.name, for_point=entry.kind == KIND_POINT)
         name_label = QLabel(_TEXT_LABELS.get(entry.kind, "Beschreibung (auf der Karte)"))
         name_label.setBuddy(self._name_edit)
         layout.addWidget(name_label)
@@ -127,15 +140,44 @@ class AnnotationEditDialog(QDialog):
         if measurement_box is not None:
             layout.addWidget(measurement_box)
 
+        # Vertices as MGRS coordinates — collapsed by default, editable on demand
+        self._coordinate_box = None
+        if vertices and crs is not None and min_vertices(entry.kind):
+            self._coordinate_box = CoordinateBox(
+                vertices,
+                crs,
+                mgrs_resolution_m,
+                min_vertices(entry.kind),
+                closed=entry.kind == KIND_POLYGON,
+                parent=self,
+            )
+            layout.addWidget(self._coordinate_box)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         delete_btn = buttons.addButton("Löschen", QDialogButtonBox.ButtonRole.DestructiveRole)
         delete_btn.clicked.connect(self._confirm_delete)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        _add_confirm_shortcut(self)
+
+    def accept(self):
+        """Validate edited coordinates before closing; an invalid row keeps the dialog open."""
+        if not self.deleted and self._coordinate_box is not None and self._coordinate_box.has_changes():
+            try:
+                self._edited_vertices = self._coordinate_box.points()
+            except InvalidCoordinateError as e:
+                self._coordinate_box.mark_invalid(e.row)
+                QMessageBox.warning(self, "Ungültige Koordinate", str(e))
+                return
+        super().accept()
+
+    def edited_vertices(self) -> list[QgsPointXY] | None:
+        """New vertices (layer CRS) if the coordinates were edited, else None."""
+        return self._edited_vertices
 
     def name(self) -> str:
-        return self._name_edit.text()
+        return self._name_edit.toPlainText()
 
     def line_color(self) -> QColor:
         return self._line_color_btn.color()
@@ -191,8 +233,7 @@ class PointCreateDialog(QDialog):
         self.setMinimumWidth(320)
 
         layout = QVBoxLayout(self)
-        self._description_edit = QLineEdit()
-        self._description_edit.setPlaceholderText("optional")
+        self._description_edit = description_edit("", for_point=True)
         description_label = QLabel("Beschreibung (auf der Karte)")
         description_label.setBuddy(self._description_edit)
         layout.addWidget(description_label)
@@ -208,14 +249,40 @@ class PointCreateDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        _add_confirm_shortcut(self)
         self._description_edit.setFocus()
 
     def description(self) -> str:
-        return self._description_edit.text()
+        return self._description_edit.toPlainText()
 
     def radius_m(self) -> float:
         """Radius circle in meters; 0 = none."""
         return self._radius_spin.value()
+
+
+_PLACEHOLDER = "optional – mehrzeilig möglich, Strg+Enter bestätigt"
+# Points additionally support $POS (replaced by the MGRS coordinate on the map)
+_POINT_PLACEHOLDER = (
+    f"optional, z. B. „Sammelstelle {POSITION_PLACEHOLDER}“\n"
+    f"{POSITION_PLACEHOLDER} wird auf der Karte durch die MGRS-Koordinate ersetzt\n"
+    "mehrzeilig möglich, Strg+Enter bestätigt"
+)
+
+
+def description_edit(text: str, for_point: bool = False) -> QPlainTextEdit:
+    """Multi-line description field: Enter adds a line, Tab moves on (Ctrl+Enter confirms the dialog)."""
+    edit = QPlainTextEdit(text)
+    edit.setPlaceholderText(_POINT_PLACEHOLDER if for_point else _PLACEHOLDER)
+    edit.setTabChangesFocus(True)
+    line_height = edit.fontMetrics().lineSpacing()
+    edit.setFixedHeight(line_height * 4 + 12)
+    return edit
+
+
+def _add_confirm_shortcut(dialog: QDialog) -> None:
+    """Ctrl+Enter accepts the dialog — plain Enter inserts a line break in the description."""
+    for keys in ("Ctrl+Return", "Ctrl+Enter"):
+        QShortcut(QKeySequence(keys), dialog, activated=dialog.accept)
 
 
 def radius_spinbox(value_m: float) -> QDoubleSpinBox:

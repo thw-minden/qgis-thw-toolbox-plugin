@@ -125,6 +125,15 @@ class ConfigDialog(QDialog):
         self._sb_annotation_line_width = line_width_spinbox(self._settings.annotation_line_width_mm)
         form.addRow("Linienbreite (Linien, Umrisse)", self._sb_annotation_line_width)
 
+        self._cb_mgrs_resolution = QComboBox()
+        for dm, label in zip(self._settings.ANNOTATION_MGRS_RESOLUTIONS_DM, ("0,1 m", "1 m", "10 m", "100 m")):
+            self._cb_mgrs_resolution.addItem(label, dm)
+        self._cb_mgrs_resolution.setCurrentIndex(
+            max(0, self._cb_mgrs_resolution.findData(self._settings.annotation_mgrs_resolution_dm))
+        )
+        self._cb_mgrs_resolution.setToolTip("Genauigkeit der MGRS-Koordinate, die $POS in Punktbeschreibungen ersetzt")
+        form.addRow("MGRS-Auflösung ($POS)", self._cb_mgrs_resolution)
+
         box.setLayout(form)
         return box
 
@@ -148,6 +157,7 @@ class ConfigDialog(QDialog):
         self._settings.annotation_line_color = self._btn_annotation_line_color.color()
         self._settings.annotation_fill_color = self._btn_annotation_fill_color.color()
         self._settings.annotation_line_width_mm = self._sb_annotation_line_width.value()
+        self._settings.annotation_mgrs_resolution_dm = self._cb_mgrs_resolution.currentData()
 
 
 def line_width_spinbox(value_mm: float) -> QDoubleSpinBox:
