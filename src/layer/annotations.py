@@ -3,6 +3,11 @@ from dataclasses import dataclass
 
 from qgis.core import (
     Qgis,
+    QgsAnnotationItemEditContext,
+    QgsAnnotationItemEditOperationAddNode,
+    QgsAnnotationItemEditOperationDeleteNode,
+    QgsAnnotationItemEditOperationMoveNode,
+    QgsAnnotationItemEditOperationTranslateItem,
     QgsAnnotationLayer,
     QgsAnnotationLineItem,
     QgsAnnotationMarkerItem,
@@ -19,6 +24,7 @@ from qgis.core import (
     QgsPolygon,
     QgsProject,
     QgsTextFormat,
+    QgsVertexId,
 )
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
@@ -43,6 +49,10 @@ TEXT_SIZE_MM = 3.5
 # and offer no offset, so the description would overlap the marker. Two en
 # spaces push it to the upper right of the marker, independent of map scale.
 _DESCRIPTION_INDENT = "  "
+
+# Vertices that must remain so editing never deletes a whole line/polygon
+MIN_LINE_VERTICES = 2
+MIN_POLYGON_VERTICES = 3
 
 # Draw order inside the annotation layer: areas below lines below points
 _Z_POLYGON = 0
@@ -76,6 +86,15 @@ class AnnotationEntry:
     @property
     def title(self) -> str:
         return f"{self.short_title}: {self.name}" if self.name else self.short_title
+
+
+@dataclass
+class NodeHandle:
+    """A draggable node: a point marker, or one vertex of a line/polygon."""
+
+    item_id: str
+    vertex_id: QgsVertexId
+    point: QgsPointXY  # layer CRS
 
 
 # ----------------------------------------------------------------------
@@ -252,8 +271,124 @@ def entry_geometry(layer: QgsAnnotationLayer, item_id: str) -> QgsGeometry | Non
 
 
 # ----------------------------------------------------------------------
+# Moving nodes
+# ----------------------------------------------------------------------
+
+
+def node_handles(layer: QgsAnnotationLayer) -> list[NodeHandle]:
+    """All draggable nodes of the layer. Linked descriptions are not listed — they follow their marker."""
+    linked_labels = {m.get("label_id") for m in _read_meta(layer).values() if m.get("label_id")}
+    context = QgsAnnotationItemEditContext()
+    handles = []
+    for item_id, item in layer.items().items():
+        if item_id in linked_labels or _kind_of(item) is None:
+            continue
+        for node in item.nodesV2(context):
+            # Skip e.g. callout handles — only real vertices are movable here
+            if node.type() == Qgis.AnnotationItemNodeType.VertexHandle:
+                handles.append(NodeHandle(item_id, node.id(), node.point()))
+    return handles
+
+
+def preview_moved_node(layer: QgsAnnotationLayer, handle: NodeHandle, new_point: QgsPointXY) -> QgsGeometry | None:
+    """Geometry of the item (layer CRS) as it would look after moving ``handle`` to ``new_point``."""
+    item = layer.item(handle.item_id)
+    if item is None:
+        return None
+    results = item.transientEditResultsV2(_move_operation(handle, new_point), QgsAnnotationItemEditContext())
+    return results.representativeGeometry() if results else None
+
+
+def move_node(layer: QgsAnnotationLayer, handle: NodeHandle, new_point: QgsPointXY) -> bool:
+    """Move ``handle`` to ``new_point`` (layer CRS). A point's description moves along."""
+    context = QgsAnnotationItemEditContext()
+    result = layer.applyEditV2(_move_operation(handle, new_point), context)
+    if result != Qgis.AnnotationItemEditOperationResult.Success:
+        logger.warning("Verschieben der Annotation %s fehlgeschlagen: %s", handle.item_id, result)
+        return False
+
+    label_id = _read_meta(layer).get(handle.item_id, {}).get("label_id")
+    if label_id and layer.item(label_id):
+        dx = new_point.x() - handle.point.x()
+        dy = new_point.y() - handle.point.y()
+        layer.applyEditV2(QgsAnnotationItemEditOperationTranslateItem(label_id, dx, dy), context)
+    _finish(layer)
+    return True
+
+
+def edge_geometries(layer: QgsAnnotationLayer) -> list[tuple[str, QgsGeometry]]:
+    """(item_id, geometry in layer CRS) of all lines and polygons — the items new vertices can be added to."""
+    result = []
+    for item_id, item in layer.items().items():
+        if _kind_of(item) in (KIND_LINE, KIND_POLYGON):
+            geom = entry_geometry(layer, item_id)
+            if geom is not None and not geom.isEmpty():
+                result.append((item_id, geom))
+    return result
+
+
+def add_node(layer: QgsAnnotationLayer, item_id: str, point: QgsPointXY) -> bool:
+    """Insert a vertex at ``point`` (layer CRS) into the nearest segment of a line/polygon."""
+    result = layer.applyEditV2(
+        QgsAnnotationItemEditOperationAddNode(item_id, QgsPoint(point)), QgsAnnotationItemEditContext()
+    )
+    if result != Qgis.AnnotationItemEditOperationResult.Success:
+        logger.warning("Stützpunkt konnte nicht eingefügt werden (%s): %s", item_id, result)
+        return False
+    _finish(layer)
+    return True
+
+
+def can_delete_node(layer: QgsAnnotationLayer, handle: NodeHandle) -> bool:
+    """True if removing ``handle`` keeps the item valid.
+
+    QGIS clears a line/ring completely when it drops below its minimum vertex
+    count, which would remove the whole annotation — so that case is refused here.
+    Single points can never be removed via their node.
+    """
+    item = layer.item(handle.item_id)
+    kind = _kind_of(item) if item else None
+    if kind == KIND_LINE:
+        return item.geometry().numPoints() > MIN_LINE_VERTICES
+    if kind == KIND_POLYGON:
+        polygon = item.geometry()
+        ring_index = handle.vertex_id.ring
+        ring = polygon.exteriorRing() if ring_index == 0 else polygon.interiorRing(ring_index - 1)
+        # Rings are closed: the start vertex is stored twice
+        return ring is not None and ring.numPoints() - 1 > MIN_POLYGON_VERTICES
+    return False
+
+
+def delete_node(layer: QgsAnnotationLayer, handle: NodeHandle) -> bool:
+    """Remove a line/polygon vertex. Returns False (without changing anything) if not allowed."""
+    if not can_delete_node(layer, handle):
+        return False
+    result = layer.applyEditV2(
+        QgsAnnotationItemEditOperationDeleteNode(handle.item_id, handle.vertex_id, QgsPoint(handle.point)),
+        QgsAnnotationItemEditContext(),
+    )
+    if result != Qgis.AnnotationItemEditOperationResult.Success:
+        logger.warning("Stützpunkt konnte nicht entfernt werden (%s): %s", handle.item_id, result)
+        return False
+    _finish(layer)
+    return True
+
+
+def _move_operation(handle: NodeHandle, new_point: QgsPointXY) -> QgsAnnotationItemEditOperationMoveNode:
+    return QgsAnnotationItemEditOperationMoveNode(
+        handle.item_id, handle.vertex_id, QgsPoint(handle.point), QgsPoint(new_point)
+    )
+
+
+# ----------------------------------------------------------------------
 # Internals
 # ----------------------------------------------------------------------
+
+
+def item_kind(layer: QgsAnnotationLayer, item_id: str) -> str | None:
+    """KIND_* of an item, or None if it does not exist or is of an unsupported type."""
+    item = layer.item(item_id)
+    return _kind_of(item) if item is not None else None
 
 
 def _kind_of(item) -> str | None:

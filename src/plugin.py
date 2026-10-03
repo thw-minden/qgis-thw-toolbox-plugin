@@ -37,6 +37,7 @@ from .logging_utils import get_logger
 from .paths import plugin_root
 from .settings import THWToolboxSettings
 from .tools import style_library
+from .tools.annotation_move_tool import AnnotationMoveTool
 from .tools.annotation_tool import (
     MODE_LINE,
     MODE_POINT,
@@ -213,21 +214,29 @@ class THWToolboxPlugin:
         QTimer.singleShot(0, self._rehydrate_style_cache)
 
     def _init_annotation_tools(self):
-        """Eigene Werkzeugleiste mit den Zeichenwerkzeugen für Annotationen (Punkt, Linie, Polygon)."""
+        """Eigene Werkzeugleiste mit den Werkzeugen für Annotationen (Zeichnen und Verschieben)."""
         self.annotation_toolbar = self.iface.addToolBar("THW Toolbox Annotationen")
         self.annotation_toolbar.setObjectName("THWToolboxAnnotationToolbar")
-        for mode, icon_name, text in (
-            (MODE_POINT, "annotation_point.svg", "Punkt setzen"),
-            (MODE_LINE, "annotation_line.svg", "Linie zeichnen"),
-            (MODE_POLYGON, "annotation_polygon.svg", "Polygon zeichnen"),
-            (MODE_POLYGON_FILLED, "annotation_polygon_filled.svg", "Polygon zeichnen (gefüllt)"),
+
+        def draw_tool(mode):
+            return AnnotationTool(
+                self.canvas, mode, self.settings, self._show_status_hint, on_created=self._refresh_annotation_list
+            )
+
+        for icon_name, text, tool in (
+            ("annotation_point.svg", "Punkt setzen", draw_tool(MODE_POINT)),
+            ("annotation_line.svg", "Linie zeichnen", draw_tool(MODE_LINE)),
+            ("annotation_polygon.svg", "Polygon zeichnen", draw_tool(MODE_POLYGON)),
+            ("annotation_polygon_filled.svg", "Polygon zeichnen (gefüllt)", draw_tool(MODE_POLYGON_FILLED)),
+            (
+                "annotation_move.svg",
+                "Annotation verschieben",
+                AnnotationMoveTool(self.canvas, self._show_status_hint, on_moved=self._refresh_annotation_list),
+            ),
         ):
             icon = QIcon(os.path.join(self.plugin_dir, "icons", icon_name))
             action = QAction(icon, text, self.iface.mainWindow())
             action.setCheckable(True)
-            tool = AnnotationTool(
-                self.canvas, mode, self.settings, self._show_status_hint, on_created=self._refresh_annotation_list
-            )
             # QgsMapTool hält den Haken der Aktion beim (De-)Aktivieren selbst aktuell
             tool.setAction(action)
             action.triggered.connect(lambda checked, t=tool: self._toggle_annotation_tool(t, checked))
@@ -321,6 +330,8 @@ class THWToolboxPlugin:
         for tool in self.annotation_tools:
             if self.canvas.mapTool() is tool:
                 self.canvas.unsetMapTool(tool)
+            if hasattr(tool, "dispose"):
+                tool.dispose()
         self.annotation_tools = []
         for action in self.annotation_actions:
             self.iface.removePluginMenu("THW Toolbox", action)
