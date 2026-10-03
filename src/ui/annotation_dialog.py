@@ -11,7 +11,8 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
 )
 
-from ..layer.annotations import KIND_POINT, KIND_POLYGON, KIND_TEXT, AnnotationEntry
+from ..layer.annotations import KIND_LINE, KIND_POINT, KIND_POLYGON, KIND_TEXT, AnnotationEntry
+from .config_dialog import line_width_spinbox
 
 _TEXT_LABELS = {
     KIND_POINT: "Beschreibung (auf der Karte)",
@@ -23,7 +24,7 @@ class AnnotationEditDialog(QDialog):
     """Edit text and colors of one annotation object, or delete it.
 
     After ``exec()`` returns Accepted, either ``deleted`` is True or the
-    new values are available via ``name()``, ``line_color()`` and ``fill_color()``.
+    new values are available via ``name()``, ``line_color()``, ``line_width()`` and ``fill_color()``.
     """
 
     def __init__(self, entry: AnnotationEntry, default_fill_color: QColor, parent=None):
@@ -51,6 +52,11 @@ class AnnotationEditDialog(QDialog):
         color_label = "Linienfarbe" if entry.kind not in (KIND_POINT, KIND_TEXT) else "Farbe"
         form.addRow(color_label, self._line_color_btn)
 
+        self._line_width_spin = None
+        if entry.kind in (KIND_LINE, KIND_POLYGON):
+            self._line_width_spin = line_width_spinbox(entry.line_width)
+            form.addRow("Linienbreite", self._line_width_spin)
+
         self._fill_check = None
         self._fill_color_btn = None
         if entry.kind == KIND_POLYGON:
@@ -74,6 +80,10 @@ class AnnotationEditDialog(QDialog):
 
     def line_color(self) -> QColor:
         return self._line_color_btn.color()
+
+    def line_width(self) -> float | None:
+        """Line width in mm, or None for objects without a line (points, texts)."""
+        return self._line_width_spin.value() if self._line_width_spin is not None else None
 
     def fill_color(self) -> QColor | None:
         if self._fill_check is None or not self._fill_check.isChecked():

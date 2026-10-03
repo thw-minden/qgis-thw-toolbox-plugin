@@ -5,7 +5,7 @@
 ### Hinzugefügt
 - **Annotationen zeichnen** über die neue Werkzeugleiste „THW Toolbox Annotationen“: Punkt (optional mit Beschreibung), Linie, Polygon und gefülltes Polygon (`tools/annotation_tool.py`, `layer/annotations.py`)
 - Annotationen landen in einem QGIS-Annotations-Layer „THW Toolbox Annotationen“ und werden direkt in der Projektdatei gespeichert
-- Standard-Linien- und Füllfarbe (inkl. Transparenz) für Annotationen im Einstellungs-Dialog
+- Standard-Linien- und Füllfarbe (inkl. Transparenz) sowie Standard-Linienbreite für Annotationen im Einstellungs-Dialog; die Linienbreite lässt sich je Objekt im Bearbeiten-Dialog ändern
 - Neuer Dock-Tab **„Annotationen“** listet alle gezeichneten Objekte; ein Klick hebt das Objekt auf der Karte hervor und öffnet einen Dialog zum Ändern von Text, Linien- und Füllfarbe oder zum Löschen (`ui/annotation_dialog.py`)
 - Werkzeug **„Annotation verschieben“**: Punkte sowie einzelne Stützpunkte von Linien und Polygonen per Ziehen verschieben; die Beschreibung eines Punktes wandert mit (`tools/annotation_move_tool.py`)
   - Linksklick auf eine Linie/einen Polygon-Umriss fügt einen Stützpunkt ein, Rechtsklick auf einen Stützpunkt entfernt ihn (Linien behalten mindestens 2, Polygone mindestens 3 Stützpunkte)

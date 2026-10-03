@@ -189,10 +189,10 @@ class AnnotationTool(QgsMapTool):
             return
 
         if self.mode == MODE_LINE:
-            annotations.add_line(layer, pts, self._line_color())
+            annotations.add_line(layer, pts, self._line_color(), self.settings.annotation_line_width_mm)
         else:
             fill = self._fill_color() if self.mode == MODE_POLYGON_FILLED else None
-            annotations.add_polygon(layer, pts, self._line_color(), fill)
+            annotations.add_polygon(layer, pts, self._line_color(), fill, self.settings.annotation_line_width_mm)
         self._notify_created()
 
     def _notify_created(self):

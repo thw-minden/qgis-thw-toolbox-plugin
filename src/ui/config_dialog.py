@@ -5,6 +5,7 @@ from qgis.PyQt.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QSpinBox,
@@ -121,6 +122,9 @@ class ConfigDialog(QDialog):
         )
         form.addRow("Füllfarbe (gefüllte Polygone)", self._btn_annotation_fill_color)
 
+        self._sb_annotation_line_width = line_width_spinbox(self._settings.annotation_line_width_mm)
+        form.addRow("Linienbreite (Linien, Umrisse)", self._sb_annotation_line_width)
+
         box.setLayout(form)
         return box
 
@@ -143,3 +147,15 @@ class ConfigDialog(QDialog):
 
         self._settings.annotation_line_color = self._btn_annotation_line_color.color()
         self._settings.annotation_fill_color = self._btn_annotation_fill_color.color()
+        self._settings.annotation_line_width_mm = self._sb_annotation_line_width.value()
+
+
+def line_width_spinbox(value_mm: float) -> QDoubleSpinBox:
+    """Spin box for annotation line widths in mm (shared by settings and edit dialog)."""
+    spin = QDoubleSpinBox()
+    spin.setDecimals(1)
+    spin.setRange(0.1, 10.0)
+    spin.setSingleStep(0.1)
+    spin.setSuffix(" mm")
+    spin.setValue(value_mm)
+    return spin

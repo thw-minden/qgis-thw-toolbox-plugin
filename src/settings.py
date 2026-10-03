@@ -17,6 +17,8 @@ class THWToolboxSettings:
     # Annotation colors as "#AARRGGBB" (QColor.NameFormat.HexArgb) incl. transparency
     ANNOTATION_LINE_COLOR_DEFAULT = "#ffe30613"
     ANNOTATION_FILL_COLOR_DEFAULT = "#59e30613"
+    # Line width for lines and polygon outlines; stored in µm like the label sizes
+    ANNOTATION_LINE_WIDTH_DEFAULT_UM = 800
 
     # Save-File values
     PLUGIN_NAME = "taktischezeichen"
@@ -33,6 +35,7 @@ class THWToolboxSettings:
 
         self._annotation_line_color = self.ANNOTATION_LINE_COLOR_DEFAULT
         self._annotation_fill_color = self.ANNOTATION_FILL_COLOR_DEFAULT
+        self._annotation_line_width_mm = self.ANNOTATION_LINE_WIDTH_DEFAULT_UM / 1000.0
 
     @property
     def new_icon_scaling_with_map(self) -> bool:
@@ -120,6 +123,16 @@ class THWToolboxSettings:
     def annotation_fill_color(self, value):
         self._annotation_fill_color = _validated_color(value)
 
+    @property
+    def annotation_line_width_mm(self) -> float:
+        return self._annotation_line_width_mm
+
+    @annotation_line_width_mm.setter
+    def annotation_line_width_mm(self, value):
+        if not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError("Line width must be a positive number")
+        self._annotation_line_width_mm = float(value)
+
     def load_settings(self, proj):
         """Loads settings automatically from the defined private parameters"""
         for attr_name in dir(self):
@@ -166,7 +179,7 @@ class THWToolboxSettings:
                     proj.writeEntry(self.PLUGIN_NAME, config_key, value)
                 elif attr_name.endswith("_mm"):
                     config_key = config_key.replace("_mm", "_um")
-                    proj.writeEntry(self.PLUGIN_NAME, config_key, int(value * 1000))
+                    proj.writeEntry(self.PLUGIN_NAME, config_key, round(value * 1000))
                 else:
                     proj.writeEntry(self.PLUGIN_NAME, config_key, int(value))
 

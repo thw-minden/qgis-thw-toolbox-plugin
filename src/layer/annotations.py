@@ -41,7 +41,8 @@ _LAYER_PROPERTY = "thw_toolbox/annotation_layer"
 # {item_id: {"n": running number, "name": list name, "label_id": linked description item}}
 _META_PROPERTY = "thw_toolbox/annotation_items"
 
-LINE_WIDTH_MM = 0.8
+# Fallback when an item's line width cannot be read (e.g. restyled with native QGIS tools)
+DEFAULT_LINE_WIDTH_MM = 0.8
 MARKER_SIZE_MM = 3.0
 TEXT_SIZE_MM = 3.5
 
@@ -78,6 +79,7 @@ class AnnotationEntry:
     name: str  # list name for lines/polygons; the description for points/texts
     line_color: QColor
     fill_color: QColor | None  # None for unfilled polygons and non-polygons
+    line_width: float | None = None  # mm; only for lines and polygons
 
     @property
     def short_title(self) -> str:
@@ -149,25 +151,29 @@ def add_point(layer: QgsAnnotationLayer, point: QgsPointXY, color: QColor, descr
     _finish(layer)
 
 
-def add_line(layer: QgsAnnotationLayer, points: list[QgsPointXY], color: QColor) -> None:
-    """Add a polyline through ``points`` (layer CRS)."""
+def add_line(layer: QgsAnnotationLayer, points: list[QgsPointXY], color: QColor, width_mm: float) -> None:
+    """Add a polyline through ``points`` (layer CRS) with a line width of ``width_mm``."""
     item = QgsAnnotationLineItem(QgsLineString([QgsPoint(p) for p in points]))
-    item.setSymbol(_line_symbol(color))
+    item.setSymbol(_line_symbol(color, width_mm))
     item.setZIndex(_Z_LINE)
     _register_and_finish(layer, layer.addItem(item))
 
 
 def add_polygon(
-    layer: QgsAnnotationLayer, points: list[QgsPointXY], line_color: QColor, fill_color: QColor | None
+    layer: QgsAnnotationLayer,
+    points: list[QgsPointXY],
+    line_color: QColor,
+    fill_color: QColor | None,
+    width_mm: float,
 ) -> None:
-    """Add a polygon with outline ``line_color``; filled with ``fill_color`` unless it is None."""
+    """Add a polygon with outline ``line_color``/``width_mm``; filled with ``fill_color`` unless it is None."""
     ring = [QgsPoint(p) for p in points]
     ring.append(QgsPoint(points[0]))
     polygon = QgsPolygon()
     polygon.setExteriorRing(QgsLineString(ring))
 
     item = QgsAnnotationPolygonItem(polygon)
-    item.setSymbol(_fill_symbol(line_color, fill_color))
+    item.setSymbol(_fill_symbol(line_color, fill_color, width_mm))
     item.setZIndex(_Z_POLYGON)
     _register_and_finish(layer, layer.addItem(item))
 
@@ -212,9 +218,19 @@ def get_entry(layer: QgsAnnotationLayer, item_id: str) -> AnnotationEntry | None
 
 
 def update_entry(
-    layer: QgsAnnotationLayer, item_id: str, name: str, line_color: QColor, fill_color: QColor | None
+    layer: QgsAnnotationLayer,
+    item_id: str,
+    name: str,
+    line_color: QColor,
+    fill_color: QColor | None,
+    line_width: float | None = None,
 ) -> None:
-    """Apply new colors and text to an object. Replaces the item's symbol with the plugin's default style."""
+    """Apply new colors, line width and text to an object.
+
+    Replaces the item's symbol with the plugin's default style. ``line_width``
+    (mm) only applies to lines and polygons; None keeps the default width.
+    """
+    width_mm = line_width if line_width is not None else DEFAULT_LINE_WIDTH_MM
     item = layer.item(item_id)
     kind = _kind_of(item) if item else None
     if kind is None:
@@ -227,10 +243,10 @@ def update_entry(
         item.setSymbol(_marker_symbol(line_color))
         _set_point_description(layer, meta, item_id, name)
     elif kind == KIND_LINE:
-        item.setSymbol(_line_symbol(line_color))
+        item.setSymbol(_line_symbol(line_color, width_mm))
         meta[item_id]["name"] = name
     elif kind == KIND_POLYGON:
-        item.setSymbol(_fill_symbol(line_color, fill_color))
+        item.setSymbol(_fill_symbol(line_color, fill_color, width_mm))
         meta[item_id]["name"] = name
     elif kind == KIND_TEXT:
         if not name:
@@ -408,6 +424,7 @@ def _entry_for(layer, meta, item_id, item, kind) -> AnnotationEntry:
     name = item_meta.get("name", "")
     line_color = QColor(0, 0, 0)
     fill_color = None
+    line_width = None
 
     symbol_layer = item.symbol().symbolLayer(0) if hasattr(item, "symbol") and item.symbol() else None
     if kind == KIND_POINT:
@@ -416,18 +433,23 @@ def _entry_for(layer, meta, item_id, item, kind) -> AnnotationEntry:
         label = layer.item(item_meta.get("label_id", "")) if item_meta.get("label_id") else None
         name = _strip_indent(label.text()) if label else ""
     elif kind == KIND_LINE:
+        line_width = DEFAULT_LINE_WIDTH_MM
         if symbol_layer is not None:
             line_color = symbol_layer.color()
+            if hasattr(symbol_layer, "width"):
+                line_width = symbol_layer.width()
     elif kind == KIND_POLYGON:
+        line_width = DEFAULT_LINE_WIDTH_MM
         if symbol_layer is not None and hasattr(symbol_layer, "strokeColor"):
             line_color = symbol_layer.strokeColor()
+            line_width = symbol_layer.strokeWidth()
             if symbol_layer.brushStyle() != Qt.BrushStyle.NoBrush:
                 fill_color = symbol_layer.fillColor()
     elif kind == KIND_TEXT:
         line_color = item.format().color()
         name = _strip_indent(item.text())
 
-    return AnnotationEntry(item_id, kind, item_meta["n"], name, line_color, fill_color)
+    return AnnotationEntry(item_id, kind, item_meta["n"], name, line_color, fill_color, line_width)
 
 
 def _set_point_description(layer, meta, marker_id: str, description: str) -> None:
@@ -513,18 +535,18 @@ def _marker_symbol(color: QColor) -> QgsMarkerSymbol:
     return symbol
 
 
-def _line_symbol(color: QColor) -> QgsLineSymbol:
-    symbol = QgsLineSymbol.createSimple({"line_width": str(LINE_WIDTH_MM), "capstyle": "round", "joinstyle": "round"})
+def _line_symbol(color: QColor, width_mm: float) -> QgsLineSymbol:
+    symbol = QgsLineSymbol.createSimple({"line_width": str(width_mm), "capstyle": "round", "joinstyle": "round"})
     symbol.symbolLayer(0).setColor(color)
     return symbol
 
 
-def _fill_symbol(line_color: QColor, fill_color: QColor | None) -> QgsFillSymbol:
+def _fill_symbol(line_color: QColor, fill_color: QColor | None, width_mm: float) -> QgsFillSymbol:
     symbol = QgsFillSymbol.createSimple(
         {
             "style": "solid" if fill_color is not None else "no",
             "outline_style": "solid",
-            "outline_width": str(LINE_WIDTH_MM),
+            "outline_width": str(width_mm),
             "joinstyle": "round",
         }
     )

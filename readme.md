@@ -38,7 +38,7 @@ Ein QGIS-Plugin für das einfache Hinzufügen und Verwalten von taktischen Zeich
 - **Linie zeichnen** - Linksklick setzt Stützpunkte, Rechtsklick/Enter beendet, Rücktaste entfernt den letzten Punkt, Esc bricht ab
 - **Polygon zeichnen** - wahlweise nur Umriss oder gefüllt
 - **Speicherung im Projekt** - Annotationen liegen im Layer „THW Toolbox Annotationen“ und werden mit der Projektdatei gespeichert; Bearbeiten/Löschen über die QGIS-Annotationswerkzeuge
-- **Standardfarben** - Linien- und Füllfarbe inkl. Transparenz im Einstellungs-Dialog
+- **Standardfarben und Linienbreite** - Linien- und Füllfarbe inkl. Transparenz sowie Linienbreite im Einstellungs-Dialog; pro Objekt im Bearbeiten-Dialog änderbar
 - **Annotationen-Tab im Dock** - Liste aller Objekte; Klick hebt das Objekt hervor und öffnet einen Dialog für Text, Farben, Füllung und Löschen
 - **Verschieben** - Punkte und einzelne Stützpunkte von Linien/Polygonen anklicken (oder in die Nähe) und ziehen; Esc bricht ab
 - **Stützpunkte einfügen/entfernen** - mit dem Verschieben-Werkzeug fügt ein Linksklick auf eine Linie/einen Umriss einen Stützpunkt ein, ein Rechtsklick auf einen Stützpunkt entfernt ihn (mind. 2 bei Linien, 3 bei Polygonen bleiben erhalten)

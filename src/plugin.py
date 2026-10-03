@@ -279,7 +279,9 @@ class THWToolboxPlugin:
             if dialog.deleted:
                 annotations.delete_entry(layer, item_id)
             else:
-                annotations.update_entry(layer, item_id, dialog.name(), dialog.line_color(), dialog.fill_color())
+                annotations.update_entry(
+                    layer, item_id, dialog.name(), dialog.line_color(), dialog.fill_color(), dialog.line_width()
+                )
         self._refresh_annotation_list()
 
     def _flash_annotation(self, layer, item_id):
