@@ -7,7 +7,7 @@ from qgis.core import (
     QgsVectorLayer,
 )
 from qgis.PyQt.QtCore import QCoreApplication, Qt, QTimer
-from qgis.PyQt.QtGui import QIcon, QKeySequence
+from qgis.PyQt.QtGui import QColor, QIcon, QKeySequence
 from qgis.PyQt.QtWidgets import (
     QAction,
     QDialog,
@@ -27,6 +27,7 @@ from .export.dji_kml_export import DjiKmlExporter
 from .export.dji_mbtiles_export import DjiMbtilesExporter
 from .export.dji_mbtiles_export import _ZoomDialog as _MbtilesZoomDialog
 from .export.portable_export import PortableExporter
+from .layer import annotations
 from .layer.feature_ops import FeatureOperations
 from .layer.labeling import apply_labeling
 from .layer.layer_manager import LayerManager
@@ -46,6 +47,7 @@ from .tools.annotation_tool import (
 from .tools.canvas_drop_filter import CanvasDropFilter
 from .tools.identify_tool import IdentifyTool
 from .tools.move_tool import MoveTool
+from .ui.annotation_dialog import AnnotationEditDialog
 from .ui.config_dialog import ConfigDialog
 from .ui.nominatim_search_dialog import NominatimSearchDialog
 from .ui.setup_common import SETUP_MODE_WIZARD, get_setup_mode
@@ -223,7 +225,9 @@ class THWToolboxPlugin:
             icon = QIcon(os.path.join(self.plugin_dir, "icons", icon_name))
             action = QAction(icon, text, self.iface.mainWindow())
             action.setCheckable(True)
-            tool = AnnotationTool(self.canvas, mode, self.settings, self._show_status_hint)
+            tool = AnnotationTool(
+                self.canvas, mode, self.settings, self._show_status_hint, on_created=self._refresh_annotation_list
+            )
             # QgsMapTool hält den Haken der Aktion beim (De-)Aktivieren selbst aktuell
             tool.setAction(action)
             action.triggered.connect(lambda checked, t=tool: self._toggle_annotation_tool(t, checked))
@@ -241,6 +245,50 @@ class THWToolboxPlugin:
                 self.canvas.setMapTool(self.move_tool)
             else:
                 self.iface.actionPan().trigger()
+
+    def _list_annotations(self):
+        layer = annotations.find_annotation_layer()
+        return annotations.list_entries(layer) if layer else None
+
+    def _refresh_annotation_list(self):
+        if getattr(self, "svg_dock_widget", None):
+            # Verzögert, da der Aufruf aus dem itemClicked-Slot der Liste selbst kommen kann
+            QTimer.singleShot(0, self.svg_dock_widget.refresh_annotation_list)
+
+    def _edit_annotation(self, item_id):
+        """Dock-Callback: Annotation auf der Karte hervorheben und Bearbeiten-Dialog öffnen."""
+        layer = annotations.find_annotation_layer()
+        entry = annotations.get_entry(layer, item_id) if layer else None
+        if entry is None:
+            # Objekt wurde inzwischen außerhalb des Plugins gelöscht
+            self._refresh_annotation_list()
+            return
+
+        self._flash_annotation(layer, item_id)
+        dialog = AnnotationEditDialog(entry, QColor(self.settings.annotation_fill_color), self.iface.mainWindow())
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            if dialog.deleted:
+                annotations.delete_entry(layer, item_id)
+            else:
+                annotations.update_entry(layer, item_id, dialog.name(), dialog.line_color(), dialog.fill_color())
+        self._refresh_annotation_list()
+
+    def _flash_annotation(self, layer, item_id):
+        """Zentriert die Karte auf die Annotation, falls sie außerhalb liegt, und lässt sie aufblinken."""
+        geom = annotations.entry_geometry(layer, item_id)
+        if geom is None or geom.isEmpty():
+            return
+        canvas_crs = self.canvas.mapSettings().destinationCrs()
+        if layer.crs() != canvas_crs:
+            try:
+                geom.transform(QgsCoordinateTransform(layer.crs(), canvas_crs, QgsProject.instance()))
+            except Exception:
+                logger.exception("Konnte Annotations-Geometrie nicht transformieren")
+                return
+        if not self.canvas.extent().intersects(geom.boundingBox()):
+            self.canvas.setCenter(geom.boundingBox().center())
+            self.canvas.refresh()
+        self.canvas.flashGeometries([geom], canvas_crs)
 
     def _show_status_hint(self, text):
         if text:
@@ -507,6 +555,8 @@ class THWToolboxPlugin:
                 self._open_config_dialog,
                 layer_provider=lambda: self.layer,
                 navigate_callback=self._navigate_to_feature,
+                annotation_provider=self._list_annotations,
+                annotation_callback=self._edit_annotation,
                 progress_callback=on_load_progress,
             )
             self.dock.setWidget(self.svg_dock_widget)

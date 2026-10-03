@@ -37,12 +37,20 @@ class AnnotationTool(QgsMapTool):
     The tool stays active after finishing a shape so several can be drawn in a row.
     """
 
-    def __init__(self, canvas, mode: str, settings, show_hint: Callable[[str], None] | None = None):
+    def __init__(
+        self,
+        canvas,
+        mode: str,
+        settings,
+        show_hint: Callable[[str], None] | None = None,
+        on_created: Callable[[], None] | None = None,
+    ):
         super().__init__(canvas)
         self.canvas = canvas
         self.mode = mode
         self.settings = settings
         self._show_hint = show_hint
+        self._on_created = on_created
         self._points: list[QgsPointXY] = []  # canvas CRS
         self._rubber_band: QgsRubberBand | None = None
         self._snap_indicator = QgsSnapIndicator(canvas)
@@ -163,6 +171,7 @@ class AnnotationTool(QgsMapTool):
         pts = self._to_layer_crs(layer, [point])
         if pts:
             annotations.add_point(layer, pts[0], self._line_color(), description)
+            self._notify_created()
 
     def _finish_shape(self):
         if self.mode == MODE_POINT:
@@ -184,3 +193,8 @@ class AnnotationTool(QgsMapTool):
         else:
             fill = self._fill_color() if self.mode == MODE_POLYGON_FILLED else None
             annotations.add_polygon(layer, pts, self._line_color(), fill)
+        self._notify_created()
+
+    def _notify_created(self):
+        if self._on_created:
+            self._on_created()

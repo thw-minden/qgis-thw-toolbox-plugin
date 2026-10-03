@@ -39,6 +39,7 @@ Ein QGIS-Plugin für das einfache Hinzufügen und Verwalten von taktischen Zeich
 - **Polygon zeichnen** - wahlweise nur Umriss oder gefüllt
 - **Speicherung im Projekt** - Annotationen liegen im Layer „THW Toolbox Annotationen“ und werden mit der Projektdatei gespeichert; Bearbeiten/Löschen über die QGIS-Annotationswerkzeuge
 - **Standardfarben** - Linien- und Füllfarbe inkl. Transparenz im Einstellungs-Dialog
+- **Annotationen-Tab im Dock** - Liste aller Objekte; Klick hebt das Objekt hervor und öffnet einen Dialog für Text, Farben, Füllung und Löschen
 
 ### Einstellungen (neu in 2.0)
 
