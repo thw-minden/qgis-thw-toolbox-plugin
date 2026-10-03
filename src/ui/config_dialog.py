@@ -131,8 +131,10 @@ class ConfigDialog(QDialog):
         self._cb_mgrs_resolution.setCurrentIndex(
             max(0, self._cb_mgrs_resolution.findData(self._settings.annotation_mgrs_resolution_dm))
         )
-        self._cb_mgrs_resolution.setToolTip("Genauigkeit der MGRS-Koordinate, die $POS in Punktbeschreibungen ersetzt")
-        form.addRow("MGRS-Auflösung ($POS)", self._cb_mgrs_resolution)
+        self._cb_mgrs_resolution.setToolTip(
+            "Genauigkeit von MGRS-Koordinaten: $POS in Punktbeschreibungen, Koordinaten-Tabellen und Marker-Details"
+        )
+        form.addRow("MGRS-Auflösung", self._cb_mgrs_resolution)
 
         box.setLayout(form)
         return box

@@ -4,6 +4,7 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QBrush, QColor
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -71,6 +72,7 @@ class CoordinateBox(QgsCollapsibleGroupBox):
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.itemChanged.connect(self._on_item_changed)
         self._table.itemSelectionChanged.connect(self._update_buttons)
+        self._table.itemDoubleClicked.connect(self._copy_row)
         layout.addWidget(self._table)
 
         buttons = QHBoxLayout()
@@ -173,6 +175,14 @@ class CoordinateBox(QgsCollapsibleGroupBox):
         item.setBackground(QBrush() if valid else _INVALID_BRUSH)
         self._table.blockSignals(False)
 
+    def _copy_row(self, item: QTableWidgetItem):
+        """Outside edit mode a double-click copies the row's coordinate to the clipboard."""
+        if self._edit_btn.isChecked():
+            return  # in edit mode the double-click edits the cell
+        text = self._table.item(item.row(), _COORD_COL).text()
+        QApplication.clipboard().setText(text)
+        self._hint.setText(f"„{text}“ in die Zwischenablage kopiert.")
+
     def _insert_after_current(self):
         row = self._table.currentRow()
         count = self._table.rowCount()
@@ -226,7 +236,7 @@ class CoordinateBox(QgsCollapsibleGroupBox):
         self._insert_btn.setEnabled(editing and has_row)
         self._delete_btn.setEnabled(editing and has_row and not at_minimum)
         if not editing:
-            self._hint.setText("")
+            self._hint.setText("Doppelklick auf eine Zeile kopiert die Koordinate.")
         elif at_minimum and self._can_change_count:
             self._hint.setText(f"Mindestens {self._min_count} Punkte erforderlich – Löschen nicht möglich.")
         else:

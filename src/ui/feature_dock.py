@@ -1,7 +1,6 @@
 import os
 import time
 
-from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsProject
 from qgis.gui import QgsMapToolIdentify
 from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtGui import QIcon, QPixmap
@@ -21,6 +20,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from ..layout.mgrs_grid import point_to_mgrs
 from ..logging_utils import get_logger
 from ..paths import plugin_root
 from .origin_point_widget import OriginPointWidget
@@ -62,15 +62,20 @@ class FeatureDock(QDockWidget):
         self.placeholder_label.setStyleSheet("QLabel { color: #666; padding: 20px; }")
         self.main_layout.addWidget(self.placeholder_label)
 
-        # UTM 32N Koordinaten mit Kopier-Button
+        # MGRS-/UTMRef-Koordinate mit Kopier-Button
         coord_layout = QHBoxLayout()
 
-        self.utm32n_label = QLabel("")
-        self.utm32n_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        coord_layout.addWidget(self.utm32n_label)
+        self.coords_label = QLabel("")
+        self.coords_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.coords_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        coord_layout.addWidget(self.coords_label, 1)
 
         self.btn_copy_coords = QPushButton("Kopieren")
-        self.btn_copy_coords.setMaximumWidth(60)
+        # Wide enough for both texts ("Kopieren" / "Kopiert!") so it does not jump when confirming the copy
+        metrics = self.btn_copy_coords.fontMetrics()
+        text_width = max(metrics.horizontalAdvance(t) for t in ("Kopieren", "Kopiert!"))
+        self.btn_copy_coords.setMinimumWidth(text_width + 32)
+        self.btn_copy_coords.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         coord_layout.addWidget(self.btn_copy_coords)
 
         self.main_layout.addLayout(coord_layout)
@@ -193,7 +198,7 @@ class FeatureDock(QDockWidget):
         self.placeholder_label.show()
 
         # Koordinaten und Steuerelemente verstecken
-        self.utm32n_label.hide()
+        self.coords_label.hide()
         self.btn_copy_coords.hide()
         self.size_label.hide()
         self.size_spinbox.hide()
@@ -214,25 +219,18 @@ class FeatureDock(QDockWidget):
         # Dock-Titel ohne Koordinaten
         self.setWindowTitle("Marker Details")
 
-    def convert_to_utm32n(self, point, source_crs):
-        """Konvertiert Koordinaten zu UTM Zone 32N (EPSG:32632)"""
+    @staticmethod
+    def convert_to_mgrs(point, source_crs, resolution_m=1.0):
+        """MGRS-/UTMRef-Koordinate inkl. 100-km-Quadrat, z. B. ``32U MB 12345 98765``.
+
+        Zone und Band ergeben sich aus der Position (nicht fest Zone 32). None bei Fehlern
+        oder außerhalb des UTM-Bereichs.
+        """
         try:
-            # UTM Zone 32N CRS (EPSG:32632)
-            utm_crs = QgsCoordinateReferenceSystem("EPSG:32632")
-
-            # Koordinatentransformation erstellen
-            transform = QgsCoordinateTransform(source_crs, utm_crs, QgsProject.instance())
-
-            # Koordinaten transformieren
-            utm_point = transform.transform(point)
-
-            # Formatierung der UTM-Koordinaten
-            easting = int(utm_point.x())
-            northing = int(utm_point.y())
-
-            return f"UTM 32N: {easting}E {northing}N"
+            return point_to_mgrs(point, source_crs, resolution_m)
         except Exception:
-            return "UTM 32N: Fehler"
+            logger.exception("MGRS-Koordinate konnte nicht berechnet werden")
+            return None
 
     def show_feature(self, feat, layer_manager):
         self.feat = feat
@@ -289,15 +287,16 @@ class FeatureDock(QDockWidget):
             point = feat.geometry().asPoint()
             source_crs = layer_manager.layer.crs()
 
-            # Nur UTM 32N Koordinaten berechnen und anzeigen
-            utm32n_text = self.convert_to_utm32n(point, source_crs)
+            # Auflösung wie für $POS in Annotationen (projektweite Einstellung)
+            settings = getattr(layer_manager, "settings", None)
+            resolution = settings.annotation_mgrs_resolution_m if settings is not None else 1.0
+            mgrs = self.convert_to_mgrs(point, source_crs, resolution)
 
-            # Label aktualisieren
-            self.utm32n_label.setText(utm32n_text)
-            self.utm32n_label.show()
+            self.coords_label.setText(f"MGRS: {mgrs}" if mgrs else "MGRS: außerhalb UTM / Fehler")
+            self.coords_label.show()
 
-            # UTM-Koordinaten für Kopier-Funktion speichern
-            self.current_utm_coords = utm32n_text
+            # Nur die Koordinate selbst kopieren — so lässt sie sich z. B. direkt in der Suche einfügen
+            self.current_coords = mgrs
 
             # Dock-Titel ohne Koordinaten (nur "Marker Details")
             self.setWindowTitle("Marker Details")
@@ -474,10 +473,10 @@ class FeatureDock(QDockWidget):
         self.show()
 
     def on_copy_coords(self):
-        """Kopiert die UTM 32N Koordinaten in die Zwischenablage"""
-        if hasattr(self, "current_utm_coords"):
+        """Kopiert die MGRS-Koordinate in die Zwischenablage"""
+        if getattr(self, "current_coords", None):
             clipboard = QApplication.clipboard()
-            clipboard.setText(self.current_utm_coords)
+            clipboard.setText(self.current_coords)
             # Kurze visuelle Bestätigung
             self.btn_copy_coords.setText("Kopiert!")
 
