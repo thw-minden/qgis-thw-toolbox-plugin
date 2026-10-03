@@ -170,7 +170,13 @@ class AnnotationTool(QgsMapTool):
             return
         pts = self._to_layer_crs(layer, [point])
         if pts:
-            annotations.add_point(layer, pts[0], self._line_color(), description)
+            annotations.add_point(
+                layer,
+                pts[0],
+                self._line_color(),
+                description,
+                annotations.map_units_per_mm(self.canvas.mapSettings()),
+            )
             self._notify_created()
 
     def _finish_shape(self):

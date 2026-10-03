@@ -9,6 +9,10 @@
 - Neuer Dock-Tab **„Annotationen“** listet alle gezeichneten Objekte; ein Klick hebt das Objekt auf der Karte hervor und öffnet einen Dialog zum Ändern von Text, Linien- und Füllfarbe oder zum Löschen (`ui/annotation_dialog.py`)
 - Werkzeug **„Annotation verschieben“**: Punkte sowie einzelne Stützpunkte von Linien und Polygonen per Ziehen verschieben; die Beschreibung eines Punktes wandert mit (`tools/annotation_move_tool.py`)
   - Linksklick auf eine Linie/einen Polygon-Umriss fügt einen Stützpunkt ein, Rechtsklick auf einen Stützpunkt entfernt ihn (Linien behalten mindestens 2, Polygone mindestens 3 Stützpunkte)
+- Beschreibung auch für Linien und Polygone (im Bearbeiten-Dialog); sie erscheint mittig auf der Linie bzw. in der Fläche und lässt sich mit dem Verschieben-Werkzeug unabhängig von den Stützpunkten an eine andere Stelle ziehen
+- Textgröße von Beschreibungen (Punkt, Linie, Polygon) mit dem Verschieben-Werkzeug über vier Eck-Anfasser am Beschreibungsrahmen skalieren (1–50 mm, Textrand wird mitskaliert; Punktbeschreibungen skalieren um ihre Mitte, Linien-/Polygonbeschreibungen um ihre Unterkante)
+- Auch Beschreibungen von Punkten lassen sich frei verschieben (beim Verschieben des Punktes bleibt der Abstand erhalten); beim Überfahren, Verschieben oder Skalieren einer Beschreibung wird das zugehörige Objekt hervorgehoben
+- Doppelklick auf eine Beschreibung (Verschieben-Werkzeug) öffnet den Bearbeiten-Dialog des zugehörigen Punktes, der Linie oder des Polygons
 
 ## [2.1.1]
 

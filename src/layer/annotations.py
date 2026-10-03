@@ -23,7 +23,10 @@ from qgis.core import (
     QgsPointXY,
     QgsPolygon,
     QgsProject,
+    QgsRectangle,
+    QgsRenderContext,
     QgsTextFormat,
+    QgsTextRenderer,
     QgsVertexId,
 )
 from qgis.PyQt.QtCore import Qt
@@ -38,18 +41,23 @@ ANNOTATION_LAYER_DISPLAY_NAME = "THW Toolbox Annotationen"
 # Custom property marking our annotation layer (survives renaming by the user)
 _LAYER_PROPERTY = "thw_toolbox/annotation_layer"
 # Custom property holding per-item metadata as JSON:
-# {item_id: {"n": running number, "name": list name, "label_id": linked description item}}
+# {item_id: {"n": running number, "name": legacy list-only name, "label_id": linked description item}}
 _META_PROPERTY = "thw_toolbox/annotation_items"
 
 # Fallback when an item's line width cannot be read (e.g. restyled with native QGIS tools)
 DEFAULT_LINE_WIDTH_MM = 0.8
 MARKER_SIZE_MM = 3.0
 TEXT_SIZE_MM = 3.5
+# Allowed range when scaling descriptions with the move tool
+MIN_TEXT_SIZE_MM = 1.0
+MAX_TEXT_SIZE_MM = 50.0
 
-# Point-text items draw their baseline-left corner exactly on the anchor point
-# and offer no offset, so the description would overlap the marker. Two en
-# spaces push it to the upper right of the marker, independent of map scale.
-_DESCRIPTION_INDENT = "  "
+# Gap between the marker edge and the start of a new point description
+_POINT_LABEL_GAP_MM = 1.0
+
+# Earlier versions pushed point descriptions away from the marker with two
+# leading en spaces. They are removed by ``remove_legacy_indents``.
+_LEGACY_INDENT = "  "
 
 # Vertices that must remain so editing never deletes a whole line/polygon
 MIN_LINE_VERTICES = 2
@@ -71,12 +79,12 @@ _KIND_TITLES = {KIND_POINT: "Punkt", KIND_LINE: "Linie", KIND_POLYGON: "Polygon"
 
 @dataclass
 class AnnotationEntry:
-    """One user-visible annotation object (a point and its description count as one)."""
+    """One user-visible annotation object (an item and its linked description count as one)."""
 
     item_id: str
     kind: str
     number: int
-    name: str  # list name for lines/polygons; the description for points/texts
+    name: str  # the description shown on the map
     line_color: QColor
     fill_color: QColor | None  # None for unfilled polygons and non-polygons
     line_width: float | None = None  # mm; only for lines and polygons
@@ -137,8 +145,18 @@ def get_or_create_annotation_layer(crs: QgsCoordinateReferenceSystem) -> QgsAnno
 # ----------------------------------------------------------------------
 
 
-def add_point(layer: QgsAnnotationLayer, point: QgsPointXY, color: QColor, description: str = "") -> None:
-    """Add a marker at ``point`` (layer CRS), optionally with a text description."""
+def add_point(
+    layer: QgsAnnotationLayer,
+    point: QgsPointXY,
+    color: QColor,
+    description: str = "",
+    units_per_mm: float = 0.0,
+) -> None:
+    """Add a marker at ``point`` (layer CRS), optionally with a text description.
+
+    ``units_per_mm`` (map units per millimetre at the current scale, see
+    ``map_units_per_mm``) places the description next to instead of on the marker.
+    """
     marker = QgsAnnotationMarkerItem(QgsPoint(point))
     marker.setSymbol(_marker_symbol(color))
     marker.setZIndex(_Z_MARKER)
@@ -146,7 +164,7 @@ def add_point(layer: QgsAnnotationLayer, point: QgsPointXY, color: QColor, descr
 
     meta = _read_meta(layer)
     _register(meta, marker_id)
-    _set_point_description(layer, meta, marker_id, description)
+    _set_description(layer, meta, marker_id, KIND_POINT, description, units_per_mm)
     _write_meta(layer, meta)
     _finish(layer)
 
@@ -224,11 +242,13 @@ def update_entry(
     line_color: QColor,
     fill_color: QColor | None,
     line_width: float | None = None,
+    units_per_mm: float = 0.0,
 ) -> None:
     """Apply new colors, line width and text to an object.
 
     Replaces the item's symbol with the plugin's default style. ``line_width``
     (mm) only applies to lines and polygons; None keeps the default width.
+    ``units_per_mm`` positions a newly created point description (see ``add_point``).
     """
     width_mm = line_width if line_width is not None else DEFAULT_LINE_WIDTH_MM
     item = layer.item(item_id)
@@ -241,20 +261,20 @@ def update_entry(
     name = name.strip()
     if kind == KIND_POINT:
         item.setSymbol(_marker_symbol(line_color))
-        _set_point_description(layer, meta, item_id, name)
+        _set_description(layer, meta, item_id, kind, name, units_per_mm)
     elif kind == KIND_LINE:
         item.setSymbol(_line_symbol(line_color, width_mm))
-        meta[item_id]["name"] = name
+        _set_description(layer, meta, item_id, kind, name)
+        meta[item_id]["name"] = ""  # superseded by the map description
     elif kind == KIND_POLYGON:
         item.setSymbol(_fill_symbol(line_color, fill_color, width_mm))
-        meta[item_id]["name"] = name
+        _set_description(layer, meta, item_id, kind, name)
+        meta[item_id]["name"] = ""
     elif kind == KIND_TEXT:
         if not name:
             delete_entry(layer, item_id)
             return
-        # Keep the indent only where it was (orphaned descriptions), not on native QGIS texts
-        indent = _DESCRIPTION_INDENT if item.text().startswith(_DESCRIPTION_INDENT) else ""
-        item.setText(indent + name)
+        item.setText(name)
         fmt = item.format()
         fmt.setColor(line_color)
         item.setFormat(fmt)
@@ -263,7 +283,7 @@ def update_entry(
 
 
 def delete_entry(layer: QgsAnnotationLayer, item_id: str) -> None:
-    """Remove an object, including a point's linked description."""
+    """Remove an object, including its linked description."""
     meta = _read_meta(layer)
     label_id = meta.get(item_id, {}).get("label_id")
     if label_id and layer.item(label_id):
@@ -292,12 +312,11 @@ def entry_geometry(layer: QgsAnnotationLayer, item_id: str) -> QgsGeometry | Non
 
 
 def node_handles(layer: QgsAnnotationLayer) -> list[NodeHandle]:
-    """All draggable nodes of the layer. Linked descriptions are not listed — they follow their marker."""
-    linked_labels = {m.get("label_id") for m in _read_meta(layer).values() if m.get("label_id")}
+    """All draggable nodes of points, lines and polygons. Texts are moved via ``description_labels`` instead."""
     context = QgsAnnotationItemEditContext()
     handles = []
     for item_id, item in layer.items().items():
-        if item_id in linked_labels or _kind_of(item) is None:
+        if _kind_of(item) in (None, KIND_TEXT):
             continue
         for node in item.nodesV2(context):
             # Skip e.g. callout handles — only real vertices are movable here
@@ -316,7 +335,12 @@ def preview_moved_node(layer: QgsAnnotationLayer, handle: NodeHandle, new_point:
 
 
 def move_node(layer: QgsAnnotationLayer, handle: NodeHandle, new_point: QgsPointXY) -> bool:
-    """Move ``handle`` to ``new_point`` (layer CRS). A point's description moves along."""
+    """Move ``handle`` to ``new_point`` (layer CRS).
+
+    A point's description moves along, keeping its (possibly user-adjusted)
+    offset; descriptions of lines/polygons stay where they are — they are
+    positioned independently of the vertices.
+    """
     context = QgsAnnotationItemEditContext()
     result = layer.applyEditV2(_move_operation(handle, new_point), context)
     if result != Qgis.AnnotationItemEditOperationResult.Success:
@@ -324,10 +348,120 @@ def move_node(layer: QgsAnnotationLayer, handle: NodeHandle, new_point: QgsPoint
         return False
 
     label_id = _read_meta(layer).get(handle.item_id, {}).get("label_id")
-    if label_id and layer.item(label_id):
+    if label_id and layer.item(label_id) and item_kind(layer, handle.item_id) == KIND_POINT:
         dx = new_point.x() - handle.point.x()
         dy = new_point.y() - handle.point.y()
         layer.applyEditV2(QgsAnnotationItemEditOperationTranslateItem(label_id, dx, dy), context)
+    _finish(layer)
+    return True
+
+
+def map_units_per_mm(map_settings) -> float:
+    """Map units per millimetre at the scale of ``map_settings`` (e.g. the canvas)."""
+    context = QgsRenderContext.fromMapSettings(map_settings)
+    return context.convertToMapUnits(1.0, Qgis.RenderUnit.Millimeters)
+
+
+def remove_legacy_indents(layer: QgsAnnotationLayer, map_settings) -> bool:
+    """Drop the leading en spaces older versions put in front of point descriptions.
+
+    The text is shifted right by the width the spaces took up at the scale of
+    ``map_settings``, so it stays where it was visually. Returns True if anything changed.
+    """
+    context = QgsRenderContext.fromMapSettings(map_settings)
+    changed = False
+    for item in layer.items().values():
+        if not isinstance(item, QgsAnnotationPointTextItem) or not item.text().startswith(_LEGACY_INDENT):
+            continue
+        text = item.text()
+        stripped = text[len(_LEGACY_INDENT) :]
+        fmt = item.format()
+        # Width difference instead of measuring the spaces alone, which some renderers trim
+        indent_px = QgsTextRenderer.textWidth(context, fmt, [text]) - QgsTextRenderer.textWidth(
+            context, fmt, [stripped]
+        )
+        item.setText(stripped)
+        if indent_px > 0 and item.alignment() & Qt.AlignmentFlag.AlignLeft:
+            point = QgsPointXY(item.point())
+            item.setPoint(
+                QgsPointXY(point.x() + context.convertToMapUnits(indent_px, Qgis.RenderUnit.Pixels), point.y())
+            )
+        changed = True
+    if changed:
+        _finish(layer)
+    return changed
+
+
+def label_bounds(layer: QgsAnnotationLayer, label_id: str, context: QgsRenderContext) -> QgsRectangle | None:
+    """Extent of the rendered text (layer CRS) for the map scale of ``context``."""
+    item = layer.item(label_id)
+    return item.boundingBox(context) if item is not None else None
+
+
+def description_labels(layer: QgsAnnotationLayer) -> list[str]:
+    """Ids of all texts that can be moved and scaled — every description plus standalone texts."""
+    return [item_id for item_id, item in layer.items().items() if isinstance(item, QgsAnnotationPointTextItem)]
+
+
+def label_owner(layer: QgsAnnotationLayer, label_id: str) -> str | None:
+    """Id of the point/line/polygon a description belongs to, or None for standalone texts."""
+    for item_id, item_meta in _read_meta(layer).items():
+        if item_meta.get("label_id") == label_id and layer.item(item_id) is not None:
+            return item_id
+    return None
+
+
+def label_anchor(layer: QgsAnnotationLayer, label_id: str) -> QgsPointXY | None:
+    """Anchor point of a text (layer CRS) — the point that stays fixed while scaling."""
+    item = layer.item(label_id)
+    return QgsPointXY(item.point()) if isinstance(item, QgsAnnotationPointTextItem) else None
+
+
+def clamp_label_scale(layer: QgsAnnotationLayer, label_id: str, factor: float) -> float:
+    """Limit ``factor`` so the resulting text size stays within MIN/MAX_TEXT_SIZE_MM."""
+    item = layer.item(label_id)
+    if not isinstance(item, QgsAnnotationPointTextItem) or item.format().size() <= 0:
+        return 1.0
+    size = item.format().size()
+    return max(MIN_TEXT_SIZE_MM / size, min(MAX_TEXT_SIZE_MM / size, factor))
+
+
+def scale_label(layer: QgsAnnotationLayer, label_id: str, factor: float, pivot: QgsPointXY | None = None) -> bool:
+    """Multiply the text size (and its halo) of a description by ``factor`` (clamped).
+
+    Text always grows around its anchor point. With a ``pivot`` (layer CRS),
+    the anchor is shifted so the text scales around the pivot instead.
+    """
+    item = layer.item(label_id)
+    if not isinstance(item, QgsAnnotationPointTextItem):
+        return False
+    factor = clamp_label_scale(layer, label_id, factor)
+    fmt = item.format()
+    fmt.setSize(fmt.size() * factor)
+    buffer = fmt.buffer()
+    buffer.setSize(buffer.size() * factor)
+    fmt.setBuffer(buffer)
+    item.setFormat(fmt)
+
+    if pivot is not None:
+        # Every text point p is drawn at anchor + (p - anchor) * factor; moving the anchor to
+        # pivot + (anchor - pivot) * factor keeps the pivot in place.
+        anchor = QgsPointXY(item.point())
+        dx = (anchor.x() - pivot.x()) * (factor - 1)
+        dy = (anchor.y() - pivot.y()) * (factor - 1)
+        layer.applyEditV2(QgsAnnotationItemEditOperationTranslateItem(label_id, dx, dy), QgsAnnotationItemEditContext())
+    _finish(layer)
+    return True
+
+
+def translate_label(layer: QgsAnnotationLayer, label_id: str, dx: float, dy: float) -> bool:
+    """Shift a text item by ``dx``/``dy`` (layer CRS units)."""
+    result = layer.applyEditV2(
+        QgsAnnotationItemEditOperationTranslateItem(label_id, dx, dy), QgsAnnotationItemEditContext()
+    )
+    if result != Qgis.AnnotationItemEditOperationResult.Success:
+        logger.warning("Beschreibung %s konnte nicht verschoben werden: %s", label_id, result)
+        return False
     _finish(layer)
     return True
 
@@ -430,8 +564,6 @@ def _entry_for(layer, meta, item_id, item, kind) -> AnnotationEntry:
     if kind == KIND_POINT:
         if symbol_layer is not None and hasattr(symbol_layer, "fillColor"):
             line_color = symbol_layer.fillColor()
-        label = layer.item(item_meta.get("label_id", "")) if item_meta.get("label_id") else None
-        name = _strip_indent(label.text()) if label else ""
     elif kind == KIND_LINE:
         line_width = DEFAULT_LINE_WIDTH_MM
         if symbol_layer is not None:
@@ -449,35 +581,64 @@ def _entry_for(layer, meta, item_id, item, kind) -> AnnotationEntry:
         line_color = item.format().color()
         name = _strip_indent(item.text())
 
+    if kind != KIND_TEXT:
+        label = layer.item(item_meta.get("label_id", "")) if item_meta.get("label_id") else None
+        if label is not None:
+            name = _strip_indent(label.text())
+
     return AnnotationEntry(item_id, kind, item_meta["n"], name, line_color, fill_color, line_width)
 
 
-def _set_point_description(layer, meta, marker_id: str, description: str) -> None:
-    """Create, update or remove the description text linked to a marker."""
+def _set_description(layer, meta, item_id: str, kind: str, description: str, units_per_mm: float = 0.0) -> None:
+    """Create, update or remove the description text linked to an item.
+
+    New point descriptions start to the upper right of the marker (offset by
+    the marker radius plus a gap, converted with ``units_per_mm``); descriptions
+    of lines and polygons are centered on the line's midpoint or inside the area.
+    """
     description = description.strip()
-    label_id = meta[marker_id].get("label_id", "")
+    label_id = meta[item_id].get("label_id", "")
     label = layer.item(label_id) if label_id else None
 
     if not description:
         if label is not None:
             layer.removeItem(label_id)
-        meta[marker_id]["label_id"] = ""
+        meta[item_id]["label_id"] = ""
         return
 
     if label is not None:
-        label.setText(_DESCRIPTION_INDENT + description)
+        label.setText(description)
         return
 
-    marker = layer.item(marker_id)
-    text_item = QgsAnnotationPointTextItem(_DESCRIPTION_INDENT + description, QgsPointXY(marker.geometry()))
+    anchor = _label_anchor(layer, item_id, kind)
+    if anchor is None:
+        return
+    if kind == KIND_POINT:
+        offset = (MARKER_SIZE_MM / 2 + _POINT_LABEL_GAP_MM) * units_per_mm
+        anchor = QgsPointXY(anchor.x() + offset, anchor.y())
+    text_item = QgsAnnotationPointTextItem(description, anchor)
     text_item.setFormat(_description_format())
-    text_item.setAlignment(Qt.AlignmentFlag.AlignLeft)
+    text_item.setAlignment(Qt.AlignmentFlag.AlignLeft if kind == KIND_POINT else Qt.AlignmentFlag.AlignHCenter)
     text_item.setZIndex(_Z_TEXT)
-    meta[marker_id]["label_id"] = layer.addItem(text_item)
+    meta[item_id]["label_id"] = layer.addItem(text_item)
+
+
+def _label_anchor(layer, item_id: str, kind: str) -> QgsPointXY | None:
+    """Initial description position (layer CRS) for a new label."""
+    geom = entry_geometry(layer, item_id)
+    if geom is None or geom.isEmpty():
+        return None
+    if kind == KIND_LINE:
+        geom = geom.interpolate(geom.length() / 2)
+    elif kind == KIND_POLYGON:
+        geom = geom.pointOnSurface()
+    if geom is None or geom.isEmpty():
+        return None
+    return geom.asPoint()
 
 
 def _strip_indent(text: str) -> str:
-    return text[len(_DESCRIPTION_INDENT) :] if text.startswith(_DESCRIPTION_INDENT) else text
+    return text[len(_LEGACY_INDENT) :] if text.startswith(_LEGACY_INDENT) else text
 
 
 def _read_meta(layer) -> dict:

@@ -231,7 +231,12 @@ class THWToolboxPlugin:
             (
                 "annotation_move.svg",
                 "Annotation verschieben",
-                AnnotationMoveTool(self.canvas, self._show_status_hint, on_moved=self._refresh_annotation_list),
+                AnnotationMoveTool(
+                    self.canvas,
+                    self._show_status_hint,
+                    on_moved=self._refresh_annotation_list,
+                    on_edit=self._edit_annotation,
+                ),
             ),
         ):
             icon = QIcon(os.path.join(self.plugin_dir, "icons", icon_name))
@@ -257,7 +262,10 @@ class THWToolboxPlugin:
 
     def _list_annotations(self):
         layer = annotations.find_annotation_layer()
-        return annotations.list_entries(layer) if layer else None
+        if layer is None:
+            return None
+        annotations.remove_legacy_indents(layer, self.canvas.mapSettings())
+        return annotations.list_entries(layer)
 
     def _refresh_annotation_list(self):
         if getattr(self, "svg_dock_widget", None):
@@ -265,7 +273,7 @@ class THWToolboxPlugin:
             QTimer.singleShot(0, self.svg_dock_widget.refresh_annotation_list)
 
     def _edit_annotation(self, item_id):
-        """Dock-Callback: Annotation auf der Karte hervorheben und Bearbeiten-Dialog öffnen."""
+        """Dock-/Werkzeug-Callback: Annotation auf der Karte hervorheben und Bearbeiten-Dialog öffnen."""
         layer = annotations.find_annotation_layer()
         entry = annotations.get_entry(layer, item_id) if layer else None
         if entry is None:
@@ -280,7 +288,13 @@ class THWToolboxPlugin:
                 annotations.delete_entry(layer, item_id)
             else:
                 annotations.update_entry(
-                    layer, item_id, dialog.name(), dialog.line_color(), dialog.fill_color(), dialog.line_width()
+                    layer,
+                    item_id,
+                    dialog.name(),
+                    dialog.line_color(),
+                    dialog.fill_color(),
+                    dialog.line_width(),
+                    annotations.map_units_per_mm(self.canvas.mapSettings()),
                 )
         self._refresh_annotation_list()
 

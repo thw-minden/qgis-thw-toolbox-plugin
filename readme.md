@@ -42,6 +42,9 @@ Ein QGIS-Plugin für das einfache Hinzufügen und Verwalten von taktischen Zeich
 - **Annotationen-Tab im Dock** - Liste aller Objekte; Klick hebt das Objekt hervor und öffnet einen Dialog für Text, Farben, Füllung und Löschen
 - **Verschieben** - Punkte und einzelne Stützpunkte von Linien/Polygonen anklicken (oder in die Nähe) und ziehen; Esc bricht ab
 - **Stützpunkte einfügen/entfernen** - mit dem Verschieben-Werkzeug fügt ein Linksklick auf eine Linie/einen Umriss einen Stützpunkt ein, ein Rechtsklick auf einen Stützpunkt entfernt ihn (mind. 2 bei Linien, 3 bei Polygonen bleiben erhalten)
+- **Beschreibungen** - Punkte, Linien und Polygone können eine Beschreibung auf der Karte tragen; sie lässt sich mit dem Verschieben-Werkzeug frei positionieren (die Beschreibung eines Punktes wandert beim Verschieben des Punktes mit), das zugehörige Objekt wird dabei hervorgehoben
+- **Textgröße** - beim Überfahren einer Beschreibung erscheinen vier Eck-Anfasser; Ziehen an einer Ecke vergrößert oder verkleinert den Text
+- **Schnell bearbeiten** - Doppelklick auf eine Beschreibung öffnet den Bearbeiten-Dialog des zugehörigen Objekts
 
 ### Einstellungen (neu in 2.0)
 

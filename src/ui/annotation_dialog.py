@@ -15,7 +15,6 @@ from ..layer.annotations import KIND_LINE, KIND_POINT, KIND_POLYGON, KIND_TEXT, 
 from .config_dialog import line_width_spinbox
 
 _TEXT_LABELS = {
-    KIND_POINT: "Beschreibung (auf der Karte)",
     KIND_TEXT: "Text (auf der Karte)",
 }
 
@@ -39,7 +38,7 @@ class AnnotationEditDialog(QDialog):
         # Label above the text field so the field can use the full dialog width
         self._name_edit = QLineEdit(entry.name)
         self._name_edit.setPlaceholderText("optional")
-        name_label = QLabel(_TEXT_LABELS.get(entry.kind, "Bezeichnung (nur in der Liste)"))
+        name_label = QLabel(_TEXT_LABELS.get(entry.kind, "Beschreibung (auf der Karte)"))
         name_label.setBuddy(self._name_edit)
         layout.addWidget(name_label)
         layout.addWidget(self._name_edit)
