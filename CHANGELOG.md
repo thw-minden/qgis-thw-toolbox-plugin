@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Hinzugefügt
+- **Annotationen zeichnen** über die neue Werkzeugleiste „THW Toolbox Annotationen“: Punkt (optional mit Beschreibung), Linie, Polygon und gefülltes Polygon (`tools/annotation_tool.py`, `layer/annotations.py`)
+- Annotationen landen in einem QGIS-Annotations-Layer „THW Toolbox Annotationen“ und werden direkt in der Projektdatei gespeichert
+- Standard-Linien- und Füllfarbe (inkl. Transparenz) für Annotationen im Einstellungs-Dialog
+
 ## [2.1.1]
 
 ### Verbessert

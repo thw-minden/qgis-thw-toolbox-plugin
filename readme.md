@@ -32,6 +32,14 @@ Ein QGIS-Plugin für das einfache Hinzufügen und Verwalten von taktischen Zeich
 - **Labeling** - Beschriftung mit anpassbarem Text und Positionierung
 - **Echtzeit-Vorschau** - Sofortige visuelle Rückmeldung bei Änderungen
 
+### Annotationen
+
+- **Punkt setzen** - optional mit Beschreibungstext
+- **Linie zeichnen** - Linksklick setzt Stützpunkte, Rechtsklick/Enter beendet, Rücktaste entfernt den letzten Punkt, Esc bricht ab
+- **Polygon zeichnen** - wahlweise nur Umriss oder gefüllt
+- **Speicherung im Projekt** - Annotationen liegen im Layer „THW Toolbox Annotationen“ und werden mit der Projektdatei gespeichert; Bearbeiten/Löschen über die QGIS-Annotationswerkzeuge
+- **Standardfarben** - Linien- und Füllfarbe inkl. Transparenz im Einstellungs-Dialog
+
 ### Einstellungen (neu in 2.0)
 
 - **Einstellungs-Dialog** - Zentrale Konfiguration über das Zahnrad-Icon im Dock

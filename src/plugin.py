@@ -36,6 +36,13 @@ from .logging_utils import get_logger
 from .paths import plugin_root
 from .settings import THWToolboxSettings
 from .tools import style_library
+from .tools.annotation_tool import (
+    MODE_LINE,
+    MODE_POINT,
+    MODE_POLYGON,
+    MODE_POLYGON_FILLED,
+    AnnotationTool,
+)
 from .tools.canvas_drop_filter import CanvasDropFilter
 from .tools.identify_tool import IdentifyTool
 from .tools.move_tool import MoveTool
@@ -65,6 +72,9 @@ class THWToolboxPlugin:
         self.move_tool = None
         self.action = None
         self.dock = None
+        self.annotation_toolbar = None
+        self.annotation_actions = []
+        self.annotation_tools = []
         # True während QGIS das Projekt leert (Projekt schließen / anderes laden).
         # In dem Fall sollen wir die Layer-Entfernung still hinnehmen statt den
         # Nutzer mit der Deaktivierungs-Warnung zu konfrontieren.
@@ -180,6 +190,8 @@ class THWToolboxPlugin:
         self.dji_mbtiles_action.triggered.connect(self._export_selected_layer_as_mbtiles)
         self.iface.addPluginToMenu("THW Toolbox", self.dji_mbtiles_action)
 
+        self._init_annotation_tools()
+
         # Verbinde Projekt-Events für automatisches Speichern
         QgsProject.instance().writeProject.connect(self._on_project_save)
         # Reagiere auf Layer-Entfernung, damit wir das Plugin sauber deaktivieren,
@@ -197,6 +209,44 @@ class THWToolboxPlugin:
         # DB-Einträge in mSymbols beim Start). Deferred via QTimer, damit der
         # Plugin-Init nicht blockiert.
         QTimer.singleShot(0, self._rehydrate_style_cache)
+
+    def _init_annotation_tools(self):
+        """Eigene Werkzeugleiste mit den Zeichenwerkzeugen für Annotationen (Punkt, Linie, Polygon)."""
+        self.annotation_toolbar = self.iface.addToolBar("THW Toolbox Annotationen")
+        self.annotation_toolbar.setObjectName("THWToolboxAnnotationToolbar")
+        for mode, icon_name, text in (
+            (MODE_POINT, "annotation_point.svg", "Punkt setzen"),
+            (MODE_LINE, "annotation_line.svg", "Linie zeichnen"),
+            (MODE_POLYGON, "annotation_polygon.svg", "Polygon zeichnen"),
+            (MODE_POLYGON_FILLED, "annotation_polygon_filled.svg", "Polygon zeichnen (gefüllt)"),
+        ):
+            icon = QIcon(os.path.join(self.plugin_dir, "icons", icon_name))
+            action = QAction(icon, text, self.iface.mainWindow())
+            action.setCheckable(True)
+            tool = AnnotationTool(self.canvas, mode, self.settings, self._show_status_hint)
+            # QgsMapTool hält den Haken der Aktion beim (De-)Aktivieren selbst aktuell
+            tool.setAction(action)
+            action.triggered.connect(lambda checked, t=tool: self._toggle_annotation_tool(t, checked))
+            self.annotation_toolbar.addAction(action)
+            self.iface.addPluginToMenu("THW Toolbox", action)
+            self.annotation_actions.append(action)
+            self.annotation_tools.append(tool)
+
+    def _toggle_annotation_tool(self, tool, checked):
+        if checked:
+            self.canvas.setMapTool(tool)
+        elif self.canvas.mapTool() is tool:
+            # Erneuter Klick auf das aktive Werkzeug: zurück zum Verschieben (Toolbox aktiv) bzw. Pan
+            if self.move_tool and self.action and self.action.isChecked():
+                self.canvas.setMapTool(self.move_tool)
+            else:
+                self.iface.actionPan().trigger()
+
+    def _show_status_hint(self, text):
+        if text:
+            self.iface.statusBarIface().showMessage(text)
+        else:
+            self.iface.statusBarIface().clearMessage()
 
     def _rehydrate_style_cache(self):
         try:
@@ -220,6 +270,17 @@ class THWToolboxPlugin:
         if self.move_tool:
             self.canvas.unsetMapTool(self.move_tool)
             self.move_tool.dispose()
+        for tool in self.annotation_tools:
+            if self.canvas.mapTool() is tool:
+                self.canvas.unsetMapTool(tool)
+        self.annotation_tools = []
+        for action in self.annotation_actions:
+            self.iface.removePluginMenu("THW Toolbox", action)
+        self.annotation_actions = []
+        if self.annotation_toolbar:
+            self.iface.mainWindow().removeToolBar(self.annotation_toolbar)
+            self.annotation_toolbar.deleteLater()
+            self.annotation_toolbar = None
         if self.action:
             self.iface.removeToolBarIcon(self.action)
             self.iface.removePluginMenu("THW Toolbox", self.action)

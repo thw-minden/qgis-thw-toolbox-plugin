@@ -1,3 +1,5 @@
+from qgis.PyQt.QtGui import QColor
+
 from .logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -12,6 +14,9 @@ class THWToolboxSettings:
     LABEL_ENABLE_DEFAULT = True
     LABEL_FONT_SIZE_DEFAULT_UM = 6000
     LABEL_BUFFER_SIZE_DEFAULT_UM = 1000
+    # Annotation colors as "#AARRGGBB" (QColor.NameFormat.HexArgb) incl. transparency
+    ANNOTATION_LINE_COLOR_DEFAULT = "#ffe30613"
+    ANNOTATION_FILL_COLOR_DEFAULT = "#59e30613"
 
     # Save-File values
     PLUGIN_NAME = "taktischezeichen"
@@ -25,6 +30,9 @@ class THWToolboxSettings:
         self._label_enable = self.LABEL_ENABLE_DEFAULT
         self._label_font_size_mm = self.LABEL_FONT_SIZE_DEFAULT_UM / 1000.0
         self._label_buffer_size_mm = self.LABEL_BUFFER_SIZE_DEFAULT_UM / 1000.0
+
+        self._annotation_line_color = self.ANNOTATION_LINE_COLOR_DEFAULT
+        self._annotation_fill_color = self.ANNOTATION_FILL_COLOR_DEFAULT
 
     @property
     def new_icon_scaling_with_map(self) -> bool:
@@ -96,6 +104,22 @@ class THWToolboxSettings:
             raise ValueError("Buffer size must be a positive number")
         self._label_buffer_size_mm = int(value)
 
+    @property
+    def annotation_line_color(self) -> str:
+        return self._annotation_line_color
+
+    @annotation_line_color.setter
+    def annotation_line_color(self, value):
+        self._annotation_line_color = _validated_color(value)
+
+    @property
+    def annotation_fill_color(self) -> str:
+        return self._annotation_fill_color
+
+    @annotation_fill_color.setter
+    def annotation_fill_color(self, value):
+        self._annotation_fill_color = _validated_color(value)
+
     def load_settings(self, proj):
         """Loads settings automatically from the defined private parameters"""
         for attr_name in dir(self):
@@ -147,3 +171,11 @@ class THWToolboxSettings:
                     proj.writeEntry(self.PLUGIN_NAME, config_key, int(value))
 
         proj.setDirty(True)
+
+
+def _validated_color(value) -> str:
+    """Normalize a color (QColor or color string) to "#AARRGGBB"; raise ValueError if invalid."""
+    color = QColor(value)
+    if not color.isValid():
+        raise ValueError(f"Invalid color: {value!r}")
+    return color.name(QColor.NameFormat.HexArgb)
