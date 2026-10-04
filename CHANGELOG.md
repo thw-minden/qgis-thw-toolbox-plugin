@@ -3,41 +3,50 @@
 ## [Unreleased]
 
 ### Hinzugefügt
-- **Annotationen zeichnen** über die neue Werkzeugleiste „THW Toolbox Annotationen“: Punkt (optional mit Beschreibung), Linie, Polygon und gefülltes Polygon (`tools/annotation_tool.py`, `layer/annotations.py`)
-- Annotationen landen in einem QGIS-Annotations-Layer „THW Toolbox Annotationen“ und werden direkt in der Projektdatei gespeichert
-- Standard-Linien- und Füllfarbe (inkl. Transparenz) sowie Standard-Linienbreite für Annotationen im Einstellungs-Dialog; die Linienbreite lässt sich je Objekt im Bearbeiten-Dialog ändern
-- Neuer Dock-Tab **„Annotationen“** listet alle gezeichneten Objekte; ein Klick hebt das Objekt auf der Karte hervor und öffnet einen Dialog zum Ändern von Text, Linien- und Füllfarbe oder zum Löschen (`ui/annotation_dialog.py`)
-- Werkzeug **„Annotation verschieben“**: Punkte sowie einzelne Stützpunkte von Linien und Polygonen per Ziehen verschieben; die Beschreibung eines Punktes wandert mit (`tools/annotation_move_tool.py`)
-  - Linksklick auf eine Linie/einen Polygon-Umriss fügt einen Stützpunkt ein, Rechtsklick auf einen Stützpunkt entfernt ihn (Linien behalten mindestens 2, Polygone mindestens 3 Stützpunkte)
-- Beschreibung auch für Linien und Polygone (im Bearbeiten-Dialog); sie erscheint mittig auf der Linie bzw. in der Fläche und lässt sich mit dem Verschieben-Werkzeug unabhängig von den Stützpunkten an eine andere Stelle ziehen
-- Textgröße von Beschreibungen (Punkt, Linie, Polygon) mit dem Verschieben-Werkzeug über vier Eck-Anfasser am Beschreibungsrahmen skalieren (1–50 mm, Textrand wird mitskaliert; Punktbeschreibungen skalieren um ihre Mitte, Linien-/Polygonbeschreibungen um ihre Unterkante)
-- Auch Beschreibungen von Punkten lassen sich frei verschieben (beim Verschieben des Punktes bleibt der Abstand erhalten); beim Überfahren, Verschieben oder Skalieren einer Beschreibung wird das zugehörige Objekt hervorgehoben
-- Doppelklick auf eine Beschreibung (Verschieben-Werkzeug) öffnet den Bearbeiten-Dialog des zugehörigen Punktes, der Linie oder des Polygons
-- Längenanzeige beim Zeichnen von Linien und Polygonen: neben dem Mauszeiger erscheinen die Länge des aktuellen Segments sowie die Gesamtlänge bzw. Umfang und Fläche (m², ab 1 ha zusätzlich in ha; ellipsoidisch gemessen)
-- Bearbeiten-Dialog zeigt unter den Optionen einen Kasten „Messwerte“: Länge (Linien) bzw. Umfang und Fläche (Polygone); gemeinsame Zahlenformatierung in `util/units.py`
-- Punkte können im Bearbeiten-Dialog einen Radius in Metern erhalten: maßstabsgetreuer, halbtransparenter Kreis um den Punkt (z. B. Gefahren- oder Sperrbereich); Umfang und Fläche des Kreises erscheinen unter „Messwerte“; der Radius kann bereits beim Setzen des Punktes angegeben werden (Standard: kein Radius)
-- Mehrzeilige Beschreibungen für Punkte, Linien und Polygone (Enter = neue Zeile, Strg+Enter bestätigt den Dialog); in der Dock-Liste werden die Zeilen mit „/“ verbunden angezeigt
-- Punktbeschreibungen werden zentriert gesetzt und neu angelegte stehen mittig über dem Punkt; bestehende linksbündige Punktbeschreibungen werden automatisch umgestellt, ohne ihre Position auf der Karte zu verändern
-- Platzhalter `$POS` in Punktbeschreibungen wird auf der Karte durch die MGRS-/UTMRef-Koordinate des Punktes ersetzt (z. B. `32U MB 12345 98765`) und beim Verschieben des Punktes aktualisiert; Auflösung (0,1 / 1 / 10 / 100 m) projektweit im Einstellungs-Dialog; neue Funktion `point_to_mgrs` in `layout/mgrs_grid.py` (inkl. UTM-Sonderzonen Norwegen/Spitzbergen)
-- Bearbeiten-Dialog: einklappbarer Kasten „Koordinaten (MGRS)“ mit allen Punkten/Stützpunkten; im Bearbeiten-Modus lassen sich Koordinaten eintippen sowie Stützpunkte mittig in eine Kante einfügen oder löschen (Mindestanzahl: Linie 2, Polygon 3); ungültige Eingaben werden markiert und verhindern das Übernehmen; neue Funktion `mgrs_to_point` (`layout/mgrs_grid.py`), Tabelle in `ui/coordinate_box.py`
-- Beim Ziehen eines Punktes/Stützpunktes mit dem Verschieben-Werkzeug zeigt ein Hinweis am Mauszeiger dessen aktuelle MGRS-Koordinate (Projekt-Auflösung); gemeinsamer Mauszeiger-Hinweis in `tools/cursor_label.py`
-- Verschieben-Werkzeug zeigt für jede Linie und jedes Polygon den Schwerpunkt (⊕); Ziehen am Schwerpunkt verschiebt das ganze Objekt samt Beschreibung (Vorschau und MGRS-Koordinate des neuen Schwerpunkts am Mauszeiger), Doppelklick öffnet den Bearbeiten-Dialog
-- Doppelklick auf einen Punkt (Verschieben-Werkzeug) öffnet dessen Bearbeiten-Dialog
-- Koordinaten-Tabelle im Bearbeiten-Dialog: Doppelklick auf eine Zeile kopiert die MGRS-Koordinate in die Zwischenablage (außerhalb des Bearbeiten-Modus)
-- Adress-Suche (Alt+S) springt bei Eingabe einer MGRS-/UTMRef-Koordinate direkt dorthin (Zoom auf mind. 1:10.000) und hebt die Position kurz blinkend hervor
-- Export-Symbol in jeder Polygon-Zeile der Dock-Liste „Annotationen“: exportiert dieses Polygon über den vorhandenen Drohnen-KMZ-Exporter (`DjiKmlExporter`) mit Name (Listenbezeichnung, auch als Dateiname vorgeschlagen) und Farbe; temporärer Export-Layer über `annotations.polygon_export_layer`
-- Button „Alle Annotationen als MBTiles exportieren“ unten im Dock-Tab „Annotationen“: rendert den gesamten Annotations-Layer (inkl. Radius-Kreise und Beschreibungen) über den vorhandenen `DjiMbtilesExporter` mit Zoom-Auswahl und Fortschrittsanzeige; `DjiMbtilesExporter.export` akzeptiert dafür jeden Kartenlayer und optional eine eigene Ausdehnung (`annotations.export_extent`)
-- Pfeilspitzen für Linien im Bearbeiten-Dialog: kein Pfeil, am Ende, am Anfang oder an beiden Enden; gefüllte Pfeilspitze in Linienfarbe, Größe abhängig von der Linienbreite, Spitze genau auf dem End-/Anfangspunkt; die Vorschau in der Dock-Liste zeigt die Pfeile mit an; Pfeilgröße einstellbar („automatisch“ = abhängig von der Linienbreite); die Linie endet unter der Pfeilspitze, damit sie nicht über die Spitze hinausragt
-- Größe der Längenbeschriftungen von Linien und Polygonen im Bearbeiten-Dialog einstellbar; Längen- und Radiusbeschriftungen lassen sich mit dem Verschieben-Werkzeug verschieben und skalieren (Doppelklick öffnet das zugehörige Objekt); manuelle Änderungen bleiben beim Bearbeiten der Geometrie erhalten (Versatz relativ zur Kante), eine neue Größe im Dialog setzt von Hand skalierte Beschriftungen zurück, und beim Einfügen/Löschen von Stützpunkten werden die manuellen Anpassungen verworfen
-- Beschreibungs- und Längenrahmen im Verschieben-Werkzeug drehen sich mit dem Text (Figma-ähnlich); Texte lassen sich drehen, indem man knapp außerhalb einer Rahmenecke zieht (eigener Dreh-Mauszeiger, Winkelanzeige, Umschalt = 15°-Schritte); gedreht wird um die Rahmenmitte, gedrehte Längenbeschriftungen behalten ihren Winkel beim Neuaufbau
-- Rückgängig/Wiederherstellen für Annotationen mit Strg+Z bzw. Strg+Y (oder Strg+Umschalt+Z) innerhalb der laufenden Sitzung: Zeichnen, Bearbeiten-Dialog (ein Schritt je Dialog), Löschen, Verschieben, Stützpunkte, Beschriftungen verschieben/skalieren/drehen, Koordinaten-Änderungen; wirkt, wenn die Karte oder das THW-Dock den Fokus hat und kein Vektorlayer im Bearbeitungsmodus ist (dann behält QGIS sein eigenes Strg+Z); bis zu 100 Schritte, wird beim Schließen/Laden eines Projekts geleert (`layer/annotation_history.py`, `tools/undo_shortcuts.py`)
-- Werkzeug **„Text setzen“** (erstes Symbol der Annotations-Werkzeugleiste): freier, mehrzeiliger Text auf der Karte, mittig über dem angeklickten Punkt; `$POS` wird durch die MGRS-Koordinate des Textankers ersetzt und beim Verschieben/Drehen/Skalieren aktualisiert; Texte erscheinen in der Dock-Liste, lassen sich mit dem Verschieben-Werkzeug verschieben, skalieren und drehen, per Doppelklick bearbeiten (Text, Farbe, Koordinate), per MBTiles exportieren und rückgängig machen
+
+#### Annotationen
+Neue Werkzeugleiste **„THW Toolbox Annotationen“** zum Zeichnen und Bearbeiten von Lagekarten-Annotationen. Alle Annotationen liegen im Layer „THW Toolbox Annotationen“ und werden mit der Projektdatei gespeichert.
+
+- **Zeichenwerkzeuge**: Text, Punkt, Linie, Polygon und gefülltes Polygon
+  - Punkte optional mit Beschreibung und Radius, Texte mehrzeilig
+  - Beim Zeichnen zeigt ein Hinweis am Mauszeiger Segmentlänge sowie Gesamtlänge bzw. Umfang und Fläche (ellipsoidisch gemessen)
+- **Bearbeiten-Dialog** (Klick in der Dock-Liste oder Doppelklick auf der Karte)
+  - Mehrzeilige Beschreibung für Punkte, Linien und Polygone; Text für Texte
+  - Farbe inkl. Transparenz, Linienbreite, Füllung
+  - Punkte: maßstabsgetreuer Radius-Kreis in Metern mit eigener Füllfarbe
+  - Linien: Pfeilspitzen am Anfang, Ende oder beiden Enden, Größe einstellbar
+  - Maße auf der Karte: Radius bzw. Segment-/Kantenlängen, Textgröße einstellbar
+  - „Messwerte“: Länge, Umfang, Fläche
+  - „Koordinaten (MGRS)“: einklappbare Tabelle aller Punkte; Doppelklick kopiert eine Koordinate; im Bearbeiten-Modus Koordinaten eingeben sowie Punkte einfügen und löschen (Linien behalten mind. 2, Polygone mind. 3 Punkte)
+  - Löschen des Objekts
+- **Verschieben-Werkzeug**
+  - Punkte und Stützpunkte ziehen (aktuelle MGRS-Koordinate am Mauszeiger); ganze Linien und Polygone am Schwerpunkt ⊕ verschieben
+  - Linksklick auf eine Kante fügt einen Stützpunkt ein, Rechtsklick auf einen Stützpunkt entfernt ihn (Mindestanzahl bleibt gewahrt)
+  - Beschreibungen, Texte und Maßbeschriftungen verschieben, über Eck-Anfasser skalieren und knapp außerhalb einer Ecke drehen (Umschalt = 15°-Schritte); der Rahmen dreht sich mit dem Text, das zugehörige Objekt wird hervorgehoben
+  - Manuell angepasste Maßbeschriftungen behalten Versatz, Größe und Winkel beim Bearbeiten der Geometrie
+  - Doppelklick auf Punkt, Text, Beschreibung oder ⊕ öffnet den Bearbeiten-Dialog
+- **Positionsplatzhalter `$POS`** in Punktbeschreibungen und Texten: wird durch die MGRS-/UTMRef-Koordinate ersetzt (z. B. `32U MB 12345 98765`) und beim Verschieben aktualisiert
+- **Dock-Tab „Annotationen“**: Liste aller Objekte mit Vorschau-Symbol; KMZ-Export je Polygon (drohnentauglich, Name und Farbe bleiben erhalten); MBTiles-Export aller Annotationen
+- **Rückgängig / Wiederherstellen** mit Strg+Z bzw. Strg+Y (oder Strg+Umschalt+Z) für alle Annotations-Änderungen der laufenden Sitzung (bis zu 100 Schritte). Wirkt, wenn Karte oder THW-Dock den Fokus haben und kein Vektorlayer im Bearbeitungsmodus ist – dann behält QGIS sein eigenes Strg+Z.
+
+#### Einstellungen
+- Neue Gruppe „Annotationen“: Standard-Linien- und Füllfarbe (inkl. Transparenz), Standard-Linienbreite
+- **MGRS-Auflösung** (0,1 / 1 / 10 / 100 m) projektweit für `$POS`, Koordinaten-Tabellen und Marker-Details
+
+#### Koordinaten und Suche
+- Adress-Suche (Alt+S) springt bei Eingabe einer MGRS-/UTMRef-Koordinate direkt dorthin und hebt die Position kurz hervor
+- MGRS-Umrechnung in beide Richtungen (`point_to_mgrs`, `mgrs_to_point` in `layout/mgrs_grid.py`) inkl. UTM-Sonderzonen Norwegen/Spitzbergen
+
+### Geändert
+- `DjiMbtilesExporter.export` akzeptiert jeden Kartenlayer (nicht nur Vektorlayer) und optional eine eigene Ausdehnung
+- Millimeter-Einstellungen werden beim Speichern gerundet statt abgeschnitten
 
 ### Behoben
-- Marker-Details zeigen statt „UTM 32N: …E …N“ (fest Zone 32, ohne 100-km-Quadrat) jetzt die vollständige MGRS-/UTMRef-Koordinate, z. B. `32U MB 12345 98765`; Zone und Band ergeben sich aus der Position, die Auflösung folgt der projektweiten Einstellung „MGRS-Auflösung“; „Kopieren“ kopiert nur die Koordinate
-- MBTiles-Zoomstufen-Dialog war zu schmal: Titel und Hinweistext wurden abgeschnitten (Mindestbreite, Höhe passt sich dem umbrochenen Text an)
-- Bei gesetztem Radius ist die Füllfarbe des Kreises im Bearbeiten-Dialog wählbar (Standard: Punktfarbe mit 25 % Deckkraft, folgt der Punktfarbe bis zur eigenen Wahl)
-- Option im Bearbeiten-Dialog, Maße auf der Karte anzuzeigen: Radius eines Punktes (über dem Kreis), Segmentlängen einer Linie bzw. Kantenlängen eines Polygons (mittig an jeder Kante, entlang der Kante ausgerichtet); die Beschriftungen werden bei jeder Geometrieänderung automatisch aktualisiert
+- Marker-Details zeigten „UTM 32N: …E …N“ (fest Zone 32, ohne 100-km-Quadrat und Band); jetzt vollständige MGRS-Koordinate mit Zone und Band aus der Position. „Kopieren“ kopiert nur die Koordinate und ist breit genug für seinen Text
+- MBTiles-Zoomstufen-Dialog war zu schmal; Titel und Hinweistext wurden abgeschnitten
+
+### Technisch
+- Neue Module: `layer/annotations.py` (Annotations-Layer und -Objekte), `layer/annotation_history.py` (Rückgängig/Wiederherstellen), `tools/annotation_tool.py` (Zeichnen), `tools/annotation_move_tool.py` (Verschieben/Bearbeiten), `tools/cursor_label.py` (Hinweis am Mauszeiger), `tools/undo_shortcuts.py` (Strg+Z/Strg+Y), `ui/annotation_dialog.py` (Dialoge), `ui/coordinate_box.py` (Koordinaten-Tabelle), `util/units.py` (Zahlenformatierung)
 
 ## [2.1.1]
 
