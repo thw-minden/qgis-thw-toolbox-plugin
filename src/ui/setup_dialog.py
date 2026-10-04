@@ -732,10 +732,12 @@ class SetupDialog(QWizard):
             return False
 
         logger.debug("Dialog completed")
-        # 0. Set the CRS first so that all following steps (layers, zoom) use the final project CRS
+
+        # 1. Set the CRS first, so that layers are added directly in the target CRS.
+        #    add_*_to_project() keeps QGIS from replacing it with the CRS of the first added layer.
         apply_project_crs(self._plugin, self.parentWidget(), self.crs_pg.get_selected_epsg())
 
-        # 1. Add the static basemap connections to the QGIS browser
+        # 2. Add the static basemap connections to the QGIS browser
         for bm in self.base_map_pg.get_qgis_bms():
             if qgis_connection_exists(bm):
                 logger.debug("Base Map %s already added to QGIS", bm.name)
@@ -743,14 +745,14 @@ class SetupDialog(QWizard):
                 logger.debug("Adding Basemap %s as permanent connection", bm.name)
                 install_qgis_connection(bm)
 
-        # 2. Add the basemaps to the project
+        # 3. Add the basemaps to the project
         active_bm = self.base_map_pg.get_active_bm()
         for bm in self.base_map_pg.get_project_bms():
             if exists_in_project(bm):
                 continue
             add_basemap_to_project(bm, visible=bm == active_bm)
 
-        # 3. Add the additional layer connections to the QGIS browser
+        # 4. Add the additional layer connections to the QGIS browser
         for map_layer in self.add_layer_pg.get_qgis_layers():
             if qgis_connection_exists(map_layer):
                 logger.debug("Additional Layer %s already added to QGIS", map_layer.name)
@@ -759,17 +761,17 @@ class SetupDialog(QWizard):
                 install_qgis_connection(map_layer)
         reload_browser()
 
-        # 4. Add the additional layers to the project
+        # 5. Add the additional layers to the project
         active_layers = self.add_layer_pg.get_active_layers()
         for map_layer in self.add_layer_pg.get_project_layers():
             if exists_in_project(map_layer):
                 continue
             add_layer_to_project(map_layer, visible=map_layer in active_layers)
 
-        # 5. Zoom to Germany if the setup is run the first time
+        # 6. Zoom to Germany if the setup is run the first time
         if not self._plugin.action.isChecked():
             zoom_to_germany()
-            # 6. Activate the Plugin if not already done
+            # 7. Activate the Plugin if not already done
             self._plugin.activate()
 
         # Collapse all layers in the Layer view
