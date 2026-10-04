@@ -80,7 +80,8 @@ class AnnotationEditDialog(QDialog):
         layout = QVBoxLayout(self)
 
         # Label above the text field so the field can use the full dialog width
-        self._name_edit = description_edit(entry.name, for_point=entry.kind == KIND_POINT)
+        # Points and standalone texts support $POS
+        self._name_edit = description_edit(entry.name, for_point=entry.kind in (KIND_POINT, KIND_TEXT))
         name_label = QLabel(_TEXT_LABELS.get(entry.kind, "Beschreibung (auf der Karte)"))
         name_label.setBuddy(self._name_edit)
         layout.addWidget(name_label)
@@ -323,6 +324,40 @@ class PointCreateDialog(QDialog):
         return self._radius_spin.value()
 
 
+class TextCreateDialog(QDialog):
+    """Asked when placing a standalone text: the (required) text, $POS allowed."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Text setzen")
+        self.setMinimumWidth(320)
+
+        layout = QVBoxLayout(self)
+        self._text_edit = description_edit("", placeholder=_TEXT_PLACEHOLDER)
+        text_label = QLabel("Text (auf der Karte)")
+        text_label.setBuddy(self._text_edit)
+        layout.addWidget(text_label)
+        layout.addWidget(self._text_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        ok_button.setEnabled(False)
+        # A text annotation needs text
+        self._text_edit.textChanged.connect(lambda: ok_button.setEnabled(bool(self.text().strip())))
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        _add_confirm_shortcut(self)
+        self._text_edit.setFocus()
+
+    def accept(self):
+        if self.text().strip():  # Ctrl+Enter bypasses the disabled OK button
+            super().accept()
+
+    def text(self) -> str:
+        return self._text_edit.toPlainText()
+
+
 _PLACEHOLDER = "optional – mehrzeilig möglich, Strg+Enter bestätigt"
 # Points additionally support $POS (replaced by the MGRS coordinate on the map)
 _POINT_PLACEHOLDER = (
@@ -330,12 +365,17 @@ _POINT_PLACEHOLDER = (
     f"{POSITION_PLACEHOLDER} wird auf der Karte durch die MGRS-Koordinate ersetzt\n"
     "mehrzeilig möglich, Strg+Enter bestätigt"
 )
+_TEXT_PLACEHOLDER = (
+    f"z. B. „Einsatzabschnitt Nord“ oder „Sammelstelle {POSITION_PLACEHOLDER}“\n"
+    f"{POSITION_PLACEHOLDER} wird auf der Karte durch die MGRS-Koordinate ersetzt\n"
+    "mehrzeilig möglich, Strg+Enter bestätigt"
+)
 
 
-def description_edit(text: str, for_point: bool = False) -> QPlainTextEdit:
+def description_edit(text: str, for_point: bool = False, placeholder: str | None = None) -> QPlainTextEdit:
     """Multi-line description field: Enter adds a line, Tab moves on (Ctrl+Enter confirms the dialog)."""
     edit = QPlainTextEdit(text)
-    edit.setPlaceholderText(_POINT_PLACEHOLDER if for_point else _PLACEHOLDER)
+    edit.setPlaceholderText(placeholder or (_POINT_PLACEHOLDER if for_point else _PLACEHOLDER))
     edit.setTabChangesFocus(True)
     line_height = edit.fontMetrics().lineSpacing()
     edit.setFixedHeight(line_height * 4 + 12)

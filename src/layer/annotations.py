@@ -195,6 +195,16 @@ class NodeHandle:
 # ----------------------------------------------------------------------
 
 _history = None  # AnnotationHistory, set by the plugin (see set_history)
+# Current MGRS resolution (m) for $POS where callers do not pass one (e.g. moving a text)
+_mgrs_resolution = lambda: 1.0  # noqa: E731
+
+
+def set_mgrs_resolution_provider(provider) -> None:
+    """Callable returning the project's MGRS resolution in meters (used to keep $POS texts current)."""
+    global _mgrs_resolution
+    _mgrs_resolution = provider or (lambda: 1.0)
+
+
 _history_depth = 0  # > 0 while an undo step is being recorded — nested changes join it
 
 
@@ -332,6 +342,39 @@ def add_polygon(
     _register_and_finish(layer, layer.addItem(item))
 
 
+@_undoable("Text setzen")
+def add_text(
+    layer: QgsAnnotationLayer,
+    point: QgsPointXY,
+    text: str,
+    color: QColor | None = None,
+    mgrs_resolution_m: float = 1.0,
+) -> str | None:
+    """Place a standalone text; ``point`` (layer CRS) is its anchor at the bottom center of the text.
+
+    ``$POS`` in the text is replaced by the MGRS coordinate of the anchor and kept up to date
+    when the text is moved. Returns the new item id (None for an empty text).
+    """
+    text = text.strip()
+    if not text:
+        return None
+    fmt = _description_format()
+    if color is not None:
+        fmt.setColor(color)
+    text_item = QgsAnnotationPointTextItem(text, point)
+    text_item.setFormat(fmt)
+    text_item.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+    text_item.setZIndex(_Z_TEXT)
+    item_id = layer.addItem(text_item)
+
+    meta = _read_meta(layer)
+    _register(meta, item_id)
+    _set_text_with_position(layer, meta, item_id, text, mgrs_resolution_m)
+    _write_meta(layer, meta)
+    _finish(layer)
+    return item_id
+
+
 # ----------------------------------------------------------------------
 # Listing / editing existing items
 # ----------------------------------------------------------------------
@@ -446,7 +489,7 @@ def update_entry(
         if not name:
             delete_entry(layer, item_id)
             return
-        item.setText(name)
+        _set_text_with_position(layer, meta, item_id, name, mgrs_resolution_m)
         fmt = item.format()
         fmt.setColor(line_color)
         item.setFormat(fmt)
@@ -792,6 +835,7 @@ def rotate_label(layer: QgsAnnotationLayer, label_id: str, clockwise_deg: float,
         QgsAnnotationItemEditContext(),
     )
     _record_dimension_override(layer, label_id)
+    _update_position_text(layer, label_id)
     _finish(layer)
     return True
 
@@ -877,6 +921,7 @@ def scale_label(layer: QgsAnnotationLayer, label_id: str, factor: float, pivot: 
         dy = (anchor.y() - pivot.y()) * (factor - 1)
         layer.applyEditV2(QgsAnnotationItemEditOperationTranslateItem(label_id, dx, dy), QgsAnnotationItemEditContext())
     _record_dimension_override(layer, label_id)
+    _update_position_text(layer, label_id)
     _finish(layer)
     return True
 
@@ -891,6 +936,7 @@ def translate_label(layer: QgsAnnotationLayer, label_id: str, dx: float, dy: flo
         logger.warning("Beschreibung %s konnte nicht verschoben werden: %s", label_id, result)
         return False
     _record_dimension_override(layer, label_id)
+    _update_position_text(layer, label_id)  # a moved standalone text keeps its $POS current
     _finish(layer)
     return True
 
@@ -994,12 +1040,18 @@ def translate_item(layer: QgsAnnotationLayer, item_id: str, dx: float, dy: float
 
 def min_vertices(kind: str) -> int:
     """Smallest vertex count an object of ``kind`` may have (0 for kinds without editable vertices)."""
-    return {KIND_POINT: 1, KIND_LINE: MIN_LINE_VERTICES, KIND_POLYGON: MIN_POLYGON_VERTICES}.get(kind, 0)
+    return {KIND_POINT: 1, KIND_TEXT: 1, KIND_LINE: MIN_LINE_VERTICES, KIND_POLYGON: MIN_POLYGON_VERTICES}.get(kind, 0)
 
 
 def vertex_points(layer: QgsAnnotationLayer, item_id: str) -> list[QgsPointXY]:
-    """Vertices of a point/line/polygon in layer CRS (polygon ring without the repeated closing vertex)."""
+    """Vertices of a point/line/polygon in layer CRS (polygon ring without the repeated closing vertex).
+
+    A standalone text has one "vertex": its anchor.
+    """
     kind = item_kind(layer, item_id)
+    if kind == KIND_TEXT:
+        position = _item_position(layer, item_id)
+        return [position] if position is not None else []
     geom = entry_geometry(layer, item_id) if kind in (KIND_POINT, KIND_LINE, KIND_POLYGON) else None
     if geom is None or geom.isEmpty():
         return []
@@ -1024,10 +1076,13 @@ def set_vertices(
     if kind is None or len(points) < max(1, min_vertices(kind)):
         return False
 
-    if kind == KIND_POINT:
+    if kind in (KIND_POINT, KIND_TEXT):
         current = vertex_points(layer, item_id)
         if not current:
             return False
+        if kind == KIND_TEXT:
+            dx, dy = points[0].x() - current[0].x(), points[0].y() - current[0].y()
+            return translate_label(layer, item_id, dx, dy)
         return move_node(layer, NodeHandle(item_id, QgsVertexId(0, 0, 0), current[0]), points[0], mgrs_resolution_m)
 
     # Replace the item by an edited copy, so the layer's spatial index is updated as well
@@ -1104,11 +1159,13 @@ def _entry_for(layer, meta, item_id, item, kind) -> AnnotationEntry:
             line_width = symbol_layer.strokeWidth()
             if symbol_layer.brushStyle() != Qt.BrushStyle.NoBrush:
                 fill_color = symbol_layer.fillColor()
-    elif kind == KIND_TEXT:
+    map_text = ""
+    if kind == KIND_TEXT:
         line_color = item.format().color()
         name = _strip_indent(item.text())
+        if item_meta.get("desc_template"):
+            map_text, name = name, item_meta["desc_template"]
 
-    map_text = ""
     if kind != KIND_TEXT:
         label = layer.item(item_meta.get("label_id", "")) if item_meta.get("label_id") else None
         if label is not None:
@@ -1189,24 +1246,57 @@ def _set_description(
 
 
 def _resolve_position(layer, item_id: str, template: str, mgrs_resolution_m: float) -> str:
-    """``template`` with ``$POS`` replaced by the MGRS coordinate of the point ``item_id``."""
-    geom = entry_geometry(layer, item_id)
+    """``template`` with ``$POS`` replaced by the MGRS coordinate of ``item_id``.
+
+    The position is the point of a point marker, or the anchor of a standalone text.
+    """
+    position = _item_position(layer, item_id)
     mgrs = None
-    if geom is not None and not geom.isEmpty():
+    if position is not None:
         try:
-            mgrs = point_to_mgrs(geom.asPoint(), layer.crs(), mgrs_resolution_m)
+            mgrs = point_to_mgrs(position, layer.crs(), mgrs_resolution_m)
         except Exception:
             logger.exception("MGRS-Koordinate konnte nicht berechnet werden")
     return template.replace(POSITION_PLACEHOLDER, mgrs or _POSITION_UNAVAILABLE)
 
 
-def _update_position_text(layer, item_id: str, mgrs_resolution_m: float) -> None:
-    """Re-render a point description containing ``$POS`` (after a move or resolution change)."""
+def _item_position(layer, item_id: str) -> QgsPointXY | None:
+    item = layer.item(item_id)
+    if isinstance(item, QgsAnnotationPointTextItem):
+        return QgsPointXY(item.point())
+    geom = entry_geometry(layer, item_id)
+    return geom.asPoint() if geom is not None and not geom.isEmpty() else None
+
+
+def _set_text_with_position(layer, meta, item_id: str, text: str, mgrs_resolution_m: float) -> None:
+    """Set a standalone text, keeping a ``$POS`` template in the metadata."""
+    if POSITION_PLACEHOLDER in text:
+        meta[item_id]["desc_template"] = text
+        text = _resolve_position(layer, item_id, text, mgrs_resolution_m)
+    else:
+        meta[item_id].pop("desc_template", None)
+    layer.item(item_id).setText(text)
+
+
+def _update_position_text(layer, item_id: str, mgrs_resolution_m: float | None = None) -> None:
+    """Re-render a ``$POS`` text (after a move or resolution change).
+
+    ``item_id`` is a point (its linked description is updated) or a standalone text
+    (updated itself). No-op for objects without a ``$POS`` template.
+    """
+    if mgrs_resolution_m is None:
+        mgrs_resolution_m = _mgrs_resolution()
     item_meta = _read_meta(layer).get(item_id, {})
     template = item_meta.get("desc_template")
-    label = layer.item(item_meta.get("label_id", "")) if item_meta.get("label_id") else None
-    if template and label is not None:
-        label.setText(_resolve_position(layer, item_id, template, mgrs_resolution_m))
+    if not template:
+        return
+    item = layer.item(item_id)
+    if isinstance(item, QgsAnnotationPointTextItem):
+        target = item
+    else:
+        target = layer.item(item_meta.get("label_id", "")) if item_meta.get("label_id") else None
+    if target is not None:
+        target.setText(_resolve_position(layer, item_id, template, mgrs_resolution_m))
 
 
 def refresh_positions(layer: QgsAnnotationLayer, mgrs_resolution_m: float) -> None:

@@ -45,6 +45,7 @@ from .tools.annotation_tool import (
     MODE_POINT,
     MODE_POLYGON,
     MODE_POLYGON_FILLED,
+    MODE_TEXT,
     AnnotationTool,
 )
 from .tools.canvas_drop_filter import CanvasDropFilter
@@ -231,6 +232,7 @@ class THWToolboxPlugin:
             )
 
         for icon_name, text, tool in (
+            ("annotation_text.svg", "Text setzen", draw_tool(MODE_TEXT)),
             ("annotation_point.svg", "Punkt setzen", draw_tool(MODE_POINT)),
             ("annotation_line.svg", "Linie zeichnen", draw_tool(MODE_LINE)),
             ("annotation_polygon.svg", "Polygon zeichnen", draw_tool(MODE_POLYGON)),
@@ -261,6 +263,8 @@ class THWToolboxPlugin:
     def _init_annotation_undo(self):
         """Ctrl+Z / Ctrl+Y (Ctrl+Umschalt+Z) machen Annotations-Änderungen rückgängig bzw. stellen sie wieder her."""
         annotations.set_history(self.annotation_history)
+        # Moving/rotating a $POS text keeps its coordinate current at the project's resolution
+        annotations.set_mgrs_resolution_provider(lambda: self.settings.annotation_mgrs_resolution_m)
         self.undo_filter = UndoShortcutFilter(
             scopes=lambda: [self.canvas, self.dock],
             is_available=self._annotation_undo_available,
@@ -520,6 +524,7 @@ class THWToolboxPlugin:
             QApplication.instance().removeEventFilter(self.undo_filter)
             self.undo_filter = None
         annotations.set_history(None)
+        annotations.set_mgrs_resolution_provider(None)
         self.annotation_history.clear()
 
         # Räume temporäre Dateien auf

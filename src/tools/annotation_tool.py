@@ -8,18 +8,20 @@ from qgis.PyQt.QtWidgets import QDialog
 
 from ..layer import annotations
 from ..logging_utils import get_logger
-from ..ui.annotation_dialog import PointCreateDialog
+from ..ui.annotation_dialog import PointCreateDialog, TextCreateDialog
 from ..util.units import format_area, format_meters
 from .cursor_label import CursorLabel
 
 logger = get_logger(__name__)
 
+MODE_TEXT = "text"
 MODE_POINT = "point"
 MODE_LINE = "line"
 MODE_POLYGON = "polygon"
 MODE_POLYGON_FILLED = "polygon_filled"
 
 _HINTS = {
+    MODE_TEXT: "Text setzen: Linksklick auf die Karte (der Text steht mittig über dem angeklickten Punkt).",
     MODE_POINT: "Punkt setzen: Linksklick auf die Karte.",
     MODE_LINE: "Linie zeichnen: Linksklick = Stützpunkt, Rechtsklick/Enter = fertig, "
     "Rücktaste = letzten Punkt entfernen, Esc = abbrechen.",
@@ -89,6 +91,9 @@ class AnnotationTool(QgsMapTool):
             point = e.snapPoint()
             if self.mode == MODE_POINT:
                 self._create_point(point)
+                return
+            if self.mode == MODE_TEXT:
+                self._create_text(point)
                 return
             self._points.append(point)
             self._update_rubber_band(point)
@@ -220,8 +225,21 @@ class AnnotationTool(QgsMapTool):
             )
             self._notify_created()
 
+    def _create_text(self, point: QgsPointXY):
+        layer = self._target_layer()
+        if layer is None:
+            return
+        dialog = TextCreateDialog(self.canvas.window())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        pts = self._to_layer_crs(layer, [point])
+        if pts and annotations.add_text(
+            layer, pts[0], dialog.text(), mgrs_resolution_m=self.settings.annotation_mgrs_resolution_m
+        ):
+            self._notify_created()
+
     def _finish_shape(self):
-        if self.mode == MODE_POINT:
+        if self.mode in (MODE_POINT, MODE_TEXT):
             return
         points = self._points
         if len(points) < _MIN_POINTS[self.mode]:

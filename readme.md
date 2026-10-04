@@ -35,6 +35,7 @@ Ein QGIS-Plugin für das einfache Hinzufügen und Verwalten von taktischen Zeich
 ### Annotationen
 
 - **Punkt setzen** - optional mit Beschreibungstext und Radius (Standard: kein Radius)
+- **Text setzen** - freier Text auf der Karte (mehrzeilig, `$POS` für die MGRS-Koordinate); verschieben, skalieren, drehen und bearbeiten wie Beschreibungen
 - **Mehrzeilige Beschreibungen** - Enter fügt eine neue Zeile ein, Strg+Enter bestätigt den Dialog
 - **Position in der Beschreibung** - `$POS` in einer Punktbeschreibung zeigt die MGRS-/UTMRef-Koordinate des Punktes (z. B. `32U MB 12345 98765`) und wandert beim Verschieben mit; Auflösung (0,1 m bis 100 m) im Einstellungs-Dialog
 - **Koordinaten im Bearbeiten-Dialog** - einklappbare Liste der MGRS-Koordinaten aller Punkte; im Bearbeiten-Modus Koordinaten eingeben, Punkte einfügen oder löschen (Linien behalten mind. 2, Polygone mind. 3 Punkte)
