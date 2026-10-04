@@ -53,5 +53,18 @@
     {"id": "ballon1000", "name": "Leuchtballon 1000 W", "leistung_w": 1000, "radius": 20, "zeichen": "Maßnahmen/Beleuchten.svg"},
     {"id": "ballon2000", "name": "Leuchtballon 2000 W", "leistung_w": 2000, "radius": 30, "zeichen": "Maßnahmen/Beleuchten.svg"},
     {"id": "lichtmast", "name": "Lichtmast 4 × 1000 W", "leistung_w": 4000, "radius": 40, "zeichen": "THW_Fahrzeuge/Anhänger_Lichtmast.svg"}
+  ],
+  "_hinweis_formen": "Gebiete und Pfeile werden frei gezeichnet; der Typ legt nur Name und Farbe fest.",
+  "gebiete": [
+    {"id": "abschnitt", "name": "Einsatzabschnitt", "farbe": "#1565c0"},
+    {"id": "gefahr", "name": "Gefahrenbereich", "farbe": "#c62828"},
+    {"id": "bereitstellung", "name": "Bereitstellungsraum", "farbe": "#2e7d32"},
+    {"id": "sperrung", "name": "Absperrbereich", "farbe": "#ef6c00"}
+  ],
+  "pfeile": [
+    {"id": "rot", "name": "Pfeil rot", "farbe": "#c62828"},
+    {"id": "blau", "name": "Pfeil blau", "farbe": "#1565c0"},
+    {"id": "schwarz", "name": "Pfeil schwarz", "farbe": "#212121"},
+    {"id": "gruen", "name": "Pfeil grün", "farbe": "#2e7d32"}
   ]
 }

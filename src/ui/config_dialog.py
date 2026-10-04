@@ -25,14 +25,18 @@ class ConfigDialog(QDialog):
     accepted and settings were applied; False if cancelled.
     """
 
-    def __init__(self, settings, parent=None):
+    def __init__(self, settings, parent=None, planning=None):
         super().__init__(parent)
         self._settings = settings
+        # Objektplanungs-Controller: hält die (nicht projektgebundene) Hotbar-Einstellung
+        self._planning = planning
         self.setWindowTitle("THW Toolbox Einstellungen")
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._build_default_icon_group())
         layout.addWidget(self._build_label_group())
+        if planning is not None:
+            layout.addWidget(self._build_canvas_group())
 
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         layout.addWidget(button_box)
@@ -105,7 +109,22 @@ class ConfigDialog(QDialog):
         box.setLayout(form)
         return box
 
+    def _build_canvas_group(self) -> QGroupBox:
+        box = QGroupBox("Karte")
+        form = QFormLayout()
+        self._cb_hotbar = QCheckBox()
+        self._cb_hotbar.setChecked(self._planning.hotbar_enabled)
+        self._cb_hotbar.setToolTip(
+            "Schwebende Werkzeugleiste unten auf der Karte. Ohne sie bleiben die Werkzeuge im Dock „Objektplanung“."
+        )
+        form.addRow("Hotbar auf der Karte anzeigen", self._cb_hotbar)
+        box.setLayout(form)
+        return box
+
     def _apply_to_settings(self) -> None:
+        if self._planning is not None:
+            self._planning.set_hotbar_enabled(self._cb_hotbar.isChecked())
+
         self._settings.new_icon_scaling_with_map = not self._cb_scale.isChecked()
         self._settings.new_icon_fixed_size = self._cb_fixed_size.isChecked()
         self._settings.new_icon_size = self._spin_icon_size.value()

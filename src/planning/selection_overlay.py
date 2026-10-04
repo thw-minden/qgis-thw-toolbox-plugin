@@ -18,7 +18,8 @@ HANDLE_PX = 8.0
 # Darunter verdecken die Eckpunkte das Objekt → nur Umriss
 MIN_HANDLE_FRAME_PX = 24.0
 _BADGE_GAP_PX = 8.0
-_POINT_BOX_PX = 7.0
+# Ring um Punkt-Objekte: etwas größer als ihr taktisches Zeichen (Ø 8–9 mm)
+_POINT_RING_MM = 5.5
 
 
 class SelectionOverlay(QgsMapCanvasItem):
@@ -34,7 +35,8 @@ class SelectionOverlay(QgsMapCanvasItem):
         super().__init__(canvas)
         self._canvas = canvas
         self.selected: list[QgsGeometry] = []
-        self.hover: QgsGeometry | None = None
+        # Hover bzw. beim Aufziehen alle Objekte, die der Rahmen gerade erfasst
+        self.hovers: list[QgsGeometry] = []
         self.ghosts: list[QgsGeometry] = []
         self.guides: list[QgsGeometry] = []
         self.frame: list[QgsPointXY] | None = None
@@ -105,9 +107,13 @@ class SelectionOverlay(QgsMapCanvasItem):
             points.extend(self.to_px(p) for p in pts)
         return rings, lines, points
 
+    def _point_radius_px(self) -> float:
+        return _POINT_RING_MM * self._canvas.mapSettings().outputDpi() / 25.4
+
     def _outline(self, painter: QPainter, geom: QgsGeometry, width: float, halo: bool, fill: QColor | None = None):
         rings, lines, points = self._paths(geom)
-        pens = ([QPen(_HALO, width + 2.0)] if halo else []) + [QPen(_BLUE, width)]
+        radius = self._point_radius_px()
+        pens = ([QPen(_HALO, width + 2.5)] if halo else []) + [QPen(_BLUE, width)]
         for pen in pens:
             pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
             painter.setPen(pen)
@@ -118,20 +124,20 @@ class SelectionOverlay(QgsMapCanvasItem):
             for line in lines:
                 painter.drawPolyline(line)
             for p in points:
-                painter.drawRect(
-                    QRectF(p.x() - _POINT_BOX_PX, p.y() - _POINT_BOX_PX, 2 * _POINT_BOX_PX, 2 * _POINT_BOX_PX)
-                )
+                painter.drawEllipse(p, radius, radius)
 
     def paint(self, painter, option=None, widget=None):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-        if self.hover is not None:
-            self._outline(painter, self.hover, 1.0, halo=False)
+        for geom in self.hovers:
+            self._outline(painter, geom, 1.5, halo=False)
         for geom in self.ghosts:
             self._outline(painter, geom, 1.5, halo=True, fill=_GHOST_FILL)
         if not self.ghosts:
+            # Jedes ausgewählte Objekt kräftig umranden – bei Mehrfachauswahl sieht man so,
+            # was dazugehört, und nicht nur den Gruppenrahmen
             for geom in self.selected:
-                self._outline(painter, geom, 1.5, halo=True)
+                self._outline(painter, geom, 2.5, halo=True)
 
         guide_pen = QPen(_GUIDE, 1.0, Qt.PenStyle.DashLine)
         for geom in self.guides:
@@ -168,6 +174,8 @@ class SelectionOverlay(QgsMapCanvasItem):
             painter.setPen(QPen(_BLUE, 1.0))
             painter.setBrush(QBrush(_MARQUEE_FILL))
             painter.drawRect(rect)
+            if self.badge and not corners:
+                self._draw_badge(painter, [rect.topLeft(), rect.topRight(), rect.bottomRight(), rect.bottomLeft()])
 
     def _draw_badge(self, painter: QPainter, corners: list[QPointF]):
         font = QFont(painter.font())

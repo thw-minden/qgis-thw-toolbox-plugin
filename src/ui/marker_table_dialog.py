@@ -8,6 +8,7 @@ from qgis.PyQt.QtCore import QEvent, QSize, Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QBrush, QColor, QIcon
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QComboBox,
     QDialog,
     QHBoxLayout,
@@ -22,6 +23,7 @@ from qgis.PyQt.QtWidgets import (
 
 from ..logging_utils import get_logger
 from ..util.coordinates import WGS84, parse_position, to_mgrs
+from .marker_import_dialog import MarkerImportDialog
 from .symbol_picker import SymbolPickerDialog, symbol_catalog
 
 logger = get_logger(__name__)
@@ -148,6 +150,14 @@ class MarkerTableDialog(QDialog):
         btn_delete = QPushButton("Löschen")
         btn_delete.clicked.connect(self._delete_selected)
         buttons.addWidget(btn_delete)
+        btn_import = QPushButton("Importieren …")
+        btn_import.setToolTip("Marker aus einer CSV- oder Excel-Datei übernehmen")
+        btn_import.clicked.connect(self._import_file)
+        buttons.addWidget(btn_import)
+        btn_template = QPushButton("Vorlage speichern …")
+        btn_template.setToolTip("Beispieltabelle (Excel oder CSV) zum Ausfüllen und anschließenden Importieren")
+        btn_template.clicked.connect(self._save_import_template)
+        buttons.addWidget(btn_template)
         buttons.addStretch()
         btn_close = QPushButton("Schließen")
         btn_close.clicked.connect(self.close)
@@ -464,6 +474,63 @@ class MarkerTableDialog(QDialog):
         else:
             self._try_create(row)
         self._ensure_empty_row()
+
+    def _save_import_template(self):
+        path = MarkerImportDialog.save_template(self)
+        if path:
+            self.status_label.setText(f"Vorlage gespeichert: {path} – ausfüllen und über „Importieren …“ einlesen.")
+
+    def _import_file(self):
+        """Zeilen aus CSV/Excel übernehmen: vollständige werden Marker, der Rest bleibt als Entwurf stehen."""
+        rows = MarkerImportDialog.ask(self._catalog, self)
+        if not rows:
+            return
+        self.status_label.clear()
+        created = failed = 0
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            with self._silent():
+                last = self.table.rowCount() - 1
+                if last >= 0 and self._fid(last) is None and not self._is_draft_with_content(last):
+                    self.table.removeRow(last)
+                for values in rows:
+                    values.pop("unknown", None)
+                    path, point, label = values["path"], values["point"], values["label"]
+                    feature = None
+                    if path and point is not None:
+                        feature = self._apply(
+                            lambda v=values: self._plugin.create_marker(
+                                v["path"], v["point"], WGS84, label=v["label"] or None, show_label=v["show"]
+                            )
+                        )
+                        if feature is None:
+                            failed += 1
+                    if feature is not None:
+                        created += 1
+                        self._append_row(
+                            fid=feature.id(),
+                            path=path,
+                            label=label or feature["label"],
+                            show=values["show"],
+                            point=point,
+                        )
+                        continue
+                    self._append_row(**values)
+                    pos_item = self.table.item(self.table.rowCount() - 1, COL_POS)
+                    if point is None and values["pos_text"].strip():
+                        self._read_position_cell(pos_item)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._ensure_empty_row()
+        self.table.scrollToBottom()
+
+        drafts = len(rows) - created
+        text = f"Importierte Marker: {created}."
+        if drafts:
+            text += f" Noch unvollständige Zeilen: {drafts} (Zeichen oder Position ergänzen)."
+        if failed:
+            text += f" Nicht angelegt: {failed}."
+        self.status_label.setText(text)
 
     def _delete_selected(self):
         rows = sorted({index.row() for index in self.table.selectedIndexes()})

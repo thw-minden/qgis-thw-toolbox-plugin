@@ -14,7 +14,14 @@ from ..layer.renderer import (
     svg_symbol_layer,
 )
 from ._feature_search import find_nearest_feature
-from .selection_frame import HANDLE_SIZE_PX, MarkerFrame, SelectionFrameItem, resize_cursor, rotate_cursor
+from .selection_frame import (
+    HANDLE_SIZE_PX,
+    MarkerFrame,
+    SelectionFrameItem,
+    compute_frame,
+    resize_cursor,
+    rotate_cursor,
+)
 
 # Grab distance around a corner handle (pixels)
 _HANDLE_GRAB_PX = HANDLE_SIZE_PX / 2.0 + 3.0
@@ -23,7 +30,7 @@ _ROTATE_ZONE_PX = 22.0
 # Below this anchor→handle distance, scaling around the anchor gets too jumpy
 _MIN_PIVOT_DISTANCE_PX = 12.0
 # Same range as the FeatureDock size spinbox
-_MIN_SIZE = 10
+_MIN_SIZE = 1
 _MAX_SIZE = 2000
 # Shift + rotate snaps to this step (like Figma)
 _ROTATION_SNAP_DEG = 15
@@ -63,6 +70,11 @@ class MoveTool(QgsMapTool):
     dragging just outside a corner rotates it (Shift snaps to 15°).
     While moving, the layer is held in editing mode and committed on
     release. Hover detection switches the cursor accordingly.
+
+    Usually not the active canvas tool itself: the shared selection tool
+    (planning.tools.SelectTool) forwards presses on markers to the canvas
+    event handlers here, so markers and planning objects share one cursor.
+    `cursor_proxy` then receives the cursor this tool would show.
     """
 
     def __init__(self, canvas, layer_manager):
@@ -72,6 +84,7 @@ class MoveTool(QgsMapTool):
         self.layer = layer_manager.layer
         self.moving_feature = None
         self.is_move_mode = False
+        self.cursor_proxy = None
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self.is_panning = False
         self._pan_dragged = False
@@ -101,6 +114,35 @@ class MoveTool(QgsMapTool):
             self.layer = None
             return False
         return True
+
+    def setCursor(self, cursor):
+        super().setCursor(cursor)
+        if self.cursor_proxy is not None:
+            self.cursor_proxy(cursor)
+
+    def frame_hit(self, pos: QPointF):
+        """Part of the selected marker's frame under `pos` (see `_hit_frame`), or None."""
+        return self._hit_frame(pos) if self._layer_is_usable() else None
+
+    def cursor_for(self, hit):
+        return self._cursor_for(hit)
+
+    def marker_at(self, map_point: QgsPointXY):
+        """Marker whose drawn symbol lies under `map_point` (canvas CRS), or None."""
+        if not self._layer_is_usable():
+            return None
+        return find_nearest_feature(self.layer, self.canvas, map_point)
+
+    def outline(self, feature) -> QgsGeometry:
+        """Frame of `feature`'s drawn symbol as a polygon in canvas CRS (its point if there is no frame)."""
+        map_point = self.canvas.mapSettings().layerToMapCoordinates(self.layer, feature.geometry().asPoint())
+        symbol = feature_symbol(self.layer, category_value(feature))
+        frame = compute_frame(self.canvas, map_point, symbol) if symbol is not None else None
+        if frame is None:
+            return QgsGeometry.fromPointXY(map_point)
+        to_map = self.canvas.getCoordinateTransform()
+        ring = [QgsPointXY(to_map.toMapCoordinates(round(c.x()), round(c.y()))) for c in frame.corners]
+        return QgsGeometry.fromPolygonXY([ring + [ring[0]]])
 
     def _feature_dock(self):
         return getattr(getattr(self.layer_manager, "ident_tool", None), "feature_dock", None)

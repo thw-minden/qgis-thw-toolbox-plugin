@@ -1,10 +1,10 @@
-"""Dock der Objektplanung: Zelte, Fahrzeuge, Flächen-Kapazität, Strom, Beleuchtung, Auswahl, Bilanz."""
+"""Dock der Objektplanung: Zelte, Fahrzeuge, Strom, Beleuchtung, Gebiete und Pfeile, Auswahl, Bilanz."""
 
 from collections import Counter
 from dataclasses import dataclass
 
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QBrush, QColor
+from qgis.PyQt.QtGui import QBrush, QColor, QDrag
 from qgis.PyQt.QtWidgets import (
     QComboBox,
     QDockWidget,
@@ -23,7 +23,16 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from .catalog import fmt_m
-from .layers import ROLE_DISTRIBUTORS, ROLE_GENERATORS, ROLE_LIGHTS, ROLE_TENTS, ROLE_VEHICLES
+from .drop_filter import object_mime
+from .layers import (
+    ROLE_ARROWS,
+    ROLE_DISTRIBUTORS,
+    ROLE_GENERATORS,
+    ROLE_LIGHTS,
+    ROLE_TENTS,
+    ROLE_VEHICLES,
+    ROLE_ZONES,
+)
 
 _PLACE_HINT = (
     "Klick setzt {obj} · R / Shift+R dreht ±15° · Strg+Mausrad ±5° · Rechtsklick 90° · "
@@ -39,9 +48,17 @@ _HINTS = {
     "distributor": "Klick setzt Verteiler · Esc zurück zur Auswahl",
     "generator": "Klick setzt Stromerzeuger · Leitungen von hier aus verlegen · Esc zurück zur Auswahl",
     "light": "Klick setzt Leuchte (Kreis = ausgeleuchteter Bereich) · Esc zurück zur Auswahl",
-    "select": "Klick wählt aus · Shift+Klick ergänzt · Rahmen aufziehen wählt mehrere · Ziehen verschiebt "
+    "zone": "Eckpunkte des Gebiets anklicken · Rechtsklick / Enter / Doppelklick schließt ab · "
+    "Rücktaste entfernt Punkt · Esc verwirft",
+    "arrow": "Start anklicken, dann den Verlauf · Rechtsklick / Enter / Doppelklick setzt die Spitze · "
+    "Rücktaste entfernt Punkt · Esc verwirft",
+    "select": "Klick wählt aus – auch taktische Zeichen · Shift+Klick ergänzt · Rahmen aufziehen wählt mehrere "
+    "(Karte verschieben: mittlere Maustaste oder Leertaste) · Ziehen verschiebt "
     "(Alt+Ziehen kopiert) · an den Ecken ziehen dreht (Shift: 15°) · Pfeiltasten schieben 0,5 m (Shift: 5 m) · "
-    "Entf löscht · D dupliziert · Doppelklick / Enter: Bezeichnung · Rechtsklick: Menü",
+    "Entf löscht · D dupliziert · Doppelklick / Enter: Bezeichnung · Doppelklick auf Gebiet / Pfeil: "
+    "Punkte bearbeiten · Rechtsklick: Menü",
+    "edit": "Eckpunkte (□) ziehen verschiebt · kleine Punkte (○) auf den Kanten ziehen fügt einen Eckpunkt ein · "
+    "Rechtsklick / Entf löscht einen Eckpunkt · Klick daneben / Enter / Esc zurück zur Auswahl",
 }
 _ROLE_TITLES = {
     ROLE_TENTS: "Zelt",
@@ -49,8 +66,52 @@ _ROLE_TITLES = {
     ROLE_DISTRIBUTORS: "Verteiler",
     ROLE_GENERATORS: "Stromerzeuger",
     ROLE_LIGHTS: "Leuchte",
+    ROLE_ZONES: "Gebiet",
+    ROLE_ARROWS: "Pfeil",
 }
 _WARN_BRUSH = QBrush(QColor(198, 40, 40))
+# Mausweg, ab dem ein Druck auf eine Schaltfläche als Ziehen auf die Karte gilt (Pixel)
+_DRAG_START_PX = 8
+
+
+class _DragButton(QPushButton):
+    """Werkzeug-Schaltfläche, die sich wie ein taktisches Zeichen auf die Karte ziehen lässt.
+
+    Ein Klick schaltet das Werkzeug wie gewohnt; wird die Maus gedrückt
+    weggezogen, startet ein Drag mit Werkzeug und Typ (``type_id`` None =
+    der aktuell im Dock gewählte Typ).
+    """
+
+    def __init__(self, text: str, kind: str, type_id: str | None):
+        super().__init__(text)
+        self._kind = kind
+        self._type_id = type_id
+        self._press_pos = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = event.pos()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (
+            self._press_pos is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+            and (event.pos() - self._press_pos).manhattanLength() >= _DRAG_START_PX
+        ):
+            self._press_pos = None
+            # Der Druck soll nicht noch als Klick das Werkzeug umschalten
+            self.setDown(False)
+            drag = QDrag(self)
+            drag.setMimeData(object_mime(self._kind, self._type_id))
+            drag.setPixmap(self.grab())
+            drag.exec(Qt.DropAction.CopyAction)
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._press_pos = None
+        super().mouseReleaseEvent(event)
 
 
 def _spin(minimum: float, maximum: float, step: float, suffix: str, decimals: int = 1) -> QDoubleSpinBox:
@@ -90,10 +151,16 @@ class PlanningDock(QDockWidget):
 
         content = QWidget()
         layout = QVBoxLayout(content)
+        layout.addWidget(
+            _muted(
+                "Zelte, Fahrzeuge, Verteiler, Stromerzeuger und Leuchten lassen sich auch von hier auf die Karte ziehen."
+            )
+        )
         layout.addWidget(self._build_footprint_group(ROLE_TENTS))
         layout.addWidget(self._build_footprint_group(ROLE_VEHICLES))
         layout.addWidget(self._build_power())
         layout.addWidget(self._build_lights())
+        layout.addWidget(self._build_shapes())
         layout.addWidget(self._build_edit())
         layout.addWidget(self._build_summary(), 1)
 
@@ -114,8 +181,13 @@ class PlanningDock(QDockWidget):
     # Aufbau
     # ------------------------------------------------------------------
 
-    def _tool_button(self, text: str, kind: str, type_id: str | None = None) -> QPushButton:
-        button = QPushButton(text)
+    def _tool_button(self, text: str, kind: str, type_id: str | None = None, drag: bool = False) -> QPushButton:
+        """Werkzeug-Schaltfläche; mit ``drag`` lässt sich das Objekt auch direkt auf die Karte ziehen."""
+        if drag:
+            button = _DragButton(text, kind, type_id)
+            button.setToolTip("Klicken und auf der Karte platzieren – oder direkt auf die Karte ziehen")
+        else:
+            button = QPushButton(text)
         button.setCheckable(True)
         button.clicked.connect(lambda checked, k=kind, t=type_id: self._on_tool_clicked(checked, k, t))
         self._tool_buttons.append((button, kind, type_id))
@@ -166,17 +238,9 @@ class PlanningDock(QDockWidget):
         form.addRow("Mindestabstand:", gap)
         layout.addLayout(form)
 
-        layout.addWidget(self._tool_button("Zelt platzieren" if tents else "Fahrzeug platzieren", self._kind(role)))
-        row = QHBoxLayout()
-        row.addWidget(self._tool_button("Fläche zeichnen …", "area", role))
-        selected = QPushButton("Ausgewählte Fläche")
-        selected.setToolTip(
-            "Berechnet die Kapazität für die ausgewählten Flächen des aktiven Layers (z.B. Wiese, Parkplatz)"
+        layout.addWidget(
+            self._tool_button("Zelt platzieren" if tents else "Fahrzeug platzieren", self._kind(role), drag=True)
         )
-        selected.clicked.connect(lambda _checked=False, r=role: self.controller.evaluate_selected_area(r))
-        row.addWidget(selected)
-        layout.addLayout(row)
-        layout.addWidget(_muted("Wie viele Zelte passen hinein?" if tents else "Wie viele Fahrzeuge passen hinein?"))
         if not tents:
             layout.addWidget(_muted("Richtwerte ohne Spiegel – bitte mit Fahrzeugschein abgleichen."))
 
@@ -193,7 +257,7 @@ class PlanningDock(QDockWidget):
         for reel in self.controller.catalog.leitungsroller:
             layout.addWidget(self._tool_button(reel.name, "cable", reel.id))
         for dist in self.controller.catalog.verteiler:
-            layout.addWidget(self._tool_button(dist.name, "distributor", dist.id))
+            layout.addWidget(self._tool_button(dist.name, "distributor", dist.id, drag=True))
         layout.addLayout(self._point_row(ROLE_GENERATORS, "generator", "Stromerzeuger setzen"))
         layout.addWidget(_muted("Leitungen am Stromerzeuger beginnen – die Bilanz zeigt die Last je Aggregat."))
         return box
@@ -204,7 +268,15 @@ class PlanningDock(QDockWidget):
         layout.addLayout(self._point_row(ROLE_LIGHTS, "light", "Leuchte setzen"))
         return box
 
-    def _point_row(self, role: str, kind: str, text: str) -> QHBoxLayout:
+    def _build_shapes(self) -> QGroupBox:
+        box = QGroupBox("Gebiete und Pfeile")
+        layout = QVBoxLayout(box)
+        layout.addLayout(self._point_row(ROLE_ZONES, "zone", "Gebiet zeichnen", drag=False))
+        layout.addLayout(self._point_row(ROLE_ARROWS, "arrow", "Pfeil zeichnen", drag=False))
+        layout.addWidget(_muted("Der Typ bestimmt die Farbe; der Name kommt aus der Bezeichnung unter „Auswahl“."))
+        return box
+
+    def _point_row(self, role: str, kind: str, text: str, drag: bool = True) -> QHBoxLayout:
         combo = QComboBox()
         for obj in self.controller.point_types(role):
             combo.addItem(obj.name, obj.id)
@@ -214,7 +286,7 @@ class PlanningDock(QDockWidget):
         self._point_combos[role] = combo
         row = QHBoxLayout()
         row.addWidget(combo, 1)
-        row.addWidget(self._tool_button(text, kind))
+        row.addWidget(self._tool_button(text, kind, drag=drag))
         return row
 
     def _build_edit(self) -> QGroupBox:
@@ -309,17 +381,24 @@ class PlanningDock(QDockWidget):
     # ------------------------------------------------------------------
 
     def refresh_selection(self):
-        selected = self.controller.selection()
+        selected = self.controller.planning_selection()
+        # Taktische Zeichen einer gemischten Auswahl: zählen mit, haben aber keine Bezeichnung hier
+        markers = len(self.controller.marker_sel)
         for button in self._sel_buttons:
-            button.setEnabled(bool(selected))
+            button.setEnabled(bool(selected) or markers > 0)
         self._label_edit.setEnabled(bool(selected))
-        if not selected:
+        if not selected and not markers:
             self._selection_label.setText("Nichts ausgewählt")
             self._label_edit.clear()
             return
         counts = Counter(f.attribute("typ") or _ROLE_TITLES.get(role, role) for role, f in selected)
+        if markers:
+            counts["Taktisches Zeichen"] = markers
         parts = [f"{n}× {name}" if n > 1 else name for name, n in counts.most_common()]
-        self._selection_label.setText(f"{len(selected)} ausgewählt: " + ", ".join(parts))
+        self._selection_label.setText(f"{len(selected) + markers} ausgewählt: " + ", ".join(parts))
+        if not selected:
+            self._label_edit.clear()
+            return
         labels = {f.attribute("bezeichnung") or "" for _role, f in selected}
         uniform = len(labels) == 1
         self._label_edit.blockSignals(True)

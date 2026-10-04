@@ -125,6 +125,29 @@ Umfassende Sammlung von über 1000 taktischen Zeichen:
 
 Suchleiste im oberen Bereich des Symbol-Docks nutzen. Funktioniert mit deutschen und englischen Begriffen. Klick auf **X** setzt die Suche zurück.
 
+### Karte drucken
+
+**Druckvorlagen** in der Toolbar öffnet die Auswahl. Die gewählte Vorlage wird mit dem aktuellen Kartenausschnitt als neues Layout angelegt und im Layout-Designer geöffnet.
+
+- **THW Toolbox** - aufgeräumte Vorlagen A4/A3 quer; „A3 quer (2 × A4)“ lässt sich über *Layout → Als A4-Blätter exportieren* auf einem A4-Drucker ausgeben
+- **THW-Leitung** - die Standardvorlagen A4 bis A0
+- **Eigene Vorlagen** - mit **Eigene hinzufügen …** beliebige QGIS-Layoutvorlagen (`.qpt`) aufnehmen
+
+**Gitter** - UTMREF oder Lon/Lat (Dezimalgrad), jeweils mit Randbeschriftung. Welches Gitter die Karte trägt, steht mit Linienabstand und einer Beispielkoordinate in der Seitenleiste.
+
+**Zeichenerklärung** - zeigt nur, was auf die Grundkarte gezeichnet wurde: taktische Zeichen, Objektplanung und eigene Vektorlayer im Kartenausschnitt. Hintergrundkarten stehen unter „Quellen“. Einzelne Layer lassen sich im Dialog an- und abhaken; nach Änderungen an der Karte baut *Layout → Legende aktualisieren (THW Toolbox)* im Designer die Legende neu auf.
+
+Eigene Vorlagen können die Angaben aus dem Dialog als Layout-Variablen verwenden, z. B. `[% @thw_kartentitel %]`:
+
+| Variable | Inhalt |
+|----------|--------|
+| `@thw_kartentitel`, `@thw_einsatz`, `@thw_einsatzort` | Titel, Einsatz, Ort |
+| `@thw_ov`, `@thw_einheit`, `@thw_einheit_kurz`, `@thw_bearbeiter` | Herausgeber |
+| `@thw_blatt` | Blattnummer (leer, wenn nicht angegeben) |
+| `@thw_gitter` | `UTMREF` oder `LONLAT` |
+
+Heißt die Karte `Hauptkarte` und trägt sie Gitter mit den Namen `UTMREF` bzw. `LONLAT`, übernimmt sie Kartenausschnitt und Gitterwahl. Ein Bild mit der ID `Taktisches Zeichen Einheit` erscheint nur, wenn das Zeichen im Dialog eingeschaltet ist. Elemente mit der ID `VS-NfD` werden beim Laden entfernt: Eingestufte Inhalte dürfen mit QGIS nicht verarbeitet werden.
+
 ---
 
 ## Technische Details
@@ -185,12 +208,15 @@ Ein besonderer Dank geht auch an **[ZeiberKreim](https://github.com/ZeiberKreim)
 |-----------|--------|--------|
 | Taktische Zeichen | CC BY 4.0 | [jonas-koeritz/Taktische-Zeichen](https://github.com/jonas-koeritz/Taktische-Zeichen) |
 | Google Roboto Font | Apache 2.0 | [Google Fonts](https://fonts.google.com/specimen/Roboto) |
+| Nordpfeil | wie QGIS | QGIS-SVG-Sammlung (`arrows/NorthArrow_04.svg`) |
+| THW-Logo | gemeinfrei (amtliches Werk, § 5 UrhG); Verwendung als Kennzeichen eingeschränkt | [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:THW.svg) |
+| Bundesadler mit THW-Schriftzug | Hoheitszeichen; Verwendung nur durch berechtigte Stellen | `templates/assets/logo.svg` |
 
 ---
 
 ## Lizenz
 
-Dieses Plugin steht unter der **MIT-Lizenz**. Siehe `LICENSE` für Details.
+Dieses Plugin steht unter der **MIT-Lizenz**; ausgenommen sind das THW-Logo und der Bundesadler. Siehe `LICENSE` für Details.
 
 ---
 

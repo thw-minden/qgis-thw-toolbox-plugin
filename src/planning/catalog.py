@@ -73,6 +73,29 @@ class LightType:
 
 
 @dataclass
+class ShapeType:
+    """Gebiet oder Pfeil: frei gezeichnete Form, der Typ bestimmt Name und Farbe."""
+
+    id: str
+    name: str
+    farbe: str
+
+
+_DEFAULT_ZONES = [
+    ShapeType("abschnitt", "Einsatzabschnitt", "#1565c0"),
+    ShapeType("gefahr", "Gefahrenbereich", "#c62828"),
+    ShapeType("bereitstellung", "Bereitstellungsraum", "#2e7d32"),
+    ShapeType("sperrung", "Absperrbereich", "#ef6c00"),
+]
+_DEFAULT_ARROWS = [
+    ShapeType("rot", "Pfeil rot", "#c62828"),
+    ShapeType("blau", "Pfeil blau", "#1565c0"),
+    ShapeType("schwarz", "Pfeil schwarz", "#212121"),
+    ShapeType("gruen", "Pfeil grün", "#2e7d32"),
+]
+
+
+@dataclass
 class Catalog:
     zelte: list[FootprintType] = field(default_factory=list)
     fahrzeuge: list[FootprintType] = field(default_factory=list)
@@ -80,6 +103,8 @@ class Catalog:
     verteiler: list[DistributorType] = field(default_factory=list)
     stromerzeuger: list[GeneratorType] = field(default_factory=list)
     beleuchtung: list[LightType] = field(default_factory=list)
+    gebiete: list[ShapeType] = field(default_factory=list)
+    pfeile: list[ShapeType] = field(default_factory=list)
 
     def tent(self, type_id: str) -> FootprintType | None:
         return next((t for t in self.zelte if t.id == type_id), None)
@@ -163,7 +188,19 @@ def load_catalog(plugin_dir: str | None = None) -> Catalog:
             )
         except (KeyError, TypeError, ValueError):
             logger.warning("Ungültiger Beleuchtungs-Eintrag im Katalog: %s", entry)
+    catalog.gebiete = _load_shapes(raw.get("gebiete", [])) or list(_DEFAULT_ZONES)
+    catalog.pfeile = _load_shapes(raw.get("pfeile", [])) or list(_DEFAULT_ARROWS)
     return catalog
+
+
+def _load_shapes(entries: list) -> list[ShapeType]:
+    result = []
+    for entry in entries:
+        try:
+            result.append(ShapeType(id=str(entry["id"]), name=str(entry["name"]), farbe=str(entry["farbe"])))
+        except (KeyError, TypeError, ValueError):
+            logger.warning("Ungültiger Gebiet-/Pfeil-Eintrag im Katalog: %s", entry)
+    return result
 
 
 def _load_footprints(entries: list, default_guy: float) -> list[FootprintType]:

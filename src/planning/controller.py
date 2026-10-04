@@ -21,21 +21,25 @@ from ..logging_utils import get_logger
 from .capacity_dialog import CapacityDialog
 from .catalog import FootprintType, fmt_m, load_catalog
 from .dock import PlanningDock
+from .drop_filter import PlanningDropFilter
 from .geometry import MetricFrame, align_snap, grid_centers, tent_polygon
 from .hotbar import PlanningHotbar
 from .layers import (
     ALL_ROLES,
     FOOTPRINT_ROLES,
     POINT_ROLES,
+    ROLE_ARROWS,
     ROLE_CABLES,
     ROLE_DISTRIBUTORS,
     ROLE_GENERATORS,
     ROLE_LIGHTS,
+    ROLE_MARKERS,
     ROLE_TENTS,
     ROLE_VEHICLES,
+    ROLE_ZONES,
     PlanningLayers,
 )
-from .tools import AreaTool, CableTool, FootprintTool, PointTool, SelectTool
+from .tools import AreaTool, ArrowTool, CableTool, FootprintTool, PointTool, SelectTool, VertexTool, ZoneTool
 
 logger = get_logger(__name__)
 
@@ -60,19 +64,31 @@ TOOL_CABLE = "cable"
 TOOL_DISTRIBUTOR = "distributor"
 TOOL_GENERATOR = "generator"
 TOOL_LIGHT = "light"
+TOOL_ZONE = "zone"
+TOOL_ARROW = "arrow"
+TOOL_EDIT = "edit"
 
 POINT_TOOL_ROLES = {TOOL_DISTRIBUTOR: ROLE_DISTRIBUTORS, TOOL_GENERATOR: ROLE_GENERATORS, TOOL_LIGHT: ROLE_LIGHTS}
+# Werkzeuge, deren Typ über ``point_ids`` gewählt wird (Punkt-Objekte, Gebiete, Pfeile)
+TYPE_TOOL_ROLES = {**POINT_TOOL_ROLES, TOOL_ZONE: ROLE_ZONES, TOOL_ARROW: ROLE_ARROWS}
 
 
 class PlanningController(QObject):
     # Typ-Auswahl, Drehung oder Raster wurden geändert → Dock und Hotbar abgleichen
     state_changed = pyqtSignal()
+    # Objektplanungs-Dock geöffnet bzw. geschlossen (nicht: als Tab in den Hintergrund gelegt)
+    dock_open_changed = pyqtSignal(bool)
 
-    def __init__(self, iface, plugin_dir: str):
+    def __init__(self, iface, plugin_dir: str, plugin=None):
         super().__init__()
         self.iface = iface
         self.canvas = iface.mapCanvas()
         self.plugin_dir = plugin_dir
+        # THWToolboxPlugin: darüber greift die Auswahl auf die taktischen Zeichen zu
+        self.plugin = plugin
+        self._toolbox_active = False
+        # Taktische Zeichen in einer Mehrfach-/gemischten Auswahl (ein einzelnes Zeichen führt das MoveTool)
+        self.marker_sel: set[int] = set()
         self.catalog = load_catalog(plugin_dir)
         self.catalog.zelte.append(FootprintType("eigen", "Eigenes Zelt", 5.0, 5.0, 1.0))
         self.catalog.fahrzeuge.append(
@@ -91,6 +107,8 @@ class PlanningController(QObject):
         }
         self.guy_inside_area = settings.value(_SETTINGS_PREFIX + "abspannung_in_flaeche", True, type=bool)
         self.align_enabled = settings.value(_SETTINGS_PREFIX + "ausrichten", True, type=bool)
+        self.hotbar_enabled = settings.value(_SETTINGS_PREFIX + "hotbar", True, type=bool)
+        self._canvas_active = False
         self.rotation = 0.0
         self.grid_rows = 1
         self.grid_cols = 1
@@ -104,17 +122,30 @@ class PlanningController(QObject):
                 (ROLE_DISTRIBUTORS, self.catalog.verteiler),
                 (ROLE_GENERATORS, self.catalog.stromerzeuger),
                 (ROLE_LIGHTS, self.catalog.beleuchtung),
+                (ROLE_ZONES, self.catalog.gebiete),
+                (ROLE_ARROWS, self.catalog.pfeile),
             )
         }
 
+        self._drop_filter = PlanningDropFilter(self.canvas, self.drop_object)
+        self.canvas.viewport().installEventFilter(self._drop_filter)
         self.canvas.mapToolSet.connect(self._on_map_tool_set)
         QgsProject.instance().projectSaved.connect(self.layers.on_project_saved)
 
     def unload(self):
+        if self.dock:
+            try:
+                self.dock.visibilityChanged.disconnect(self._on_dock_visibility)
+            except (TypeError, RuntimeError):
+                pass
         for tool in self._tools.values():
             if self.canvas.mapTool() is tool:
                 self.canvas.unsetMapTool(tool)
         self._tools = {}
+        try:
+            self.canvas.viewport().removeEventFilter(self._drop_filter)
+        except RuntimeError:
+            pass
         try:
             self.canvas.mapToolSet.disconnect(self._on_map_tool_set)
         except (TypeError, RuntimeError):
@@ -137,28 +168,73 @@ class PlanningController(QObject):
     # ------------------------------------------------------------------
 
     def toggle_dock(self, visible: bool):
-        if self.dock is None:
+        if visible and self.dock is None:
             self.dock = PlanningDock(self, self.iface.mainWindow())
             self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock)
             self.layers.changed.connect(self.dock.refresh_summary)
             self.layers.selection_changed.connect(self.dock.refresh_selection)
-        if self.hotbar is None:
-            self.hotbar = PlanningHotbar(self, self.plugin_dir, self.canvas)
-            self.layers.selection_changed.connect(self.hotbar.refresh_selection)
+            self.dock.visibilityChanged.connect(self._on_dock_visibility)
+        if self.dock is None:
+            return
         self.dock.setVisible(visible)
-        self.hotbar.setVisible(visible)
-        if not visible:
-            self.deactivate_tool()
         if visible:
             self.dock.raise_()
             # Vorhandene Objektplanung im Projekt übernehmen, ohne neue Layer anzulegen
             self.layers._adopt_project_layers()
             self.dock.refresh_summary()
             self.dock.refresh_selection()
-            self.hotbar.refresh_selection()
-            # Standardwerkzeug ist die Auswahl (Cursor)
-            if self.active_tool_kind()[0] is None:
-                self.activate_tool(TOOL_SELECT)
+        self._update_canvas_ui(ensure_tool=visible)
+
+    def dock_open(self) -> bool:
+        # isHidden statt isVisible: ein Dock, das als Tab im Hintergrund liegt, ist weiterhin offen
+        return self.dock is not None and not self.dock.isHidden()
+
+    def _on_dock_visibility(self, _visible: bool):
+        self.dock_open_changed.emit(self.dock_open())
+        self._update_canvas_ui()
+
+    def set_toolbox_active(self, active: bool):
+        """Taktische Zeichen ein/aus: Hotbar und Auswahlwerkzeug gelten für Zeichen und Objektplanung."""
+        self._toolbox_active = bool(active)
+        if not active:
+            self.clear_marker_selection()
+        self._update_canvas_ui(ensure_tool=active)
+
+    def _update_canvas_ui(self, ensure_tool: bool = False):
+        """Hotbar zeigen, solange Toolbox oder Objektplanung offen sind.
+
+        ``ensure_tool``: beim Öffnen die Auswahl (Cursor) aktivieren, falls gerade
+        ein fremdes QGIS-Werkzeug aktiv ist. Beim bloßen Tab-Wechsel der Docks nicht.
+        """
+        wanted = self._toolbox_active or self.dock_open()
+        was_active, self._canvas_active = self._canvas_active, wanted
+        if not wanted:
+            if self.hotbar and not self.hotbar.isHidden():
+                self.hotbar.setVisible(False)
+            if was_active:
+                self.deactivate_tool()
+            return
+        if not was_active:
+            ensure_tool = True
+        # Die Hotbar lässt sich in den Einstellungen abschalten – der Cursor wählt trotzdem beides aus
+        if not self.hotbar_enabled:
+            if self.hotbar and not self.hotbar.isHidden():
+                self.hotbar.setVisible(False)
+        else:
+            if self.hotbar is None:
+                self.hotbar = PlanningHotbar(self, self.plugin_dir, self.canvas)
+                self.layers.selection_changed.connect(self.hotbar.refresh_selection)
+            if self.hotbar.isHidden():
+                self.hotbar.setVisible(True)
+                self.hotbar.refresh_selection()
+        if ensure_tool and self.active_tool_kind()[0] is None:
+            self.activate_tool(TOOL_SELECT)
+
+    def set_hotbar_enabled(self, enabled: bool):
+        """Hotbar auf der Karte ein-/ausschalten (Einstellungen); die Werkzeuge bleiben im Dock erreichbar."""
+        self.hotbar_enabled = bool(enabled)
+        QgsSettings().setValue(_SETTINGS_PREFIX + "hotbar", self.hotbar_enabled)
+        self._update_canvas_ui()
 
     def _sync_ui(self):
         if self.dock:
@@ -168,8 +244,89 @@ class PlanningController(QObject):
 
     def focus_label(self):
         """Doppelklick auf ein Objekt: Bezeichnung im Dock bearbeiten."""
-        if self.dock:
-            self.dock.focus_label()
+        if not self.dock_open():
+            self.toggle_dock(True)
+        self.dock.focus_label()
+
+    def _raise_planning_dock(self):
+        """Rechts die Objektplanung nach vorn holen (liegt sie als Tab hinter den taktischen Zeichen)."""
+        if self.dock_open():
+            self.dock.raise_()
+
+    # ------------------------------------------------------------------
+    # Taktische Zeichen (Marker-Layer der Toolbox)
+    # ------------------------------------------------------------------
+
+    def marker_tool(self):
+        """MoveTool der taktischen Zeichen, solange die Toolbox aktiv und ihr Layer da ist (sonst None)."""
+        if not self._toolbox_active or self.plugin is None:
+            return None
+        tool = self.plugin.move_tool
+        if tool is None or not tool._layer_is_usable():
+            return None
+        return tool
+
+    def layer(self, role: str):
+        """Layer einer Rolle – auch der Marker-Layer unter ``ROLE_MARKERS``."""
+        if role == ROLE_MARKERS:
+            tool = self.marker_tool()
+            return tool.layer if tool is not None else None
+        return self.layers.layer(role)
+
+    def single_marker(self) -> int | None:
+        """Feature-ID des einzeln ausgewählten Zeichens (Rahmen mit Eckpunkten vom MoveTool)."""
+        tool = self.marker_tool()
+        return tool.selected_fid if tool is not None else None
+
+    def marker_outline(self, feature) -> QgsGeometry:
+        tool = self.marker_tool()
+        return tool.outline(feature) if tool is not None else QgsGeometry()
+
+    def marker_clicked(self):
+        """Ein Zeichen wurde angeklickt: rechts die taktischen Zeichen nach vorn holen."""
+        if self.plugin is not None:
+            self.plugin.raise_marker_docks()
+        self.layers.selection_changed.emit()
+
+    def _drop_single_marker(self):
+        tool = self.marker_tool()
+        if tool is not None and tool.selected_fid is not None:
+            tool.clear_selection()
+            self.plugin.show_marker_placeholder()
+
+    def release_markers(self):
+        """Das Auswahlwerkzeug wird verlassen: Zeichen abwählen, ihr Cursor gilt nicht mehr."""
+        self._drop_single_marker()
+        self.clear_marker_selection()
+        tool = getattr(self.plugin, "move_tool", None)
+        if tool is not None:
+            tool.cursor_proxy = None
+
+    def clear_marker_selection(self):
+        """Auswahl der Zeichen verwerfen (z.B. weil der Marker-Layer ausgetauscht wurde)."""
+        if self.marker_sel:
+            self.marker_sel = set()
+            self.layers.selection_changed.emit()
+
+    def _set_marker_selection(self, fids: set[int]):
+        """Ein einzelnes Zeichen (ohne weitere Objekte) bekommt den Rahmen des MoveTools, sonst Mehrfachauswahl."""
+        tool = self.marker_tool()
+        if tool is None:
+            self.marker_sel = set()
+            return
+        others = any(layer.selectedFeatureCount() for layer in self.layers.all_layers())
+        if len(fids) == 1 and not others:
+            fid = next(iter(fids))
+            self.marker_sel = set()
+            if tool.selected_fid != fid:
+                tool.select_feature(fid)
+            self.plugin.show_marker(fid)
+        else:
+            self._drop_single_marker()
+            self.marker_sel = set(fids)
+            if others and not fids:
+                self._raise_planning_dock()
+        self.layers.selection_changed.emit()
 
     # ------------------------------------------------------------------
     # Auswahl / Einstellungen
@@ -197,6 +354,8 @@ class PlanningController(QObject):
             ROLE_DISTRIBUTORS: self.catalog.verteiler,
             ROLE_GENERATORS: self.catalog.stromerzeuger,
             ROLE_LIGHTS: self.catalog.beleuchtung,
+            ROLE_ZONES: self.catalog.gebiete,
+            ROLE_ARROWS: self.catalog.pfeile,
         }[role]
 
     def current_point_type(self, role: str):
@@ -242,8 +401,8 @@ class PlanningController(QObject):
             return False
         if kind == TOOL_CABLE and type_id:
             self.reel_id = type_id
-        elif kind in POINT_TOOL_ROLES and type_id:
-            self.point_ids[POINT_TOOL_ROLES[kind]] = type_id
+        elif kind in TYPE_TOOL_ROLES and type_id:
+            self.point_ids[TYPE_TOOL_ROLES[kind]] = type_id
         elif kind == TOOL_AREA and type_id:
             self.area_role = type_id
         elif kind in (TOOL_TENT, TOOL_VEHICLE) and type_id:
@@ -259,10 +418,37 @@ class PlanningController(QObject):
             tool = AreaTool(self.canvas, self)
         elif kind == TOOL_CABLE:
             tool = CableTool(self.canvas, self)
+        elif kind == TOOL_ZONE:
+            tool = ZoneTool(self.canvas, self)
+        elif kind == TOOL_ARROW:
+            tool = ArrowTool(self.canvas, self)
         else:
             tool = PointTool(self.canvas, self, POINT_TOOL_ROLES[kind])
         # Neues Objekt pro Aktivierung: die Rubberbands werden beim Deaktivieren entsorgt
         self._tools[kind] = tool
+        self.canvas.setMapTool(tool)
+        self.state_changed.emit()
+        return True
+
+    def editable_shape(self) -> tuple[str, int] | None:
+        """Das einzeln ausgewählte Gebiet bzw. der einzeln ausgewählte Pfeil – nur deren Punkte sind bearbeitbar."""
+        selected = self.selection()
+        if len(selected) == 1 and selected[0][0] in (ROLE_ZONES, ROLE_ARROWS):
+            return selected[0][0], selected[0][1].id()
+        return None
+
+    def edit_vertices(self, role: str | None = None, fid: int | None = None) -> bool:
+        """In ein Gebiet / einen Pfeil „hineingehen“: Punkte verschieben, einfügen, löschen."""
+        if role is None:
+            shape = self.editable_shape()
+            if shape is None:
+                return False
+            role, fid = shape
+        if role not in (ROLE_ZONES, ROLE_ARROWS) or self.layers.layer(role) is None:
+            return False
+        self.select([(role, fid)])
+        tool = VertexTool(self.canvas, self, role, fid)
+        self._tools[TOOL_EDIT] = tool
         self.canvas.setMapTool(tool)
         self.state_changed.emit()
         return True
@@ -285,8 +471,8 @@ class PlanningController(QObject):
             if tool is current:
                 if kind == TOOL_CABLE:
                     return kind, self.reel_id
-                if kind in POINT_TOOL_ROLES:
-                    return kind, self.point_ids.get(POINT_TOOL_ROLES[kind])
+                if kind in TYPE_TOOL_ROLES:
+                    return kind, self.point_ids.get(TYPE_TOOL_ROLES[kind])
                 if kind == TOOL_AREA:
                     return kind, self.area_role
                 return kind, None
@@ -344,17 +530,16 @@ class PlanningController(QObject):
         )
         return [tent_polygon(c, obj.laenge, obj.breite, self.rotation) for c in centers]
 
-    def place_footprint(self, role: str, center: QgsPointXY) -> bool:
-        """Zelt/Fahrzeug bzw. Raster setzen. Zu geringer Abstand wird nur gemeldet."""
+    def place_footprint(self, role: str, center: QgsPointXY, single: bool = False) -> bool:
+        """Zelt/Fahrzeug bzw. Raster setzen (``single``: nur eines). Zu geringer Abstand wird nur gemeldet."""
         layer = self.layers.layer(role)
         if layer is None:
             return False
         obj = self.current_footprint(role)
         frame = MetricFrame(layer.crs(), center)
         center_m = frame.point_to_m(center)
-        centers = grid_centers(
-            center_m, self.grid_rows, self.grid_cols, obj.laenge, obj.breite, self.gaps[role], self.rotation
-        )
+        rows, cols = (1, 1) if single else (self.grid_rows, self.grid_cols)
+        centers = grid_centers(center_m, rows, cols, obj.laenge, obj.breite, self.gaps[role], self.rotation)
         conflict = next(
             (
                 c
@@ -367,6 +552,9 @@ class PlanningController(QObject):
             None,
         )
         ok = self.add_footprints(role, obj, centers, self.rotation, frame)
+        if ok and rows * cols > 1:
+            # Das Raster gilt für einen Klick – danach wird wieder einzeln gesetzt
+            self.set_grid(1, 1)
         if ok and conflict:
             self._message(
                 f"Achtung: Mindestabstand {fmt_m(self.gaps[role])} m zu „{conflict}“ unterschritten.",
@@ -425,12 +613,24 @@ class PlanningController(QObject):
     # Auswahl (QGIS-Auswahl in den Objektplanungs-Layern)
     # ------------------------------------------------------------------
 
-    def selection(self) -> list[tuple[str, QgsFeature]]:
+    def planning_selection(self) -> list[tuple[str, QgsFeature]]:
+        """Ausgewählte Objekte der Objektplanung (ohne taktische Zeichen)."""
         result = []
         for role in ALL_ROLES:
             layer = self.layers.layer(role)
             if layer is not None:
                 result.extend((role, f) for f in layer.selectedFeatures())
+        return result
+
+    def selection(self) -> list[tuple[str, QgsFeature]]:
+        """Gesamte Auswahl; Zeichen einer Mehrfachauswahl stehen unter ``ROLE_MARKERS``."""
+        result = self.planning_selection()
+        layer = self.layer(ROLE_MARKERS)
+        if layer is not None and self.marker_sel:
+            feats = [f for f in layer.getFeatures(QgsFeatureRequest().setFilterFids(list(self.marker_sel)))]
+            # Inzwischen gelöschte Zeichen fallen aus der Auswahl
+            self.marker_sel = {f.id() for f in feats}
+            result.extend((ROLE_MARKERS, f) for f in feats if f.hasGeometry())
         return result
 
     def selection_ids(self) -> dict[str, set[int]]:
@@ -439,17 +639,36 @@ class PlanningController(QObject):
             layer = self.layers.layer(role)
             if layer is not None and layer.selectedFeatureCount():
                 result[role] = set(layer.selectedFeatureIds())
+        if self.marker_sel and self.layer(ROLE_MARKERS) is not None:
+            result[ROLE_MARKERS] = set(self.marker_sel)
         return result
 
-    def clear_selection(self):
+    def clear_selection(self, keep_single_marker: bool = False):
         for layer in self.layers.all_layers():
             layer.removeSelection()
+        if not keep_single_marker:
+            self._drop_single_marker()
+        self.clear_marker_selection()
 
     def select(self, hits: list[tuple[str, int]], mode: str = "replace"):
         """``mode``: replace, add oder toggle."""
         by_role: dict[str, set[int]] = {}
         for role, fid in hits:
             by_role.setdefault(role, set()).add(fid)
+
+        markers = set(self.marker_sel)
+        single = self.single_marker()
+        if single is not None and mode != "replace":
+            # Das einzeln ausgewählte Zeichen geht in die Mehrfachauswahl über
+            markers.add(single)
+        hit_markers = by_role.get(ROLE_MARKERS, set())
+        if mode == "replace":
+            markers = hit_markers
+        elif mode == "add":
+            markers |= hit_markers
+        else:
+            markers ^= hit_markers
+
         for role in ALL_ROLES:
             layer = self.layers.layer(role)
             if layer is None:
@@ -462,17 +681,33 @@ class PlanningController(QObject):
             elif mode == "toggle" and ids:
                 current = set(layer.selectedFeatureIds())
                 layer.selectByIds(list(current.symmetric_difference(ids)))
+        self._set_marker_selection(markers)
 
     def delete_selection(self) -> int:
         count = 0
+        single = self.single_marker()
+        if single is not None:
+            self.marker_tool().clear_selection()
+            self.plugin.delete_feature(single)
+            self.plugin.show_marker_placeholder()
+            count += 1
         for role, fids in self.selection_ids().items():
-            if self.layers.delete_features(role, list(fids)):
+            if role == ROLE_MARKERS:
+                self.marker_sel = set()
+                self.plugin.delete_markers(list(fids))
+                self.layers.selection_changed.emit()
+                count += len(fids)
+            elif self.layers.delete_features(role, list(fids)):
                 count += len(fids)
         return count
 
     def transform_selection(self, geometries: dict[str, dict[int, QgsGeometry]], rotation_delta: float = 0.0):
         """Neue Geometrien (Layer-CRS) schreiben; Zelte/Fahrzeuge bekommen ``rotation`` += Delta."""
         for role, geoms in geometries.items():
+            if role == ROLE_MARKERS:
+                self.plugin.move_markers(geoms)
+                self.layers.changed.emit()
+                continue
             attrs = None
             if rotation_delta and role in FOOTPRINT_ROLES:
                 layer = self.layers.layer(role)
@@ -491,7 +726,7 @@ class PlanningController(QObject):
         for role, f in self.selection():
             if not f.hasGeometry():
                 continue
-            layer = self.layers.layer(role)
+            layer = self.layer(role)
             frame = MetricFrame(layer.crs(), f.geometry().centroid().asPoint())
             g = frame.geom_to_m(f.geometry())
             g.translate(dx_m, dy_m)
@@ -520,6 +755,10 @@ class PlanningController(QObject):
         for role, f in selected:
             if not f.hasGeometry():
                 continue
+            if role == ROLE_MARKERS:
+                # Umriss des gezeichneten Symbols statt des bloßen Punkts
+                geoms.append(self.marker_outline(f))
+                continue
             g = QgsGeometry(f.geometry())
             g.transform(QgsCoordinateTransform(self.layers.layer(role).crs(), canvas_crs, project))
             geoms.append(g)
@@ -546,7 +785,7 @@ class PlanningController(QObject):
             QgsPointXY(box.xMaximum(), box.yMinimum()),
             QgsPointXY(box.xMinimum(), box.yMinimum()),
         ]
-        if len(selected) == 1:
+        if len(selected) == 1 and selected[0][0] != ROLE_MARKERS:
             role, f = selected[0]
             badge = f.attribute("bezeichnung") or f.attribute("typ") or ""
         else:
@@ -573,22 +812,34 @@ class PlanningController(QObject):
 
     def set_selection_label(self, text: str):
         for role, fids in self.selection_ids().items():
-            self.layers.change_features(role, {}, {fid: {"bezeichnung": text} for fid in fids})
+            if role != ROLE_MARKERS:
+                self.layers.change_features(role, {}, {fid: {"bezeichnung": text} for fid in fids})
 
     def duplicate_selection(self, offset: bool = True) -> int:
         """Auswahl kopieren, um ihre Breite + Mindestabstand versetzt; die Kopien werden ausgewählt.
 
         ``offset=False`` legt die Kopien deckungsgleich ab (Alt+Ziehen zieht sie dann weg).
+        Taktische Zeichen werden mitkopiert – auch das einzeln ausgewählte.
         """
         selected = self.selection()
+        single = self.single_marker()
+        marker_layer = self.layer(ROLE_MARKERS)
+        if single is not None and marker_layer is not None and not self.marker_sel:
+            feat = marker_layer.getFeature(single)
+            if feat.isValid() and feat.hasGeometry():
+                selected.append((ROLE_MARKERS, feat))
         if not selected:
             return 0
         canvas_crs = self.canvas.mapSettings().destinationCrs()
         project = QgsProject.instance()
         bbox = None
         for role, f in selected:
-            g = QgsGeometry(f.geometry())
-            g.transform(QgsCoordinateTransform(self.layers.layer(role).crs(), canvas_crs, project))
+            if role == ROLE_MARKERS:
+                # Zeichen sind Punkte – für den Versatz zählt der Rahmen ihres Symbols
+                g = self.marker_outline(f)
+            else:
+                g = QgsGeometry(f.geometry())
+                g.transform(QgsCoordinateTransform(self.layers.layer(role).crs(), canvas_crs, project))
             if bbox is None:
                 bbox = QgsRectangle(g.boundingBox())
             else:
@@ -599,10 +850,14 @@ class PlanningController(QObject):
         shift_m = width_m + max(gap, 1.0) if offset else 0.0
 
         new_by_role: dict[str, list[QgsFeature]] = {}
+        marker_geoms = {}
         for role, f in selected:
-            layer = self.layers.layer(role)
+            layer = self.layer(role)
             g = frame.geom_to_m_from(f.geometry(), layer.crs())
             g.translate(shift_m, 0.0)
+            if role == ROLE_MARKERS:
+                marker_geoms[f.id()] = frame.geom_from_m(g, layer.crs())
+                continue
             copy = QgsFeature(f)
             copy.setId(-1)
             copy.setGeometry(frame.geom_from_m(g, layer.crs()))
@@ -618,6 +873,9 @@ class PlanningController(QObject):
             before = set(layer.allFeatureIds())
             self.layers.add_features(role, feats)
             hits.extend((role, fid) for fid in set(layer.allFeatureIds()) - before)
+        if marker_geoms:
+            self._drop_single_marker()
+            hits.extend((ROLE_MARKERS, fid) for fid in self.plugin.duplicate_markers(list(marker_geoms), marker_geoms))
         self.select(hits)
         return len(hits)
 
@@ -701,6 +959,61 @@ class PlanningController(QObject):
             feat.setAttribute("leistung_w", obj.leistung_w)
             feat.setAttribute("radius", obj.radius)
         return self.layers.add_features(role, [feat])
+
+    # ------------------------------------------------------------------
+    # Gebiete und Pfeile
+    # ------------------------------------------------------------------
+
+    def place_shape(self, role: str, geom: QgsGeometry, crs: QgsCoordinateReferenceSystem) -> bool:
+        """Gezeichnetes Gebiet (Polygon) bzw. gezeichneten Pfeil (Linie) im aktuellen Typ ablegen."""
+        layer = self.layers.layer(role)
+        obj = self.current_point_type(role)
+        if layer is None or obj is None or geom is None or geom.isEmpty():
+            return False
+        geom = QgsGeometry(geom)
+        geom.transform(QgsCoordinateTransform(crs, layer.crs(), QgsProject.instance()))
+        if geom.isMultipart():
+            # Sich selbst kreuzende Umrisse zerfallen beim Reparieren – das größte Teil zählt
+            parts = geom.asGeometryCollection()
+            if parts:
+                geom = max(parts, key=lambda g: g.area() if role == ROLE_ZONES else g.length())
+        feat = self.layers.new_feature(role)
+        feat.setGeometry(geom)
+        feat.setAttribute("typ_id", obj.id)
+        feat.setAttribute("typ", obj.name)
+        feat.setAttribute("bezeichnung", "")
+        return self.layers.add_features(role, [feat])
+
+    # ------------------------------------------------------------------
+    # Drag & Drop aus dem Dock
+    # ------------------------------------------------------------------
+
+    def drop_object(self, kind: str, type_id: str | None, map_point: QgsPointXY) -> bool:
+        """Aus dem Dock auf die Karte gezogenes Objekt an ``map_point`` (Karten-CRS) setzen und auswählen."""
+        if kind in (TOOL_TENT, TOOL_VEHICLE):
+            role = ROLE_TENTS if kind == TOOL_TENT else ROLE_VEHICLES
+        elif kind in POINT_TOOL_ROLES:
+            role = POINT_TOOL_ROLES[kind]
+        else:
+            return False
+        if not self._ensure_layers():
+            return False
+        layer = self.layers.layer(role)
+        point = self.canvas.mapSettings().mapToLayerCoordinates(layer, map_point)
+        before = set(layer.allFeatureIds())
+        if role in FOOTPRINT_ROLES:
+            if type_id:
+                self.selected_ids[role] = type_id
+            ok = self.place_footprint(role, point, single=True)
+        else:
+            if type_id:
+                self.point_ids[role] = type_id
+            ok = self.place_point(role, point)
+        # Wie beim Ablegen eines taktischen Zeichens: das neue Objekt ist direkt greifbar
+        self.back_to_select()
+        self.select([(role, fid) for fid in set(layer.allFeatureIds()) - before])
+        self.state_changed.emit()
+        return ok
 
     def snap_target(self, map_point: QgsPointXY, tolerance: float, target_crs) -> QgsPointXY | None:
         """Nächster Stromerzeuger, Verteiler, Leuchte bzw. nächstes Leitungsende im Fangradius (in ``target_crs``)."""

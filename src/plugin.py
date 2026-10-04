@@ -2,7 +2,6 @@ import os
 
 from qgis.core import (
     Qgis,
-    QgsApplication,
     QgsCoordinateTransform,
     QgsProject,
     QgsVectorLayer,
@@ -32,7 +31,9 @@ from .layer.feature_ops import FeatureOperations
 from .layer.labeling import apply_labeling
 from .layer.layer_manager import LayerManager
 from .layer.renderer import apply_renderer
+from .layout.legend import add_legend_action
 from .layout.mgrs_grid import build_mgrs_grid_layer
+from .layout.tile_export import add_designer_action
 from .logging_utils import get_logger
 from .paths import plugin_root
 from .planning.controller import PlanningController
@@ -78,6 +79,7 @@ class THWToolboxPlugin:
         # Nutzer mit der Deaktivierungs-Warnung zu konfrontieren.
         self._project_clearing = False
         self.planning = None
+        self._docks_tabified = False
 
         self.settings = THWToolboxSettings()
 
@@ -159,6 +161,12 @@ class THWToolboxPlugin:
         self.iface.addToolBarIcon(self.template_action)
         self.iface.addPluginToMenu("THW Toolbox", self.template_action)
 
+        # A4-Blatt-Export und „Legende aktualisieren“ im Layout-Designer
+        self._designer_actions = []
+        self.iface.layoutDesignerOpened.connect(self._add_designer_action)
+        for designer in self.iface.openLayoutDesigners():
+            self._add_designer_action(designer)
+
         # MGRS-Gitter als temporären Layer hinzufügen
         mgrs_icon = QIcon(os.path.join(self.plugin_dir, "icons", "mgrs.svg"))
         self.mgrs_grid_action = QAction(mgrs_icon, "MGRS-Gitter temporär hinzufügen", self.iface.mainWindow())
@@ -184,7 +192,7 @@ class THWToolboxPlugin:
         self.iface.addPluginToMenu("THW Toolbox", self.search_action)
 
         # Marker-Tabelle: mehrere Zeichen per Koordinate anlegen/bearbeiten
-        table_icon = QgsApplication.getThemeIcon("/mActionOpenTable.svg")
+        table_icon = QIcon(os.path.join(self.plugin_dir, "icons", "marker_table.svg"))
         self.marker_table_action = QAction(table_icon, "Marker-Tabelle", self.iface.mainWindow())
         self.marker_table_action.triggered.connect(self._open_marker_table)
         self.iface.addToolBarIcon(self.marker_table_action)
@@ -242,6 +250,11 @@ class THWToolboxPlugin:
         if self.action and self.action.isChecked():
             self.deactivate()
 
+        # Vor den Aktionen: das Schließen des Objektplanungs-Docks meldet sich sonst an eine entfernte Aktion
+        if self.planning:
+            self.planning.unload()
+            self.planning = None
+
         if self.dock:
             self.iface.removeDockWidget(self.dock)
         if self.drop_filter:
@@ -282,6 +295,14 @@ class THWToolboxPlugin:
         if self.template_action:
             self.iface.removeToolBarIcon(self.template_action)
             self.iface.removePluginMenu("THW Toolbox", self.template_action)
+        if getattr(self, "_designer_actions", None) is not None:
+            self.iface.layoutDesignerOpened.disconnect(self._add_designer_action)
+            for action in self._designer_actions:
+                try:
+                    action.deleteLater()
+                except RuntimeError:  # Designer bereits geschlossen
+                    pass
+            self._designer_actions = None
         if getattr(self, "mgrs_grid_action", None):
             self.iface.removeToolBarIcon(self.mgrs_grid_action)
             self.iface.removePluginMenu("THW Toolbox", self.mgrs_grid_action)
@@ -292,9 +313,6 @@ class THWToolboxPlugin:
             self.iface.removeToolBarIcon(self.planning_action)
             self.iface.removePluginMenu("THW Toolbox", self.planning_action)
             self.planning_action = None
-        if self.planning:
-            self.planning.unload()
-            self.planning = None
 
         if getattr(self, "dji_export_action", None):
             self.iface.removePluginMenu("THW Toolbox", self.dji_export_action)
@@ -374,16 +392,17 @@ class THWToolboxPlugin:
             if hasattr(self.ident_tool, "feature_dock"):
                 self.ident_tool.feature_dock.show()
                 self.ident_tool.feature_dock.raise_()
-        # MoveTool — an die Aktion gekoppelt: Wechselt der Nutzer zu einem anderen
-        # QGIS-Werkzeug, wird das Toolbox-Symbol inaktiv und ein Klick darauf
-        # aktiviert die Auswahl der Zeichen wieder.
+        # MoveTool — wird nicht selbst zum Kartenwerkzeug: Das gemeinsame
+        # Auswahlwerkzeug (Hotbar, planning.tools.SelectTool) reicht Klicks auf
+        # taktische Zeichen hierher weiter, damit Zeichen und Objektplanung
+        # denselben Cursor teilen.
         if not self.move_tool:
             self.move_tool = MoveTool(self.canvas, self)
-            self.move_tool.setAction(self.action)
         # Bestehende Tools können noch auf einen entfernten Layer zeigen
         # (z. B. nach Projektwechsel) — auf den aktuellen Layer umhängen.
         self._update_tool_references()
-        self.canvas.setMapTool(self.move_tool)
+        self._planning_controller().set_toolbox_active(True)
+        self._arrange_docks(front=self.dock)
 
         # Load the configuration settings
         self.settings.load_settings(QgsProject.instance())
@@ -403,13 +422,15 @@ class THWToolboxPlugin:
         """Deaktiviert das Plugin und setzt das Symbol zurück."""
         logger.debug("Plugin wird deaktiviert")
 
-        # Canvas-Tool zurücksetzen
+        # Auswahl der Zeichen aufheben; Hotbar und Auswahlwerkzeug bleiben nur,
+        # wenn die Objektplanung noch offen ist
         if self.move_tool:
             try:
-                if self.canvas.mapTool() == self.move_tool:
-                    self.canvas.unsetMapTool(self.move_tool)
+                self.move_tool.clear_selection()
             except RuntimeError:
                 pass
+        if self.planning:
+            self.planning.set_toolbox_active(False)
 
         # Dock verstecken
         if self.dock:
@@ -458,6 +479,8 @@ class THWToolboxPlugin:
             if self.move_tool:
                 self.move_tool.clear_selection()
                 self.move_tool.layer = None
+            if self.planning:
+                self.planning.clear_marker_selection()
 
             # Geplanter Layer-Tausch (Speichern, CRS-Migration): der neue Layer kommt
             # gleich über on_layer_replaced — Plugin aktiv lassen.
@@ -613,6 +636,8 @@ class THWToolboxPlugin:
             # Feature-IDs gelten im neuen Layer nicht mehr
             self.move_tool.clear_selection()
             self.move_tool.layer = self.layer
+        if self.planning:
+            self.planning.clear_marker_selection()
 
     def _place_feature(self, svg_path, point):
         """SVG-Drop-Callback: Feature platzieren und im Dock auswählen."""
@@ -640,16 +665,19 @@ class THWToolboxPlugin:
         if hasattr(self, "svg_dock_widget"):
             self.svg_dock_widget.refresh_marker_list()
 
+        # Nach dem Ablegen soll das Zeichen direkt greifbar sein, auch wenn
+        # zwischendurch ein anderes Kartenwerkzeug (z.B. Zelt platzieren) aktiv war.
+        if self.planning:
+            self.planning.back_to_select()
+            self.planning.clear_selection()
+
         # Feature im Dock auswählen + Move-Modus aktivieren
         if self.ident_tool and hasattr(self.ident_tool, "feature_dock"):
             self.ident_tool.feature_dock.show_feature(new_feature, self)
         if self.move_tool:
-            # Nach dem Ablegen soll das Zeichen direkt greifbar sein, auch wenn
-            # zwischendurch ein anderes Kartenwerkzeug aktiv war.
-            if self.canvas.mapTool() != self.move_tool:
-                self.canvas.setMapTool(self.move_tool)
             self.move_tool.set_move_mode(True)
             self.move_tool.select_feature(new_feature.id())
+            self.raise_marker_docks()
 
     # ------------------------------------------------------------------
     # Public callbacks (called from FeatureDock with legacy method names)
@@ -772,6 +800,53 @@ class THWToolboxPlugin:
         self.refresh_marker_views(fids)
         self.canvas.refresh()
 
+    def duplicate_markers(self, fids, geometries=None):
+        """Kopiert Marker (optional an neue Positionen, ``{fid: QgsGeometry}`` im Layer-CRS); gibt die neuen IDs zurück."""
+        if not self.feature_ops:
+            return []
+        new_fids = self.feature_ops.duplicate(fids, geometries)
+        if new_fids:
+            if hasattr(self, "svg_dock_widget"):
+                self.svg_dock_widget.refresh_marker_list()
+            self.canvas.refresh()
+        return new_fids
+
+    def move_markers(self, geometries):
+        """Mehrere Marker verschieben (``{fid: QgsGeometry}`` im Layer-CRS), z.B. aus einer gemischten Auswahl."""
+        layer = self.layer
+        if not layer or not geometries:
+            return
+        if layer.isEditable():
+            for fid, geom in geometries.items():
+                layer.changeGeometry(fid, geom)
+        else:
+            layer.dataProvider().changeGeometryValues(geometries)
+            layer.updateExtents()
+        layer.triggerRepaint()
+        self.refresh_marker_views(list(geometries))
+
+    def _marker_details(self):
+        return getattr(self.ident_tool, "feature_dock", None)
+
+    def raise_marker_docks(self):
+        """Symbolpalette und Marker Details nach vorn holen (liegen sie als Tab hinter der Objektplanung)."""
+        for dock in (self.dock, self._marker_details()):
+            if dock is not None and not dock.isHidden():
+                dock.raise_()
+
+    def show_marker(self, fid):
+        """Marker in Marker Details anzeigen (Auswahl über das gemeinsame Auswahlwerkzeug)."""
+        details = self._marker_details()
+        feat = self.layer.getFeature(fid) if self.layer else None
+        if details is not None and feat is not None and feat.isValid():
+            details.show_feature(feat, self)
+        self.raise_marker_docks()
+
+    def show_marker_placeholder(self):
+        details = self._marker_details()
+        if details is not None:
+            details.show_placeholder()
+
     def refresh_marker_views(self, fids):
         """Symbolpalette („Verwendet“) und Marker Details nach Änderungen an `fids` aktualisieren."""
         if hasattr(self, "svg_dock_widget"):
@@ -834,20 +909,44 @@ class THWToolboxPlugin:
     def _open_search_dialog(self):
         NominatimSearchDialog(self.canvas, self.iface.mainWindow()).exec()
 
+    def _add_designer_action(self, designer):
+        self._designer_actions.append(add_designer_action(designer))
+        self._designer_actions.append(add_legend_action(designer))
+
     def _open_template_dialog(self):
         TemplateDialog(self.plugin_dir, self.iface.mainWindow()).exec()
 
-    def _toggle_planning(self, checked: bool):
+    def _planning_controller(self) -> PlanningController:
+        """Steuerung von Hotbar und Auswahlwerkzeug – für taktische Zeichen und Objektplanung gemeinsam."""
         if self.planning is None:
-            self.planning = PlanningController(self.iface, self.plugin_dir)
-        self.planning.toggle_dock(checked)
-        if self.planning.dock:
+            self.planning = PlanningController(self.iface, self.plugin_dir, self)
             # Schließen über das X des Docks soll den Toolbar-Button mitnehmen
-            try:
-                self.planning.dock.visibilityChanged.disconnect(self.planning_action.setChecked)
-            except (TypeError, RuntimeError):
-                pass
-            self.planning.dock.visibilityChanged.connect(self.planning_action.setChecked)
+            self.planning.dock_open_changed.connect(self._on_planning_dock_open_changed)
+        return self.planning
+
+    def _on_planning_dock_open_changed(self, is_open: bool):
+        if getattr(self, "planning_action", None):
+            self.planning_action.setChecked(is_open)
+
+    def _toggle_planning(self, checked: bool):
+        controller = self._planning_controller()
+        controller.toggle_dock(checked)
+        if checked:
+            self._arrange_docks(front=controller.dock)
+
+    def _arrange_docks(self, front=None):
+        """Symbolpalette und Objektplanung einmalig als Tabs übereinanderlegen, ``front`` liegt vorn.
+
+        Ein Klick auf ein Zeichen bzw. ein Planungsobjekt holt dann den passenden Tab nach vorn.
+        """
+        planning_dock = self.planning.dock if self.planning else None
+        if self._docks_tabified or not self.dock or not planning_dock:
+            return
+        if self.dock.isHidden() or planning_dock.isHidden() or self.dock.isFloating() or planning_dock.isFloating():
+            return
+        self._docks_tabified = True
+        self.iface.mainWindow().tabifyDockWidget(self.dock, planning_dock)
+        (front or planning_dock).raise_()
 
     def _add_mgrs_grid_layer(self):
         extent = self.canvas.extent()
@@ -888,7 +987,7 @@ class THWToolboxPlugin:
             return s.new_icon_scaling_with_map, s.new_icon_fixed_size, s.new_icon_size
 
         before = new_icon_defaults()
-        if ConfigDialog(self.settings, self.iface.mainWindow()).exec_and_apply():
+        if ConfigDialog(self.settings, self.iface.mainWindow(), self._planning_controller()).exec_and_apply():
             # Geänderte Standardgröße soll sofort gelten, nicht die zuletzt verstellte
             if self.feature_ops and new_icon_defaults() != before:
                 self.feature_ops.forget_last_size()

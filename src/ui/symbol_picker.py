@@ -4,9 +4,10 @@ import os
 import re
 from dataclasses import dataclass
 
-from qgis.PyQt.QtCore import QSize, Qt
+from qgis.PyQt.QtCore import QEvent, QSize, Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import (
+    QApplication,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -16,6 +17,7 @@ from qgis.PyQt.QtWidgets import (
     QListView,
     QListWidget,
     QListWidgetItem,
+    QStyledItemDelegate,
     QVBoxLayout,
 )
 
@@ -69,6 +71,37 @@ class SymbolCatalog:
     def by_path(self, svg_path: str) -> Symbol | None:
         return self._by_path.get(self._key(self.absolute(svg_path))) if svg_path else None
 
+    def find(self, text: str) -> Symbol | None:
+        """Zeichen zu einem Namen aus einer Import-Datei suchen.
+
+        Erkannt werden der Name (``GKW I``), „Name – Kategorie“, ``Kategorie/Name`` und
+        der Dateipfad — ohne Rücksicht auf Groß-/Kleinschreibung, ``_`` und ``.svg``.
+        Bei mehrdeutigen Namen gewinnt das erste Zeichen der Sortierung (THW zuerst).
+        """
+        wanted = self._search_key(text)
+        if not wanted:
+            return None
+        by_path = self.by_path(text.strip())
+        if by_path is not None:
+            return by_path
+        for symbol in self.symbols:
+            if wanted in (
+                self._search_key(symbol.name),
+                self._search_key(symbol.label),
+                self._search_key(f"{symbol.category}/{symbol.name}"),
+            ):
+                return symbol
+        return None
+
+    @staticmethod
+    def _search_key(text: str) -> str:
+        value = text.strip().lower().replace("\\", "/").replace("_", " ").replace("–", "-")
+        if value.endswith(".svg"):
+            value = value[:-4]
+        if value.startswith("svgs/"):
+            value = value[5:]
+        return " ".join(value.replace(" - ", "/").split())
+
     def icon(self, path: str) -> QIcon:
         if path not in self._icons:
             self._icons[path] = QIcon(path)
@@ -85,6 +118,48 @@ def symbol_catalog(plugin_dir: str) -> SymbolCatalog:
     return _catalogs[plugin_dir]
 
 
+class _CellDelegate(QStyledItemDelegate):
+    """Jedes Zeichen belegt die ganze Rasterzelle.
+
+    Qt bemisst ein Icon-Element sonst an der Icon-Breite; der Name hätte dann nur
+    diese Breite zum Umbrechen und würde zu „1. …“ gekürzt.
+    """
+
+    def sizeHint(self, option, index):
+        return self.parent().gridSize() - QSize(8, 6)
+
+
+class _SymbolGrid(QListWidget):
+    """Icon-Raster, dessen Spalten die ganze Breite füllen und Namen mehrzeilig zeigen."""
+
+    _MIN_CELL_WIDTH = 150
+    _ICON_SIZE = 56
+    _TEXT_LINES = 3
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setViewMode(QListView.ViewMode.IconMode)
+        self.setIconSize(QSize(self._ICON_SIZE, self._ICON_SIZE))
+        self.setResizeMode(QListView.ResizeMode.Adjust)
+        self.setMovement(QListView.Movement.Static)
+        self.setWordWrap(True)
+        # Ohne Auslassungspunkte umbrechen — sonst bleibt von „1. Bergungsgruppe ASH“ nur „1. …“
+        self.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.setItemDelegate(_CellDelegate(self))
+        # Immer sichtbar, damit die Spaltenbreite beim Filtern nicht springt
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self._cell_height = self._ICON_SIZE + self._TEXT_LINES * self.fontMetrics().lineSpacing() + 18
+        self.setGridSize(QSize(self._MIN_CELL_WIDTH, self._cell_height))
+
+    def resizeEvent(self, event):
+        width = self.viewport().width()
+        columns = max(1, width // self._MIN_CELL_WIDTH)
+        grid = QSize(width // columns, self._cell_height)
+        if grid != self.gridSize():
+            self.setGridSize(grid)
+        super().resizeEvent(event)
+
+
 class SymbolPickerDialog(QDialog):
     """Icon-Picker: Suche + Kategorie-Filter über einem Raster aller Zeichen.
 
@@ -99,7 +174,7 @@ class SymbolPickerDialog(QDialog):
     def __init__(self, catalog: SymbolCatalog, parent=None, current_path: str | None = None):
         super().__init__(parent)
         self.setWindowTitle("Taktisches Zeichen wählen")
-        self.resize(700, 520)
+        self.resize(860, 640)
 
         layout = QVBoxLayout(self)
 
@@ -115,14 +190,7 @@ class SymbolPickerDialog(QDialog):
         filter_layout.addWidget(self.category, 1)
         layout.addLayout(filter_layout)
 
-        self.list = QListWidget()
-        self.list.setViewMode(QListView.ViewMode.IconMode)
-        self.list.setIconSize(QSize(48, 48))
-        self.list.setGridSize(QSize(112, 92))
-        self.list.setResizeMode(QListView.ResizeMode.Adjust)
-        self.list.setMovement(QListView.Movement.Static)
-        self.list.setWordWrap(True)
-        self.list.setUniformItemSizes(True)
+        self.list = _SymbolGrid()
         for symbol in catalog.symbols:
             item = QListWidgetItem(catalog.icon(symbol.path), symbol.name)
             item.setToolTip(symbol.label)
@@ -130,6 +198,12 @@ class SymbolPickerDialog(QDialog):
             item.setData(_CATEGORY_ROLE, symbol.category)
             self.list.addItem(item)
         layout.addWidget(self.list)
+
+        # Voller Name + Kategorie des gewählten Zeichens (im Raster ist dafür nicht immer Platz)
+        self.selected_label = QLabel("")
+        self.selected_label.setTextFormat(Qt.TextFormat.RichText)
+        self.selected_label.setWordWrap(True)
+        layout.addWidget(self.selected_label)
 
         bottom = QHBoxLayout()
         self.count_label = QLabel("")
@@ -144,6 +218,8 @@ class SymbolPickerDialog(QDialog):
         self.category.currentIndexChanged.connect(self._apply_filter)
         self.search.returnPressed.connect(self.accept)
         self.list.itemDoubleClicked.connect(self.accept)
+        self.list.currentItemChanged.connect(self._show_selected)
+        self.search.installEventFilter(self)
 
         current = catalog.by_path(current_path) if current_path else None
         if current is not None:
@@ -178,6 +254,22 @@ class SymbolPickerDialog(QDialog):
         if current is None or current.isHidden():
             self.list.setCurrentItem(first_visible)
         self.count_label.setText(f"{visible} Zeichen")
+        self._show_selected()
+
+    def _show_selected(self, *_):
+        item = self.list.currentItem()
+        if item is None or item.isHidden():
+            self.selected_label.setText("Kein Zeichen gefunden – Suche oder Kategorie ändern.")
+            return
+        self.selected_label.setText(f"<b>{item.text()}</b> – {item.data(_CATEGORY_ROLE)}")
+
+    def eventFilter(self, watched, event):
+        # Pfeiltasten im Suchfeld bewegen die Auswahl im Raster, ohne dass man das Feld verlassen muss
+        if watched is self.search and event.type() == QEvent.Type.KeyPress:
+            if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_PageUp, Qt.Key.Key_PageDown):
+                QApplication.sendEvent(self.list, event)
+                return True
+        return super().eventFilter(watched, event)
 
     def selected_path(self) -> str | None:
         item = self.list.currentItem()

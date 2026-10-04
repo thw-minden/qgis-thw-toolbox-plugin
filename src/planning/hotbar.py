@@ -1,4 +1,7 @@
-"""Hotbar der Objektplanung: schwebende Werkzeugleiste unten mittig auf der Karte (Figma-Stil)."""
+"""Hotbar: schwebende Werkzeugleiste unten mittig auf der Karte (Figma-Stil).
+
+Gilt für taktische Zeichen und Objektplanung gemeinsam – der Cursor wählt beides aus.
+"""
 
 import os
 from dataclasses import dataclass
@@ -13,18 +16,27 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QMenu,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QToolButton,
     QWidget,
     QWidgetAction,
 )
 
-from .layers import ROLE_DISTRIBUTORS, ROLE_GENERATORS, ROLE_LIGHTS, ROLE_TENTS, ROLE_VEHICLES
+from .layers import (
+    ROLE_ARROWS,
+    ROLE_DISTRIBUTORS,
+    ROLE_GENERATORS,
+    ROLE_LIGHTS,
+    ROLE_TENTS,
+    ROLE_VEHICLES,
+    ROLE_ZONES,
+)
 
 _ICON_PX = 22
 _BUTTON_PX = 36
 _MARGIN_BOTTOM_PX = 16
-_GRID_PRESETS = ((1, 1), (2, 2), (2, 3), (3, 3), (2, 5), (4, 4))
+_GRID_PRESETS = ((1, 2), (2, 2), (2, 3), (3, 3), (2, 5), (4, 4))
 
 _STYLE = """
 QFrame#ObjektplanungHotbar {
@@ -48,7 +60,16 @@ QFrame#ObjektplanungHotbar QToolButton#chevron {
 }
 QFrame#ObjektplanungHotbar QToolButton#chevron:hover { color: #ffffff; background: #333333; }
 QFrame#ObjektplanungHotbar QToolButton#grid { padding: 0px 6px; font-weight: bold; }
+QFrame#ObjektplanungHotbar QToolButton#grid[armed="true"] { background: #0d99ff; }
 QFrame#ObjektplanungHotbar QFrame#sep { background: #3a3a3a; }
+QFrame#ObjektplanungHotbar QLabel#count {
+    color: #ffffff;
+    background: #0d99ff;
+    border-radius: 9px;
+    padding: 2px 9px;
+    margin-right: 4px;
+    font-weight: bold;
+}
 """
 
 
@@ -89,7 +110,7 @@ class PlanningHotbar(QFrame):
         self._layout.setSpacing(2)
         catalog = controller.catalog
 
-        self._add_tool("select", "select.svg", "Auswählen und bearbeiten", "")
+        self._add_tool("select", "select.svg", "Auswählen und bearbeiten – taktische Zeichen und Objekte", "")
         self._separator()
         self._add_tool("tent", "tent.svg", "Zelt platzieren", "", [(t.id, t.name) for t in catalog.zelte])
         self._add_tool("vehicle", "vehicle.svg", "Fahrzeug platzieren", "", [(v.id, v.name) for v in catalog.fahrzeuge])
@@ -106,13 +127,9 @@ class PlanningHotbar(QFrame):
         )
         self._add_tool("light", "light.svg", "Beleuchtung setzen", "", [(li.id, li.name) for li in catalog.beleuchtung])
         self._separator()
-        self._add_tool(
-            "area",
-            "area.svg",
-            "Fläche zeichnen – wie viel passt hinein?",
-            "",
-            [(ROLE_TENTS, "Kapazität für Zelte"), (ROLE_VEHICLES, "Kapazität für Fahrzeuge")],
-        )
+        self._add_tool("zone", "zone.svg", "Gebiet zeichnen", "", [(z.id, z.name) for z in catalog.gebiete])
+        self._add_tool("arrow", "arrow.svg", "Pfeil zeichnen", "", [(a.id, a.name) for a in catalog.pfeile])
+        self._separator()
         self._guides = self._button("guides.svg", "Hilfslinien: an Nachbarn ausrichten (Strg beim Ziehen hält an)")
         self._guides.setCheckable(True)
         self._guides.setChecked(controller.align_enabled)
@@ -120,12 +137,21 @@ class PlanningHotbar(QFrame):
 
         # Kontext-Aktionen für die Auswahl
         self._selection_sep = self._separator()
+        self._count = QLabel(self)
+        self._count.setObjectName("count")
+        self._count.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._layout.addWidget(self._count)
+        self._vertices = self._button(
+            "vertices.svg", "Punkte bearbeiten: Gebiet / Pfeil umformen und ergänzen (Doppelklick)"
+        )
+        self._vertices.setCheckable(True)
+        self._vertices.clicked.connect(self._on_vertices)
         self._duplicate = self._button("duplicate.svg", "Duplizieren (D, Alt+Ziehen)", controller.duplicate_selection)
         self._rotate = self._button(
             "rotate.svg", "Um 15° drehen (R, Shift+R zurück)", lambda: controller.rotate_selection(15)
         )
         self._delete = self._button("delete.svg", "Löschen (Entf)", controller.delete_selection)
-        self._selection_widgets = (self._selection_sep, self._duplicate, self._rotate, self._delete)
+        self._selection_widgets = (self._selection_sep, self._count, self._duplicate, self._rotate, self._delete)
 
         controller.state_changed.connect(self.sync_tool_buttons)
         canvas.installEventFilter(self)
@@ -194,32 +220,45 @@ class PlanningHotbar(QFrame):
         button.setIconSize(QSize(_ICON_PX, _ICON_PX))
         button.setFixedHeight(_BUTTON_PX)
         button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        button.setToolTip("Raster: Reihen × Spalten auf einen Klick setzen (Abstand = Mindestabstand)")
+        button.setToolTip(
+            "Mehrere auf einmal: der nächste Klick setzt ein Raster aus Reihen × Spalten "
+            "(Abstand = Mindestabstand), danach wieder einzeln"
+        )
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         button.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0px; }")
 
         menu = QMenu(self)
+
+        def choose(rows: int, cols: int):
+            self.controller.set_grid(rows, cols)
+            menu.close()
+
         panel = QWidget(menu)
         grid = QGridLayout(panel)
         grid.setContentsMargins(10, 8, 10, 8)
-        grid.addWidget(QLabel("Reihen"), 0, 0)
-        grid.addWidget(QLabel("Spalten"), 0, 2)
+        title = QLabel("<b>Mehrere auf einmal setzen</b><br>Der nächste Klick setzt ein Raster, danach wieder einzeln.")
+        grid.addWidget(title, 0, 0, 1, 3)
+        single = QPushButton("Einzeln setzen")
+        single.clicked.connect(lambda _c=False: choose(1, 1))
+        grid.addWidget(single, 1, 0, 1, 3)
+        presets = QHBoxLayout()
+        for rows, cols in _GRID_PRESETS:
+            preset = QPushButton(f"{rows}×{cols}")
+            preset.setFixedWidth(40)
+            preset.clicked.connect(lambda _c=False, r=rows, c=cols: choose(r, c))
+            presets.addWidget(preset)
+        grid.addLayout(presets, 2, 0, 1, 3)
+        grid.addWidget(QLabel("Reihen"), 3, 0)
+        grid.addWidget(QLabel("Spalten"), 3, 2)
         self._rows = QSpinBox()
         self._cols = QSpinBox()
         for spin in (self._rows, self._cols):
             spin.setRange(1, 20)
             spin.valueChanged.connect(lambda _v: self.controller.set_grid(self._rows.value(), self._cols.value()))
-        grid.addWidget(self._rows, 1, 0)
-        grid.addWidget(QLabel("×"), 1, 1)
-        grid.addWidget(self._cols, 1, 2)
-        presets = QHBoxLayout()
-        for rows, cols in _GRID_PRESETS:
-            preset = QPushButton(f"{rows}×{cols}")
-            preset.setFixedWidth(40)
-            preset.clicked.connect(lambda _c=False, r=rows, c=cols: self.controller.set_grid(r, c))
-            presets.addWidget(preset)
-        grid.addLayout(presets, 2, 0, 1, 3)
+        grid.addWidget(self._rows, 4, 0)
+        grid.addWidget(QLabel("×"), 4, 1)
+        grid.addWidget(self._cols, 4, 2)
         action = QWidgetAction(menu)
         action.setDefaultWidget(panel)
         menu.addAction(action)
@@ -270,6 +309,13 @@ class PlanningHotbar(QFrame):
         else:
             self.controller.back_to_select()
 
+    def _on_vertices(self, checked: bool):
+        if checked:
+            self.controller.edit_vertices()
+        else:
+            self.controller.back_to_select()
+        self.sync_tool_buttons()
+
     def _current_type(self, kind: str) -> str | None:
         c = self.controller
         return {
@@ -279,7 +325,8 @@ class PlanningHotbar(QFrame):
             "distributor": c.point_ids.get(ROLE_DISTRIBUTORS),
             "generator": c.point_ids.get(ROLE_GENERATORS),
             "light": c.point_ids.get(ROLE_LIGHTS),
-            "area": c.area_role,
+            "zone": c.point_ids.get(ROLE_ZONES),
+            "arrow": c.point_ids.get(ROLE_ARROWS),
         }.get(kind)
 
     def sync_tool_buttons(self):
@@ -298,7 +345,17 @@ class PlanningHotbar(QFrame):
             tip = f"{entry.title}: {name}" if name else entry.title
             entry.button.setToolTip(f"{tip} ({entry.shortcut})" if entry.shortcut else tip)
         rows, cols = self.controller.grid_rows, self.controller.grid_cols
-        self._grid_button.setText(f"{rows}×{cols}")
+        self._vertices.blockSignals(True)
+        self._vertices.setChecked(active == "edit")
+        self._vertices.blockSignals(False)
+        # Das Raster gehört zu Zelt und Fahrzeug – nur dort zeigen; blau, solange es scharf ist
+        multiple = rows * cols > 1
+        self._grid_button.setVisible(active in ("tent", "vehicle"))
+        self._grid_button.setText(f"{rows}×{cols}" if multiple else "Einzeln")
+        if self._grid_button.property("armed") != multiple:
+            self._grid_button.setProperty("armed", multiple)
+            self._grid_button.style().unpolish(self._grid_button)
+            self._grid_button.style().polish(self._grid_button)
         for spin, value in ((self._rows, rows), (self._cols, cols)):
             if spin.value() != value:
                 spin.blockSignals(True)
@@ -312,8 +369,11 @@ class PlanningHotbar(QFrame):
             self._reposition()
 
     def refresh_selection(self):
-        has_selection = bool(self.controller.selection_ids())
+        count = sum(len(ids) for ids in self.controller.selection_ids().values())
+        has_selection = count > 0
+        self._count.setText(f"{count} ausgewählt")
         for widget in self._selection_widgets:
             widget.setVisible(has_selection)
+        self._vertices.setVisible(self.controller.editable_shape() is not None)
         if self.isVisible():
             self._reposition()

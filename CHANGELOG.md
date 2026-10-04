@@ -3,24 +3,47 @@
 ## [Unreleased]
 
 ### Hinzugefügt
+- **Druckvorlagen der Toolbox A4/A3 quer** (`Toolbox_*.qpt`, im Dialog unter „THW Toolbox“; Schrift BundesSans), reduziert auf das Nötige und schwarz auf weiß ohne Flächenfüllungen: Titelleiste mit Bundeslogo, Kartentitel samt Einsatz/Ort und rechts dem taktischen Zeichen des Trupps UL (im Dialog abschaltbar); in der Karte Nordpfeil oben rechts und Maßstab unten links wie in den Vorlagen der THW-Leitung, beide auf durchscheinendem Grund; alle übrigen Angaben in der Seitenleiste (Zeichenerklärung, eine Übersicht, Stand, Gitter, Herausgeber, Quellen)
+  - **Gitter wählbar**: UTMREF (Maschenweite 10 m / 100 m / 1 km / 10 km je nach Maßstab) oder Lon/Lat in Dezimalgrad, jeweils mit Randbeschriftung; die Seitenleiste nennt das Gitter, den Linienabstand und die Koordinate der Kartenmitte als Lesebeispiel (`@thw_gitter`)
+  - Kartenausschnitt und UTM-Zone werden beim Öffnen aus dem Kartenfenster übernommen, der Maßstab auf einen gängigen Wert aufgerundet
+  - Neue Felder „Kartentitel“ (mit Vorschlägen) und „Einsatzort“ im Druckvorlagen-Dialog (`@thw_kartentitel`, `@thw_einsatzort`), im Projekt gespeichert; „Blatt“ (`@thw_blatt`) erscheint nur, wenn angegeben
+  - Abfrage der Berechtigung für das Bundeslogo beim Öffnen (merkbar; alternativ „Ohne Logo öffnen“)
+  - Erzeugt mit `scripts/build_print_templates.py`
+- **Eigene Druckvorlagen**: „Eigene hinzufügen …“ im Druckvorlagen-Dialog übernimmt beliebige `.qpt`-Dateien in das QGIS-Profil (`thw_toolbox/druckvorlagen`, übersteht Plugin-Updates), „Entfernen“ löscht sie wieder; die Angaben aus dem Dialog stehen darin als Layout-Variablen bereit. Die Vorlagen sind nach „THW Toolbox“, „THW-Leitung“ und „Eigene Vorlagen“ gruppiert
+- **Zeichenerklärung nach Wahl**: Die Legende zeigt nur, was auf die Grundkarte gezeichnet wurde (taktische Zeichen, Objektplanung, eigene Vektorlayer im Kartenausschnitt) – ohne Hintergrundkarten, Gitter-Layer, leere Gruppen und Gruppenüberschriften; Zeichennamen ohne Unterstriche. Einzelne Layer lassen sich im Dialog an- und abhaken (am Layer im Projekt gespeichert); „Layout → Legende aktualisieren (THW Toolbox)“ im Designer baut sie nach Änderungen neu auf
+- Übersichtskarten der Druckvorlagen zeigen nur noch die Hintergrundkarte, nicht mehr Zeichen und deren Beschriftungen
+- **A3 aus zwei A4-Blättern**: Im Layout-Designer exportiert „Layout → Als A4-Blätter exportieren (PDF) …“ jedes Layout maßstabstreu als mehrseitiges A4-PDF zum Zusammenkleben (5 mm Druckrand, 10 mm Überlappung, Schnittlinie auf den Folgeblättern). Die Vorlage `Toolbox_A3_QUER_2xA4` (400 × 297 mm) passt genau auf zwei A4-Blätter hoch
 - **THW-Drucklayouts A0–A4 quer** (Standard der THW-Leitung) in `templates/` inkl. Logo und Nordpfeil
-- Druckvorlagen-Dialog fragt Ortsverband, Einheit, Bearbeiter, Einsatz und Einstufung (VS-NfD / nicht klassifiziert) ab; OV/Einheit/Bearbeiter werden in den Benutzereinstellungen, der Einsatz im Projekt gemerkt
+- Druckvorlagen-Dialog fragt Ortsverband, Einheit, Bearbeiter und Einsatz ab; OV/Einheit/Bearbeiter werden in den Benutzereinstellungen, der Einsatz im Projekt gemerkt
+- Keine Einstufung VS-NfD: eingestufte Inhalte dürfen mit QGIS nicht verarbeitet werden. Die Toolbox-Vorlagen tragen keine Kennzeichnung, die ausgeblendete VS-NfD-Kennzeichnung der Vorlagen der THW-Leitung wird beim Laden entfernt
 - Autovervollständigung für den Ortsverband aus `data/ovs.json` (670 OVs, Teilwortsuche)
 - Platzhalter der Vorlagen werden zu Layout-Variablen (`@thw_ov`, `@thw_einheit`, `@thw_einheit_kurz`, `@thw_bearbeiter`, `@thw_einsatz`), nachträglich in den Layout-Eigenschaften änderbar
 - **Objektplanung** (Dock + schwebende Hotbar unten auf der Karte, Paket `planning/`; Standardwerkzeug ist die Auswahl, Esc führt nach dem Platzieren dorthin zurück):
   - Zelte maßstabsgetreu platzieren (SG 300, SG 500, SG 20/30/50, Faltpavillons, eigenes Maß) inkl. gestrichelter Abspannung, Drehen per R / Strg+Mausrad / Rechtsklick; Mindestabstand wird geprüft und nur als Warnung gemeldet
   - **Fahrzeuge** maßstabsgetreu platzieren (GKW, MTW Sprinter, MTW T5/T6, MzKW, MzGW, FüKW, MLW, LKW-K, LKW Ladekran, WLF, Radlader, PKW, Anhänger u.a.) in Draufsicht mit Fahrerhaus bzw. Deichsel, dem passenden **THW-Fahrzeugzeichen** in der Mitte und eigenem Mindestabstand
-  - **Raster**: Zelte/Fahrzeuge als Reihen × Spalten im Mindestabstand auf einen Klick setzen
+  - **Raster**: Zelte/Fahrzeuge als Reihen × Spalten im Mindestabstand auf einen Klick setzen; das Raster gilt für einen Klick, danach wird wieder einzeln gesetzt
   - **Hilfslinien**: beim Platzieren und Verschieben an Kanten und Mitten benachbarter Zelte/Fahrzeuge (auch im Mindestabstand) einrasten; Strg hält das Einrasten an
   - **Bearbeiten im Figma-Stil** wie bei den taktischen Zeichen: blauer Rahmen mit Eckpunkten und Maß-Badge, Hover-Umriss, Klick / Shift+Klick / Auswahlrahmen, Ziehen verschiebt (Badge zeigt den Abstand zum Nachbarn), an den Ecken ziehen dreht (Shift: 15°), Alt+Ziehen kopiert, Pfeiltasten schieben 0,5 m (Shift: 5 m), Entf löscht, R dreht, D dupliziert, Doppelklick / Enter bearbeitet die Bezeichnung, Rechtsklick-Menü
-  - **Flächen-Kapazität**: Fläche zeichnen oder auswählen → Tabelle, wie viele Zelte bzw. Fahrzeuge je Typ hineinpassen, Vorschau auf der Karte und Übernahme per Klick
+  - **Ein Cursor für alles**: Die Hotbar und das Auswahlwerkzeug gelten für taktische Zeichen und Objektplanung gemeinsam (sichtbar, sobald Toolbox oder Objektplanung offen ist). Ein Klick auf ein Zeichen wählt das Zeichen (Rahmen zum Skalieren/Drehen wie bisher), ein Klick auf ein Objekt das Objekt; rechts kommt automatisch der passende Tab nach vorn (Symbolpalette und Objektplanung liegen als Tabs übereinander). Auswahlrahmen und Shift+Klick erfassen Zeichen und Objekte gemischt – gemeinsam verschieben und löschen. Karte verschieben: mittlere Maustaste oder Leertaste
+  - **Drag & Drop**: Zelte, Fahrzeuge, Verteiler, Stromerzeuger und Leuchten lassen sich aus dem Dock direkt auf die Karte ziehen
+  - **Gebiete** (Einsatzabschnitt, Gefahrenbereich, Bereitstellungsraum, Absperrbereich) und **Pfeile** (rot, blau, schwarz, grün) frei zeichnen, beschriften, verschieben, drehen und duplizieren; Typen/Farben in `data/objektplanung.json`. **Punkte bearbeiten** (Doppelklick, Hotbar oder Rechtsklick-Menü): Eckpunkte ziehen, auf den Kantenmitten neue Punkte herausziehen, Rechtsklick / Entf löscht einen Punkt
+  - **Taktische Zeichen duplizieren**: Alt+Ziehen und D kopieren jetzt auch Zeichen (einzeln und in gemischter Auswahl); Zeichen lassen sich an den Ecken bis Größe 1 verkleinern (bisher 10)
+  - **Hotbar abschaltbar**: Einstellungen → „Hotbar auf der Karte anzeigen“; die Werkzeuge bleiben im Dock erreichbar
+  - Die Flächen-Kapazität (wie viele Zelte/Fahrzeuge passen in eine Fläche) ist vorerst nicht mehr über die Oberfläche erreichbar
   - **Stromversorgung**: Stromerzeuger (SEA 5/8/13 kVA, NEA 50/200 kVA) mit taktischem Zeichen, Leitungsroller 25 m / 50 m (fängt Stromerzeuger, Verteiler, Leuchten und Leitungsenden), Verteiler 16 A; lange Strecken werden automatisch in mehrere Trommeln aufgeteilt, Kupplungspunkte und Rest der letzten Trommel werden angezeigt
   - **Beleuchtung**: Flutlicht, LED-Strahler, Leuchtballone, Lichtmast mit taktischem Zeichen und ausgeleuchtetem Radius auf der Karte
   - Bilanz (Zelte/Zeltfläche, Fahrzeuge, Leitungslänge, Verteiler, Stromerzeuger, Beleuchtung) inkl. **Last je Stromerzeuger** über verbundene Leitungen und Hinweis auf nicht angeschlossene Leuchten
   - Speicherung in `<projekt>_objektplanung.gpkg` neben der Projektdatei; Katalog mit Maßen und Leistungen in `data/objektplanung.json`
+- **Marker-Tabelle: Import aus CSV/Excel** (`.csv`, `.tsv`, `.xlsx`, `.ods`) mit Spalten-Zuordnung für Position (UTMREF, „Breite Länge“ oder getrennte Spalten), Beschriftung und Zeichen, Standard-Zeichen und Vorschau; unvollständige Zeilen bleiben als Entwurf in der Tabelle; „Vorlage speichern …“ legt eine Beispieltabelle zum Ausfüllen an
 
 ### Verbessert
-- **Einheitliche Legende**: jedes taktische Zeichen erscheint einmal, ungedreht und in fester Größe (max. Symbolgröße der Vorlage), unabhängig von Größe/Drehung auf der Karte (`layout/print_template.py`)
+- **Zeichen-Auswahl** (Icon-Picker): Namen werden vollständig und mehrzeilig angezeigt statt abgekürzt, das Raster füllt die ganze Breite, das gewählte Zeichen steht mit Kategorie unter dem Raster, Pfeiltasten im Suchfeld bewegen die Auswahl
+- Marker-Tabelle hat ein eigenes Toolbar-Icon im Stil der übrigen
+- **Einheitliche Legende**: jedes taktische Zeichen erscheint einmal, ungedreht und in fester Größe (max. Symbolgröße der Vorlage), unabhängig von Größe/Drehung auf der Karte (`layout/legend.py`)
+- Der Layout-Designer öffnet sich aus dem Druckvorlagen-Dialog im Vordergrund statt hinter dem QGIS-Hauptfenster
+
+### Entfernt
+- Drucklayout `templates/Einsatz.qpt`
 
 ## [2.1.1]
 

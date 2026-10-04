@@ -1,0 +1,21 @@
+<svg width="597" height="597" viewBox="0 0 597 597" fill="none" xmlns="http://www.w3.org/2000/svg">
+<rect x="56" y="88" width="485" height="400" rx="40" fill="url(#paint0_radial_table)"/>
+<path d="M56 128C56 105.909 73.909 88 96 88H501C523.091 88 541 105.909 541 128V190H56V128Z" fill="url(#paint1_linear_table)"/>
+<path d="M56 289H541M56 388H541M218 190V488M380 190V488" stroke="#FFFFFF" stroke-width="18"/>
+<path d="M436 568C436 568 336 456 336 388C336 332.772 380.772 288 436 288C491.228 288 536 332.772 536 388C536 456 436 568 436 568Z" fill="url(#paint2_linear_table)" stroke="#FFFFFF" stroke-width="18" stroke-linejoin="round"/>
+<circle cx="436" cy="388" r="36" fill="#FFFFFF"/>
+<defs>
+<radialGradient id="paint0_radial_table" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(130.948 69.0763) scale(457.33 458.201)">
+<stop stop-color="#6FCEFC"/>
+<stop offset="1" stop-color="#167CF7"/>
+</radialGradient>
+<linearGradient id="paint1_linear_table" x1="428.919" y1="88" x2="380" y2="230" gradientUnits="userSpaceOnUse">
+<stop stop-color="#2471CA"/>
+<stop offset="1" stop-color="#123864"/>
+</linearGradient>
+<linearGradient id="paint2_linear_table" x1="500" y1="288" x2="372" y2="540" gradientUnits="userSpaceOnUse">
+<stop stop-color="#2471CA"/>
+<stop offset="1" stop-color="#123864"/>
+</linearGradient>
+</defs>
+</svg>

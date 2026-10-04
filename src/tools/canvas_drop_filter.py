@@ -21,6 +21,9 @@ class CanvasDropFilter(QObject):
                 ev.acceptProposedAction()
                 return True
         if ev.type() == QEvent.Type.Drop:
+            # Andere Drops (z.B. Objekte aus dem Objektplanungs-Dock) gehören nicht hierher
+            if not ev.mimeData().hasText():
+                return False
             svg = ev.mimeData().text()
             if hasattr(ev, "position"):
                 pos = ev.position().toPoint()

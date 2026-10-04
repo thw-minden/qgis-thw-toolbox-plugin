@@ -14,7 +14,21 @@ Dieses Plugin verwendet externe Ressourcen mit den folgenden Lizenzen:
    - Lizenz: Apache 2.0 (Apache License, Version 2.0)
    - Lizenztext: https://www.apache.org/licenses/LICENSE-2.0
 
-Das Plugin selbst steht unter der MIT-Lizenz:
+3. Nordpfeil (templates/assets/Nordpfeil.svg)
+   - Quelle: QGIS-SVG-Sammlung (svg/arrows/NorthArrow_04.svg), https://qgis.org
+
+4. Logos und Hoheitszeichen (nicht Teil der MIT-Lizenz)
+   - templates/assets/THW_Logo.svg (Logo der Bundesanstalt Technisches Hilfswerk)
+     Quelle: https://commons.wikimedia.org/wiki/File:THW.svg
+     Urheberrecht: gemeinfrei als amtliches Werk (§ 5 Abs. 1 UrhG), laut Angabe dort
+   - templates/assets/logo.svg (Bundesadler mit Schriftzug "Bundesanstalt Technisches Hilfswerk")
+   - Diese Dateien werden unverändert weitergegeben und nicht unter der unten stehenden
+     MIT-Lizenz lizenziert. Unabhängig vom Urheberrecht ist die Verwendung von
+     Hoheitszeichen und Kennzeichen des THW bzw. des Bundes rechtlich eingeschränkt;
+     sie sind nur zur Verwendung in den mitgelieferten Druckvorlagen durch dazu
+     berechtigte Stellen gedacht.
+
+Das Plugin selbst (mit Ausnahme der unter 4. genannten Dateien) steht unter der MIT-Lizenz:
 
 MIT License
 

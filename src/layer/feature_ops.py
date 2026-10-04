@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 from qgis.core import (
     QgsFeature,
+    QgsFeatureRequest,
     QgsField,
     QgsGeometry,
     QgsPointXY,
@@ -208,6 +209,42 @@ class FeatureOperations:
         layer.commitChanges()
         self._on_renderer_dirty()
         return True
+
+    # ------------------------------------------------------------------
+    # Duplicate
+    # ------------------------------------------------------------------
+
+    def duplicate(self, fids, geometries=None) -> list:
+        """Copy the features `fids`; returns the fids of the copies.
+
+        `geometries` ({fid: QgsGeometry}, layer CRS) places a copy somewhere
+        else than its original. Every copy gets its own `unique_id`, since the
+        renderer keeps one symbol per id.
+        """
+        layer = self.layer
+        if not layer or not fids:
+            return []
+        geometries = geometries or {}
+        fid_idx = layer.fields().indexOf("fid")
+        copies = []
+        for feat in layer.getFeatures(QgsFeatureRequest().setFilterFids(list(fids))):
+            copy = QgsFeature(feat)
+            copy.setId(-1)
+            if fid_idx >= 0:
+                copy.setAttribute(fid_idx, None)
+            copy.setAttribute("unique_id", str(uuid.uuid4()))
+            if feat.id() in geometries:
+                copy.setGeometry(geometries[feat.id()])
+            copies.append(copy)
+        if not copies:
+            return []
+        if layer.isEditable():
+            layer.commitChanges()
+        before = set(layer.allFeatureIds())
+        layer.dataProvider().addFeatures(copies)
+        layer.updateExtents()
+        self._on_renderer_dirty()
+        return sorted(set(layer.allFeatureIds()) - before)
 
     # ------------------------------------------------------------------
     # Place

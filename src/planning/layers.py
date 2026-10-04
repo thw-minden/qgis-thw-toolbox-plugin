@@ -1,4 +1,4 @@
-"""GeoPackage-Layer der Objektplanung (Zelte, Fahrzeuge, Strom, Beleuchtung)."""
+"""GeoPackage-Layer der Objektplanung (Zelte, Fahrzeuge, Strom, Beleuchtung, Gebiete, Pfeile)."""
 
 import os
 import time
@@ -50,6 +50,10 @@ ROLE_CABLES = "leitungen"
 ROLE_DISTRIBUTORS = "verteiler"
 ROLE_GENERATORS = "stromerzeuger"
 ROLE_LIGHTS = "beleuchtung"
+ROLE_ZONES = "gebiete"
+ROLE_ARROWS = "pfeile"
+# Kein Objektplanungs-Layer: unter dieser Rolle führt die Auswahl die taktischen Zeichen (Marker-Layer) mit
+ROLE_MARKERS = "zeichen"
 
 # Zelte und Fahrzeuge: Rechteck-Grundflächen mit identischem Schema
 _FOOTPRINT_FIELDS = [
@@ -64,6 +68,8 @@ _FOOTPRINT_FIELDS = [
 FOOTPRINT_ROLES = (ROLE_TENTS, ROLE_VEHICLES)
 # Punkt-Objekte, die per Klick gesetzt werden (Leitungen fangen an ihnen)
 POINT_ROLES = (ROLE_DISTRIBUTORS, ROLE_GENERATORS, ROLE_LIGHTS)
+# Frei gezeichnete Formen mit Typ (= Farbe) und Bezeichnung
+_SHAPE_FIELDS = [("typ_id", _T_STRING), ("typ", _T_STRING), ("bezeichnung", _T_STRING)]
 
 _LAYER_SPECS = {
     ROLE_TENTS: {"title": "Zelte", "geometry": "Polygon", "fields": _FOOTPRINT_FIELDS},
@@ -109,9 +115,20 @@ _LAYER_SPECS = {
             ("radius", _T_DOUBLE),
         ],
     },
+    ROLE_ZONES: {"title": "Gebiete", "geometry": "Polygon", "fields": _SHAPE_FIELDS},
+    ROLE_ARROWS: {"title": "Pfeile", "geometry": "LineString", "fields": _SHAPE_FIELDS},
 }
 # Reihenfolge im Layerbaum: Punkte oben, Flächen unten
-_ROLE_ORDER = (ROLE_GENERATORS, ROLE_DISTRIBUTORS, ROLE_LIGHTS, ROLE_CABLES, ROLE_VEHICLES, ROLE_TENTS)
+_ROLE_ORDER = (
+    ROLE_GENERATORS,
+    ROLE_DISTRIBUTORS,
+    ROLE_LIGHTS,
+    ROLE_ARROWS,
+    ROLE_CABLES,
+    ROLE_VEHICLES,
+    ROLE_TENTS,
+    ROLE_ZONES,
+)
 ALL_ROLES = _ROLE_ORDER
 
 
@@ -440,6 +457,21 @@ class PlanningLayers(QObject):
         elif role == ROLE_DISTRIBUTORS:
             lyr.setRenderer(QgsSingleSymbolRenderer(_distributor_symbol()))
             _set_labels(lyr, 'coalesce(nullif("bezeichnung", \'\'), "typ")')
+        elif role == ROLE_ZONES:
+            renderer = QgsCategorizedSymbolRenderer(
+                "typ_id", [QgsRendererCategory(t.id, _zone_symbol(t.farbe), t.name) for t in self.catalog.gebiete]
+            )
+            renderer.setSourceSymbol(_zone_symbol("#1565c0"))
+            lyr.setRenderer(renderer)
+            # Gebiete sind groß – ihre Namen sollen auch in der Übersicht lesbar sein
+            _set_labels(lyr, 'coalesce(nullif("bezeichnung", \'\'), "typ")', polygon=True, min_scale=50000)
+        elif role == ROLE_ARROWS:
+            renderer = QgsCategorizedSymbolRenderer(
+                "typ_id", [QgsRendererCategory(t.id, _arrow_symbol(t.farbe), t.name) for t in self.catalog.pfeile]
+            )
+            renderer.setSourceSymbol(_arrow_symbol("#c62828"))
+            lyr.setRenderer(renderer)
+            _set_labels(lyr, "nullif(\"bezeichnung\", '')", line=True, min_scale=50000)
         lyr.triggerRepaint()
 
     def _sign_expr(self, types, default: str) -> str:
@@ -580,6 +612,56 @@ def _cable_symbol(color: str) -> QgsLineSymbol:
     return symbol
 
 
+def _rgba(color: str, alpha: int = 255) -> str:
+    c = QColor(color)
+    return f"{c.red()},{c.green()},{c.blue()},{alpha}"
+
+
+def _zone_symbol(color: str) -> QgsFillSymbol:
+    return QgsFillSymbol.createSimple(
+        {
+            "color": _rgba(color, 45),
+            "outline_color": _rgba(color),
+            "outline_width": "0.8",
+            "outline_width_unit": "MM",
+            "joinstyle": "round",
+        }
+    )
+
+
+def _arrow_symbol(color: str) -> QgsLineSymbol:
+    symbol = QgsLineSymbol.createSimple(
+        {
+            "line_color": _rgba(color),
+            "line_width": "1.2",
+            "line_width_unit": "MM",
+            "capstyle": "flat",
+            "joinstyle": "round",
+            # Die Spitze des Pfeilkopfs sitzt genau auf dem letzten Punkt – die Linie endet schon
+            # im Kopf, sonst ragt ihr Ende als Punkt über die Spitze hinaus
+            "trim_distance_end": "2",
+            "trim_distance_end_unit": "MM",
+        }
+    )
+    # Pfeilspitze am Ende, dreht mit dem letzten Abschnitt
+    head = QgsMarkerSymbol.createSimple(
+        {
+            "name": "filled_arrowhead",
+            "color": _rgba(color),
+            "outline_style": "no",
+            "size": "5",
+        }
+    )
+    try:
+        end = QgsMarkerLineSymbolLayer()
+        end.setPlacements(Qgis.MarkerLinePlacement.LastVertex)
+        end.setSubSymbol(head)
+        symbol.appendSymbolLayer(end)
+    except Exception:
+        logger.debug("Pfeilspitze nicht verfügbar", exc_info=True)
+    return symbol
+
+
 def _metric_buffer_expr(distance_expr: str, segments: int) -> str:
     """Puffer in echten Metern (Projekt-CRS kann Grad oder Web-Mercator sein → über UTM puffern)."""
     return (
@@ -644,7 +726,12 @@ def _distributor_symbol() -> QgsMarkerSymbol:
 
 
 def _set_labels(
-    lyr: QgsVectorLayer, expression: str, polygon: bool = False, line: bool = False, y_offset_mm: float = 0.0
+    lyr: QgsVectorLayer,
+    expression: str,
+    polygon: bool = False,
+    line: bool = False,
+    y_offset_mm: float = 0.0,
+    min_scale: float = 2500,
 ) -> None:
     settings = QgsPalLayerSettings()
     settings.fieldName = expression
@@ -677,7 +764,7 @@ def _set_labels(
     # Beschriftungen nur bei nahem Zoom, sonst wird es unübersichtlich
     settings.scaleVisibility = True
     settings.maximumScale = 1
-    settings.minimumScale = 2500
+    settings.minimumScale = min_scale
 
     lyr.setLabeling(QgsVectorLayerSimpleLabeling(settings))
     lyr.setLabelsEnabled(True)
