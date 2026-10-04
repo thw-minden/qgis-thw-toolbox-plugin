@@ -7,12 +7,11 @@ from qgis.core import (
     QgsGeometry,
     QgsPointXY,
     QgsProject,
-    QgsRectangle,
     QgsRenderContext,
 )
 from qgis.gui import QgsMapTool, QgsRubberBand, QgsVertexMarker
-from qgis.PyQt.QtCore import QPointF, Qt
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtCore import QPointF, QRectF, Qt
+from qgis.PyQt.QtGui import QColor, QCursor, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 
 from ..layer import annotations
 from ..layout.mgrs_grid import point_to_mgrs
@@ -25,11 +24,15 @@ logger = get_logger(__name__)
 _PICK_TOLERANCE_PX = 10
 # Maximum distance between cursor and a corner of a description frame to grab it for scaling
 _CORNER_TOLERANCE_PX = 8
+# Just outside a frame corner (up to this distance) the cursor rotates the text — as in Figma
+_ROTATE_TOLERANCE_PX = 24
+# Shift while rotating snaps the text angle to multiples of this
+_ROTATE_SNAP_DEG = 15
 
 _HINT = (
-    "Annotation bearbeiten: Punkt/Stützpunkt/Beschreibung ziehen = verschieben, Schwerpunkt ⊕ ziehen = ganze "
+    "Annotation bearbeiten: Punkt/Stützpunkt/Beschreibung/Längenangabe ziehen = verschieben, Schwerpunkt ⊕ ziehen = ganze "
     "Linie/Fläche verschieben, Ecke der Beschreibung ziehen = "
-    "Textgröße ändern, Doppelklick auf Punkt/Beschreibung/⊕ = bearbeiten, Linksklick auf Linie/Umriss = Stützpunkt "
+    "Textgröße ändern, knapp außerhalb einer Ecke ziehen = drehen (Umschalt = 15°-Schritte), Doppelklick auf Punkt/Beschreibung/⊕ = bearbeiten, Linksklick auf Linie/Umriss = Stützpunkt "
     "einfügen, Rechtsklick auf Stützpunkt = entfernen, Esc = abbrechen."
 )
 _HINT_MIN_VERTICES = (
@@ -39,43 +42,67 @@ _HINT_MIN_VERTICES = (
 
 _HIGHLIGHT = QColor(0, 120, 215)
 
-# Frame corners in the order top-left, top-right, bottom-right, bottom-left, with matching resize cursors
-_CORNER_CURSORS = (
-    Qt.CursorShape.SizeFDiagCursor,
-    Qt.CursorShape.SizeBDiagCursor,
-    Qt.CursorShape.SizeFDiagCursor,
-    Qt.CursorShape.SizeBDiagCursor,
-)
+
+def _polygon(points: list[QgsPointXY]) -> QgsGeometry:
+    return QgsGeometry.fromPolygonXY([[*points, points[0]]])
 
 
-def _corners(rect: QgsRectangle) -> list[QgsPointXY]:
+def _scaled(points: list[QgsPointXY], pivot: QgsPointXY, factor: float) -> list[QgsPointXY]:
+    """``points`` scaled by ``factor`` around ``pivot`` (the point that stays in place)."""
     return [
-        QgsPointXY(rect.xMinimum(), rect.yMaximum()),
-        QgsPointXY(rect.xMaximum(), rect.yMaximum()),
-        QgsPointXY(rect.xMaximum(), rect.yMinimum()),
-        QgsPointXY(rect.xMinimum(), rect.yMinimum()),
+        QgsPointXY(pivot.x() + (p.x() - pivot.x()) * factor, pivot.y() + (p.y() - pivot.y()) * factor) for p in points
     ]
 
 
-def _scaled_rect(rect: QgsRectangle, anchor: QgsPointXY, factor: float) -> QgsRectangle:
-    """``rect`` scaled by ``factor`` around ``anchor`` (the pivot that stays in place)."""
-    return QgsRectangle(
-        anchor.x() + (rect.xMinimum() - anchor.x()) * factor,
-        anchor.y() + (rect.yMinimum() - anchor.y()) * factor,
-        anchor.x() + (rect.xMaximum() - anchor.x()) * factor,
-        anchor.y() + (rect.yMaximum() - anchor.y()) * factor,
-    )
+def _translated(points: list[QgsPointXY], dx: float, dy: float) -> list[QgsPointXY]:
+    return [QgsPointXY(p.x() + dx, p.y() + dy) for p in points]
+
+
+def _corner_cursor(frame: annotations.LabelFrame, corner_index: int):
+    """Diagonal resize cursor matching where the corner lies relative to the (rotated) frame's center."""
+    corner, center = frame.corners[corner_index], frame.center
+    # Map y points up: corners up-right / down-left of the center get the "/" cursor
+    rising = (corner.x() - center.x()) * (corner.y() - center.y()) > 0
+    return Qt.CursorShape.SizeBDiagCursor if rising else Qt.CursorShape.SizeFDiagCursor
+
+
+_rotate_cursor_cache: QCursor | None = None
+
+
+def _rotate_cursor() -> QCursor:
+    """Circular-arrow cursor for the rotation zones (Qt has no built-in rotate cursor)."""
+    global _rotate_cursor_cache
+    if _rotate_cursor_cache is None:
+        pixmap = QPixmap(24, 24)
+        pixmap.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        arc = QPainterPath()
+        arc.arcMoveTo(QRectF(5, 5, 14, 14), 60)
+        arc.arcTo(QRectF(5, 5, 14, 14), 60, 270)
+        head = QPolygonF([QPointF(16.5, 2.5), QPointF(20.5, 8.5), QPointF(13.5, 9.5)])
+        for color, width in ((QColor(255, 255, 255), 4.0), (QColor(0, 0, 0), 1.8)):  # white halo, black arrow
+            painter.setPen(QPen(color, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(arc)
+            painter.setBrush(color)
+            painter.drawPolygon(head)
+        painter.end()
+        _rotate_cursor_cache = QCursor(pixmap, 12, 12)
+    return _rotate_cursor_cache
 
 
 class AnnotationMoveTool(QgsMapTool):
     """Edit annotation geometries: drag points/vertices/descriptions, scale descriptions, insert/remove vertices.
 
     - Left-drag on a point or vertex moves it (rubber band preview, applied on release).
-    - Left-drag on a description moves the text independently of its object's
-      vertices (a point's description still follows the marker when the point moves).
-    - Hovering any description shows its frame with four corner handles; dragging
-      a corner scales the text size — point descriptions around their center,
-      line/polygon descriptions around their anchor (bottom center).
+    - Left-drag on a description or measurement label moves the text independently of its
+      object's vertices (a point's description still follows the marker when the point moves;
+      measurement labels keep their manual offset to their edge when the object changes).
+    - Hovering any description shows its frame — rotated with the text — with four corner
+      handles; dragging a corner scales the text size (point descriptions around their
+      center, line/polygon descriptions around their anchor). Dragging just outside a corner
+      rotates the text around the frame center; Shift snaps to 15° steps.
     - While a description is hovered, moved or scaled, the object it belongs to
       is highlighted.
     - Every line and polygon shows its center of mass (⊕) while the tool is active;
@@ -107,10 +134,12 @@ class AnnotationMoveTool(QgsMapTool):
 
         # Hover state — at most one of these is set
         self._hover_node: annotations.NodeHandle | None = None
-        # (label_id, text extent in layer CRS, corner index) when hovering a frame corner
-        self._hover_corner: tuple[str, QgsRectangle, int] | None = None
-        # (label_id, text extent in layer CRS) when hovering a description
-        self._hover_label: tuple[str, QgsRectangle] | None = None
+        # (label_id, frame, corner index) when hovering a frame corner (scaling)
+        self._hover_corner: tuple[str, annotations.LabelFrame, int] | None = None
+        # (label_id, frame, corner index) when hovering the rotation zone just outside a corner
+        self._hover_rotate: tuple[str, annotations.LabelFrame, int] | None = None
+        # (label_id, frame) when hovering a description
+        self._hover_label: tuple[str, annotations.LabelFrame] | None = None
         # (item_id, point on the outline in layer CRS) when hovering a line/polygon outline
         self._hover_segment: tuple[str, QgsPointXY] | None = None
         # (item_id, center of mass in layer CRS) when hovering a line/polygon's center of mass
@@ -119,13 +148,17 @@ class AnnotationMoveTool(QgsMapTool):
         # Drag state — at most one of these is set
         self._dragging: annotations.NodeHandle | None = None
         self._drag_target: QgsPointXY | None = None  # layer CRS
-        # (label_id, text extent, grab point) — both in layer CRS — while moving a description
-        self._dragging_label: tuple[str, QgsRectangle, QgsPointXY] | None = None
+        # (label_id, frame, grab point in layer CRS) while moving a description
+        self._dragging_label: tuple[str, annotations.LabelFrame, QgsPointXY] | None = None
         self._label_offset: tuple[float, float] | None = None
-        # (label_id, text extent, pivot, grab distance from pivot, pivot is the frame center) — layer CRS —
+        # (label_id, frame, pivot, grab distance from pivot, pivot is the frame center) — layer CRS —
         # while scaling a description
-        self._scaling_label: tuple[str, QgsRectangle, QgsPointXY, float, bool] | None = None
+        self._scaling_label: tuple[str, annotations.LabelFrame, QgsPointXY, float, bool] | None = None
         self._scale_factor: float | None = None
+        # (label_id, frame, pivot = frame center, grab direction in degrees ccw, text angle at start)
+        # while rotating a description
+        self._rotating_label: tuple[str, annotations.LabelFrame, QgsPointXY, float, float] | None = None
+        self._rotation_delta: float | None = None  # clockwise degrees
         # (item_id, geometry, center of mass) — layer CRS — while moving a whole line/polygon
         self._dragging_item: tuple[str, QgsGeometry, QgsPointXY] | None = None
         self._item_offset: tuple[float, float] | None = None
@@ -173,6 +206,10 @@ class AnnotationMoveTool(QgsMapTool):
         super().deactivate()
 
     def canvasMoveEvent(self, e):
+        if self._rotating_label is not None:
+            shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self._rotate_label_to(e.mapPoint(), e.pos(), shift)
+            return
         if self._dragging_item is not None:
             self._drag_item_to(e.snapPoint(), e.pos())
             return
@@ -203,6 +240,8 @@ class AnnotationMoveTool(QgsMapTool):
             self._start_drag(self._hover_node)
         elif self._hover_corner is not None:
             self._start_scaling(*self._hover_corner)
+        elif self._hover_rotate is not None:
+            self._start_rotating(self._hover_rotate[0], self._hover_rotate[1], e.mapPoint())
         elif self._hover_centroid is not None:
             item_id, center = self._hover_centroid
             geom = annotations.entry_geometry(self._layer, item_id)
@@ -211,10 +250,10 @@ class AnnotationMoveTool(QgsMapTool):
                 self._item_offset = None
                 self._hover_marker.hide()
         elif self._hover_label is not None:
-            label_id, rect = self._hover_label
+            label_id, frame = self._hover_label
             grab = self._to_layer_crs(e.mapPoint())
             if grab is not None:
-                self._dragging_label = (label_id, rect, grab)
+                self._dragging_label = (label_id, frame, grab)
                 self._label_offset = None
                 self._clear_label_frame()
         elif self._hover_segment is not None:
@@ -233,13 +272,23 @@ class AnnotationMoveTool(QgsMapTool):
         if e.button() != Qt.MouseButton.LeftButton:
             return
 
-        if self._dragging_item is not None:
+        if self._rotating_label is not None:
+            label_id, _frame, pivot, _start, _base = self._rotating_label
+            delta = self._rotation_delta
+            self._cancel_drag()
+            if (
+                delta is not None
+                and abs(delta) > 1e-9
+                and annotations.rotate_label(self._layer, label_id, delta, pivot)
+            ):
+                self._notify()
+        elif self._dragging_item is not None:
             item_id, offset = self._dragging_item[0], self._item_offset
             self._cancel_drag()
             if offset is not None and annotations.translate_item(self._layer, item_id, *offset):
                 self._notify()
         elif self._scaling_label is not None:
-            label_id, _rect, pivot, _grab_dist, around_center = self._scaling_label
+            label_id, _frame, pivot, _grab_dist, around_center = self._scaling_label
             factor = self._scale_factor
             self._cancel_drag()
             if factor is not None and annotations.scale_label(
@@ -279,7 +328,7 @@ class AnnotationMoveTool(QgsMapTool):
         elif self._hover_centroid is not None:
             target_id = self._hover_centroid[0]
         else:
-            hit = self._hover_label or self._hover_corner
+            hit = self._hover_label or self._hover_corner or self._hover_rotate
             if hit is None:
                 return
             label_id = hit[0]
@@ -318,13 +367,14 @@ class AnnotationMoveTool(QgsMapTool):
             or self._dragging_label is not None
             or self._scaling_label is not None
             or self._dragging_item is not None
+            or self._rotating_label is not None
         )
 
     def _start_drag(self, handle: annotations.NodeHandle):
         self._dragging = handle
         self._drag_target = None
 
-    def _start_scaling(self, label_id: str, rect: QgsRectangle, corner_index: int):
+    def _start_scaling(self, label_id: str, frame: annotations.LabelFrame, corner_index: int):
         """Begin scaling a description: point descriptions around their center, others around their anchor.
 
         Line/polygon descriptions are anchored at the bottom center, which keeps
@@ -332,13 +382,11 @@ class AnnotationMoveTool(QgsMapTool):
         """
         owner_id = annotations.label_owner(self._layer, label_id)
         around_center = owner_id is not None and annotations.item_kind(self._layer, owner_id) == annotations.KIND_POINT
-        pivot = rect.center() if around_center else annotations.label_anchor(self._layer, label_id)
-        if pivot is None:
-            return
-        grab_dist = pivot.distance(_corners(rect)[corner_index])
+        pivot = frame.center if around_center else frame.anchor
+        grab_dist = pivot.distance(frame.corners[corner_index])
         if grab_dist <= 0:
             return
-        self._scaling_label = (label_id, rect, pivot, grab_dist, around_center)
+        self._scaling_label = (label_id, frame, pivot, grab_dist, around_center)
         self._scale_factor = None
         self._clear_label_frame()
 
@@ -347,10 +395,38 @@ class AnnotationMoveTool(QgsMapTool):
         target = self._to_layer_crs(map_point)
         if target is None:
             return
-        label_id, rect, pivot, grab_dist, _around_center = self._scaling_label
+        label_id, frame, pivot, grab_dist, _around_center = self._scaling_label
         factor = annotations.clamp_label_scale(self._layer, label_id, pivot.distance(target) / grab_dist)
         self._scale_factor = factor
-        self._show_preview(QgsGeometry.fromRect(_scaled_rect(rect, pivot, factor)))
+        self._show_preview(_polygon(_scaled(frame.corners, pivot, factor)))
+
+    def _start_rotating(self, label_id: str, frame: annotations.LabelFrame, map_point: QgsPointXY):
+        """Begin rotating a description around its frame center."""
+        grab = self._to_layer_crs(map_point)
+        if grab is None:
+            return
+        pivot = frame.center
+        start = math.degrees(math.atan2(grab.y() - pivot.y(), grab.x() - pivot.x()))
+        self._rotating_label = (label_id, frame, pivot, start, annotations.label_angle(self._layer, label_id))
+        self._rotation_delta = None
+        self._clear_label_frame()
+
+    def _rotate_label_to(self, map_point: QgsPointXY, pos, snap: bool):
+        """Preview the rotated frame; the angle follows the cursor around the frame center."""
+        target = self._to_layer_crs(map_point)
+        if target is None:
+            return
+        _label_id, frame, pivot, start, base_angle = self._rotating_label
+        current = math.degrees(math.atan2(target.y() - pivot.y(), target.x() - pivot.x()))
+        delta = start - current  # counter-clockwise cursor movement → clockwise text angle
+        if snap:
+            snapped = round((base_angle + delta) / _ROTATE_SNAP_DEG) * _ROTATE_SNAP_DEG
+            delta = snapped - base_angle
+        self._rotation_delta = delta
+        rotated = [annotations.rotate_point(p, pivot, delta) for p in frame.corners]
+        self._show_preview(_polygon(rotated))
+        angle = (base_angle + delta + 180) % 360 - 180
+        self._coordinate_label.show_at(f"{angle:.0f}°", pos)
 
     def _show_drag_coordinate(self, layer_point: QgsPointXY, pos):
         """MGRS coordinate of the dragged vertex next to the cursor (project resolution)."""
@@ -379,11 +455,10 @@ class AnnotationMoveTool(QgsMapTool):
         target = self._to_layer_crs(map_point)
         if target is None:
             return
-        _label_id, rect, grab = self._dragging_label
+        _label_id, frame, grab = self._dragging_label
         dx, dy = target.x() - grab.x(), target.y() - grab.y()
         self._label_offset = (dx, dy)
-        moved = QgsRectangle(rect.xMinimum() + dx, rect.yMinimum() + dy, rect.xMaximum() + dx, rect.yMaximum() + dy)
-        self._show_preview(QgsGeometry.fromRect(moved))
+        self._show_preview(_polygon(_translated(frame.corners, dx, dy)))
 
     def _delete_hovered_node(self):
         handle = self._hover_node
@@ -409,18 +484,20 @@ class AnnotationMoveTool(QgsMapTool):
     def _update_hover(self, pos):
         """Highlight what is under ``pos``.
 
-        Priority: node, then a description frame corner, then a center of mass,
-        then a description, then a line/polygon outline.
+        Priority: node, description frame corner (scale), rotation zone outside a corner,
+        center of mass, description, line/polygon outline.
         """
         self._layer = annotations.find_annotation_layer()
         self._hover_node = self._hover_corner = self._hover_label = self._hover_segment = None
-        self._hover_centroid = None
+        self._hover_centroid = self._hover_rotate = None
         if self._layer:
             self._hover_node = self._node_at(pos)
             if self._hover_node is None:
                 frames = self._label_frames()
                 self._hover_corner = self._corner_at(pos, frames)
                 if self._hover_corner is None:
+                    self._hover_rotate = self._rotate_zone_at(pos, frames)
+                if self._hover_corner is None and self._hover_rotate is None:
                     self._hover_centroid = self._centroid_at(pos)
                     if self._hover_centroid is None:
                         self._hover_label = self._label_at(pos, frames)
@@ -433,21 +510,27 @@ class AnnotationMoveTool(QgsMapTool):
             self._show_hover_marker(self._hover_node.point, QgsVertexMarker.IconType.ICON_CIRCLE)
             self.canvas.setCursor(Qt.CursorShape.SizeAllCursor)
         elif self._hover_corner is not None:
-            label_id, rect, corner_index = self._hover_corner
+            label_id, frame, corner_index = self._hover_corner
             self._hover_marker.hide()
             self._show_owner(label_id)
-            self._show_label_frame(rect)
-            self.canvas.setCursor(_CORNER_CURSORS[corner_index])
+            self._show_label_frame(frame)
+            self.canvas.setCursor(_corner_cursor(frame, corner_index))
+        elif self._hover_rotate is not None:
+            label_id, frame, _corner_index = self._hover_rotate
+            self._hover_marker.hide()
+            self._show_owner(label_id)
+            self._show_label_frame(frame)
+            self.canvas.setCursor(_rotate_cursor())
         elif self._hover_centroid is not None:
             item_id, center = self._hover_centroid
             self._show_hover_marker(center, QgsVertexMarker.IconType.ICON_CIRCLE)
             self._highlight_item(item_id)
             self.canvas.setCursor(Qt.CursorShape.SizeAllCursor)
         elif self._hover_label is not None:
-            label_id, rect = self._hover_label
+            label_id, frame = self._hover_label
             self._hover_marker.hide()
             self._show_owner(label_id)
-            self._show_label_frame(rect)
+            self._show_label_frame(frame)
             self.canvas.setCursor(Qt.CursorShape.SizeAllCursor)
         elif self._hover_segment is not None:
             self._show_hover_marker(self._hover_segment[1], QgsVertexMarker.IconType.ICON_CROSS)
@@ -457,7 +540,7 @@ class AnnotationMoveTool(QgsMapTool):
 
     def _clear_hover(self):
         self._hover_node = self._hover_corner = self._hover_label = self._hover_segment = None
-        self._hover_centroid = None
+        self._hover_centroid = self._hover_rotate = None
         self._clear_label_frame()
         self._clear_owner()
         if self._hover_marker is not None:
@@ -523,40 +606,54 @@ class AnnotationMoveTool(QgsMapTool):
                 pass  # already disconnected or the layer was deleted
             self._watched_layer = None
 
-    def _label_frames(self) -> list[tuple[str, QgsRectangle]]:
-        """(label_id, text extent in layer CRS) for every description at the current map scale."""
+    def _label_frames(self) -> list[tuple[str, annotations.LabelFrame]]:
+        """(label_id, frame rotated with the text) for every description at the current map scale."""
         context = QgsRenderContext.fromMapSettings(self.canvas.mapSettings())
         frames = []
         for label_id in annotations.description_labels(self._layer):
-            rect = annotations.label_bounds(self._layer, label_id, context)
-            if rect is not None and not rect.isNull():
-                frames.append((label_id, rect))
+            frame = annotations.label_frame(self._layer, label_id, context)
+            if frame is not None:
+                frames.append((label_id, frame))
         return frames
 
-    def _corner_at(self, pos, frames) -> tuple[str, QgsRectangle, int] | None:
+    def _corner_at(self, pos, frames) -> tuple[str, annotations.LabelFrame, int] | None:
         """Nearest description frame corner within the corner tolerance of ``pos``."""
         best, best_dist = None, _CORNER_TOLERANCE_PX
-        for label_id, rect in frames:
-            for index, corner in enumerate(_corners(rect)):
+        for label_id, frame in frames:
+            for index, corner in enumerate(frame.corners):
                 dist = self._pixel_distance(corner, pos)
                 if dist is not None and dist <= best_dist:
-                    best, best_dist = (label_id, rect, index), dist
+                    best, best_dist = (label_id, frame, index), dist
         return best
 
-    def _label_at(self, pos, frames) -> tuple[str, QgsRectangle] | None:
-        """Description whose text extent (plus tolerance) contains ``pos``; the smallest one wins."""
-        cursor = self.toMapCoordinates(pos)
+    def _rotate_zone_at(self, pos, frames) -> tuple[str, annotations.LabelFrame, int] | None:
+        """Frame corner whose rotation zone (just outside the corner, beyond the scale handle) contains ``pos``."""
+        cursor = self._to_layer_crs(self.toMapCoordinates(pos))
+        if cursor is None:
+            return None
+        cursor_geom = QgsGeometry.fromPointXY(cursor)
+        best, best_dist = None, _ROTATE_TOLERANCE_PX
+        for label_id, frame in frames:
+            if frame.geometry().contains(cursor_geom):
+                continue  # inside the text: moving, not rotating
+            for index, corner in enumerate(frame.corners):
+                dist = self._pixel_distance(corner, pos)
+                if dist is not None and _CORNER_TOLERANCE_PX < dist <= best_dist:
+                    best, best_dist = (label_id, frame, index), dist
+        return best
+
+    def _label_at(self, pos, frames) -> tuple[str, annotations.LabelFrame] | None:
+        """Description whose (rotated) frame plus tolerance contains ``pos``; the smallest one wins."""
+        cursor = self._to_layer_crs(self.toMapCoordinates(pos))
+        if cursor is None:
+            return None
+        cursor_geom = QgsGeometry.fromPointXY(cursor)
         tolerance = _PICK_TOLERANCE_PX / 2 * self.canvas.mapUnitsPerPixel()
-        to_canvas = self._layer_to_canvas_transform()
         best, best_area = None, None
-        for label_id, rect in frames:
-            try:
-                canvas_rect = to_canvas.transformBoundingBox(rect) if to_canvas else QgsRectangle(rect)
-            except Exception:
-                continue
-            canvas_rect.grow(tolerance)
-            if canvas_rect.contains(cursor) and (best_area is None or rect.area() < best_area):
-                best, best_area = (label_id, rect), rect.area()
+        for label_id, frame in frames:
+            geom = frame.geometry()
+            if geom.distance(cursor_geom) <= tolerance and (best_area is None or geom.area() < best_area):
+                best, best_area = (label_id, frame), geom.area()
         return best
 
     def _segment_at(self, pos) -> tuple[str, QgsPointXY] | None:
@@ -603,14 +700,14 @@ class AnnotationMoveTool(QgsMapTool):
             self._rubber_band.setIconSize(10)
         self._rubber_band.setToGeometry(geom, self._layer.crs())
 
-    def _show_label_frame(self, rect: QgsRectangle):
-        """Blue frame around a description plus the four scaling handles at its corners."""
+    def _show_label_frame(self, frame: annotations.LabelFrame):
+        """Blue frame around a description (rotated with the text) plus the four scaling handles."""
         if self._hover_band is None:
             self._hover_band = QgsRubberBand(self.canvas, Qgis.GeometryType.Polygon)
             self._hover_band.setStrokeColor(_HIGHLIGHT)
             self._hover_band.setFillColor(QColor(0, 120, 215, 25))
             self._hover_band.setWidth(1)
-        self._hover_band.setToGeometry(QgsGeometry.fromRect(rect), self._layer.crs())
+        self._hover_band.setToGeometry(frame.geometry(), self._layer.crs())
 
         if not self._corner_markers:
             for _ in range(4):
@@ -621,7 +718,7 @@ class AnnotationMoveTool(QgsMapTool):
                 marker.setColor(_HIGHLIGHT)
                 marker.setFillColor(QColor(255, 255, 255))
                 self._corner_markers.append(marker)
-        for marker, corner in zip(self._corner_markers, _corners(rect)):
+        for marker, corner in zip(self._corner_markers, frame.corners):
             center = self._to_canvas_crs(corner)
             if center is not None:
                 marker.setCenter(center)
@@ -670,6 +767,8 @@ class AnnotationMoveTool(QgsMapTool):
         self._scale_factor = None
         self._dragging_item = None
         self._item_offset = None
+        self._rotating_label = None
+        self._rotation_delta = None
         self._coordinate_label.hide()
         if self._rubber_band is not None:
             self.canvas.scene().removeItem(self._rubber_band)

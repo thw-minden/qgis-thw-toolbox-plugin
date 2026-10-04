@@ -58,7 +58,10 @@ _LAYER_PROPERTY = "thw_toolbox/annotation_layer"
 #            "show_dims": show radius / edge lengths on the map, "dim_ids": the generated length labels,
 #            "desc_template": point description as entered, with POSITION_PLACEHOLDER (optional),
 #            "arrows": arrowheads of a line, one of ARROWS_* (optional),
-#            "arrow_size_mm": arrowhead size, 0 = automatic from the line width (optional)}}
+#            "arrow_size_mm": arrowhead size, 0 = automatic from the line width (optional),
+#            "dim_size_mm": text size of the measurement labels (optional),
+#            "dim_overrides": {label index: {"dx", "dy": manual offset in layer units, "size": manual mm}},
+#            "dim_count": number of measurement labels the overrides refer to}}
 
 # Placeholder in point descriptions, replaced on the map by the point's MGRS coordinate
 POSITION_PLACEHOLDER = "$POS"
@@ -126,6 +129,7 @@ class AnnotationEntry:
     map_text: str = ""  # description as shown on the map ($POS resolved); empty = same as name
     arrows: str = ARROWS_NONE  # arrowheads of a line (ARROWS_*)
     arrow_size_mm: float = 0.0  # arrowhead size; 0 = automatic (see arrow_size_for)
+    dimension_size_mm: float = 2.5  # text size of the radius / edge length labels
 
     @property
     def short_title(self) -> str:
@@ -146,6 +150,33 @@ class Measurements:
     length_m: float | None = None
     perimeter_m: float | None = None
     area_m2: float | None = None
+
+
+@dataclass
+class LabelFrame:
+    """Box around a text item, rotated with the text (layer CRS).
+
+    ``corners`` are top-left, top-right, bottom-right, bottom-left in the text's own
+    orientation; ``angle`` is the text angle relative to the map axes (degrees, clockwise).
+    """
+
+    corners: list[QgsPointXY]
+    anchor: QgsPointXY
+    angle: float
+
+    @property
+    def center(self) -> QgsPointXY:
+        return QgsPointXY(sum(p.x() for p in self.corners) / 4, sum(p.y() for p in self.corners) / 4)
+
+    def geometry(self) -> QgsGeometry:
+        return QgsGeometry.fromPolygonXY([[*self.corners, self.corners[0]]])
+
+
+def rotate_point(point: QgsPointXY, pivot: QgsPointXY, clockwise_deg: float) -> QgsPointXY:
+    """``point`` rotated around ``pivot`` by ``clockwise_deg`` (map coordinates, y pointing up)."""
+    t = math.radians(clockwise_deg)
+    dx, dy = point.x() - pivot.x(), point.y() - pivot.y()
+    return QgsPointXY(pivot.x() + dx * math.cos(t) + dy * math.sin(t), pivot.y() - dx * math.sin(t) + dy * math.cos(t))
 
 
 @dataclass
@@ -311,6 +342,7 @@ def update_entry(
     mgrs_resolution_m: float = 1.0,
     arrows: str | None = None,
     arrow_size_mm: float | None = None,
+    dimension_size_mm: float | None = None,
 ) -> None:
     """Apply new colors, line width, radius, text and measurement display to an object.
 
@@ -323,7 +355,9 @@ def update_entry(
     labels on the map (None keeps the current setting). ``$POS`` in a point
     description is replaced by the MGRS coordinate at ``mgrs_resolution_m``.
     ``arrows`` (ARROWS_*) sets the arrowheads of a line and ``arrow_size_mm`` their
-    size (0 = automatic); None keeps the current setting.
+    size (0 = automatic); None keeps the current setting. A changed
+    ``dimension_size_mm`` sets the size of the measurement labels and resets labels
+    that were resized by hand (manually moved positions are kept).
     """
     width_mm = line_width if line_width is not None else DEFAULT_LINE_WIDTH_MM
     item = layer.item(item_id)
@@ -369,6 +403,11 @@ def update_entry(
     if kind != KIND_TEXT:
         if show_dimensions is not None:
             meta[item_id]["show_dims"] = bool(show_dimensions)
+        current_size = meta[item_id].get("dim_size_mm", DIMENSION_TEXT_SIZE_MM)
+        if dimension_size_mm is not None and abs(dimension_size_mm - current_size) > 1e-6:
+            meta[item_id]["dim_size_mm"] = float(dimension_size_mm)
+            for override in meta[item_id].get("dim_overrides", {}).values():
+                override.pop("size", None)
         _refresh_dimensions(layer, meta, item_id)
     _write_meta(layer, meta)
     _finish(layer)
@@ -647,6 +686,79 @@ def _center_point_labels(layer: QgsAnnotationLayer, context: QgsRenderContext) -
     return changed
 
 
+def label_frame(layer: QgsAnnotationLayer, label_id: str, context: QgsRenderContext) -> LabelFrame | None:
+    """The text's box at the scale of ``context``, rotated with the text (unlike ``label_bounds``).
+
+    Mirrors QgsAnnotationPointTextItem::boundingBox(): the unrotated box spans the text
+    width (positioned by the horizontal alignment) and height above the baseline at the
+    anchor; it is then rotated by the text angle around the anchor.
+    """
+    item = layer.item(label_id)
+    if not isinstance(item, QgsAnnotationPointTextItem):
+        return None
+    fmt = item.format()
+    lines = [item.text()] if fmt.allowHtmlFormatting() else item.text().split("\n")
+    width = context.convertToMapUnits(QgsTextRenderer.textWidth(context, fmt, lines), Qgis.RenderUnit.Pixels)
+    height = context.convertToMapUnits(QgsTextRenderer.textHeight(context, fmt, lines), Qgis.RenderUnit.Pixels)
+    if width <= 0 or height <= 0:
+        return None
+
+    alignment = item.alignment()
+    if alignment & Qt.AlignmentFlag.AlignRight:
+        left = -width
+    elif alignment & Qt.AlignmentFlag.AlignHCenter:
+        left = -width / 2
+    else:
+        left = 0.0
+
+    angle = item.angle()
+    if item.rotationMode() == Qgis.SymbolRotationMode.IgnoreMapRotation:
+        # Drawn at a fixed screen angle — relative to the (rotated) map axes that is angle - map rotation
+        angle -= context.mapToPixel().mapRotation()
+
+    anchor = QgsPointXY(item.point())
+    offsets = ((left, height), (left + width, height), (left + width, 0.0), (left, 0.0))
+    corners = [rotate_point(QgsPointXY(anchor.x() + dx, anchor.y() + dy), anchor, angle) for dx, dy in offsets]
+    return LabelFrame(corners, anchor, angle)
+
+
+def rotate_label(layer: QgsAnnotationLayer, label_id: str, clockwise_deg: float, pivot: QgsPointXY) -> bool:
+    """Rotate a text by ``clockwise_deg`` around ``pivot`` (layer CRS).
+
+    The text itself always turns around its anchor, so the anchor is moved around the
+    pivot by the same angle — together that rotates the whole text around the pivot.
+    """
+    item = layer.item(label_id)
+    if not isinstance(item, QgsAnnotationPointTextItem):
+        return False
+    item.setAngle(_normalize_angle(item.angle() + clockwise_deg))
+    anchor = QgsPointXY(item.point())
+    moved = rotate_point(anchor, pivot, clockwise_deg)
+    layer.applyEditV2(
+        QgsAnnotationItemEditOperationTranslateItem(label_id, moved.x() - anchor.x(), moved.y() - anchor.y()),
+        QgsAnnotationItemEditContext(),
+    )
+    _record_dimension_override(layer, label_id)
+    _finish(layer)
+    return True
+
+
+def label_angle(layer: QgsAnnotationLayer, label_id: str) -> float:
+    """Current text angle (degrees, clockwise) as set on the item."""
+    item = layer.item(label_id)
+    return item.angle() if isinstance(item, QgsAnnotationPointTextItem) else 0.0
+
+
+def _normalize_angle(angle: float) -> float:
+    """Angle in (-180, 180]."""
+    angle = math.fmod(angle, 360.0)
+    if angle > 180:
+        angle -= 360
+    elif angle <= -180:
+        angle += 360
+    return angle
+
+
 def label_bounds(layer: QgsAnnotationLayer, label_id: str, context: QgsRenderContext) -> QgsRectangle | None:
     """Extent of the rendered text (layer CRS) for the map scale of ``context``."""
     item = layer.item(label_id)
@@ -654,22 +766,19 @@ def label_bounds(layer: QgsAnnotationLayer, label_id: str, context: QgsRenderCon
 
 
 def description_labels(layer: QgsAnnotationLayer) -> list[str]:
-    """Ids of all texts that can be moved and scaled — every description plus standalone texts.
+    """Ids of all texts that can be moved and scaled with the move tool.
 
-    Generated measurement labels are excluded; they are placed automatically.
+    Descriptions, standalone texts and the measurement labels (radius / edge lengths) —
+    manual changes to the latter are kept as overrides, see ``_record_dimension_override``.
     """
-    dimensions = _dimension_ids(_read_meta(layer))
-    return [
-        item_id
-        for item_id, item in layer.items().items()
-        if isinstance(item, QgsAnnotationPointTextItem) and item_id not in dimensions
-    ]
+    return [item_id for item_id, item in layer.items().items() if isinstance(item, QgsAnnotationPointTextItem)]
 
 
 def label_owner(layer: QgsAnnotationLayer, label_id: str) -> str | None:
-    """Id of the point/line/polygon a description belongs to, or None for standalone texts."""
+    """Id of the point/line/polygon a description or measurement label belongs to (None: standalone text)."""
     for item_id, item_meta in _read_meta(layer).items():
-        if item_meta.get("label_id") == label_id and layer.item(item_id) is not None:
+        linked = item_meta.get("label_id") == label_id or label_id in item_meta.get("dim_ids", [])
+        if linked and layer.item(item_id) is not None:
             return item_id
     return None
 
@@ -713,6 +822,7 @@ def scale_label(layer: QgsAnnotationLayer, label_id: str, factor: float, pivot: 
         dx = (anchor.x() - pivot.x()) * (factor - 1)
         dy = (anchor.y() - pivot.y()) * (factor - 1)
         layer.applyEditV2(QgsAnnotationItemEditOperationTranslateItem(label_id, dx, dy), QgsAnnotationItemEditContext())
+    _record_dimension_override(layer, label_id)
     _finish(layer)
     return True
 
@@ -725,6 +835,7 @@ def translate_label(layer: QgsAnnotationLayer, label_id: str, dx: float, dy: flo
     if result != Qgis.AnnotationItemEditOperationResult.Success:
         logger.warning("Beschreibung %s konnte nicht verschoben werden: %s", label_id, result)
         return False
+    _record_dimension_override(layer, label_id)
     _finish(layer)
     return True
 
@@ -960,6 +1071,7 @@ def _entry_for(layer, meta, item_id, item, kind) -> AnnotationEntry:
         map_text,
         item_meta.get("arrows", ARROWS_NONE) if kind == KIND_LINE else ARROWS_NONE,
         item_meta.get("arrow_size_mm", 0.0) if kind == KIND_LINE else 0.0,
+        item_meta.get("dim_size_mm", DIMENSION_TEXT_SIZE_MM),
     )
 
 
@@ -1091,12 +1203,37 @@ def _refresh_dimensions(layer, meta: dict, item_id: str) -> None:
         return
 
     kind = item_kind(layer, item_id)
+    specs = _dimension_specs(layer, item_id, item_meta)
+    # Overrides are keyed by label index — after inserting/removing vertices they no longer match
+    if item_meta.get("dim_count") != len(specs):
+        item_meta["dim_overrides"] = {}
+        item_meta["dim_count"] = len(specs)
+    overrides = item_meta.get("dim_overrides", {})
+    base_size = item_meta.get("dim_size_mm", DIMENSION_TEXT_SIZE_MM)
+
+    for index, (text, anchor, angle) in enumerate(specs):
+        override = overrides.get(str(index), {})
+        anchor = QgsPointXY(anchor.x() + override.get("dx", 0.0), anchor.y() + override.get("dy", 0.0))
+        text_item = QgsAnnotationPointTextItem(text, anchor)
+        text_item.setFormat(_dimension_format(override.get("size", base_size)))
+        text_item.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        text_item.setAngle(override.get("angle", angle))
+        if kind != KIND_POINT:
+            # The angle is computed in map coordinates; keep it aligned with the edge on a rotated map
+            text_item.setRotationMode(Qgis.SymbolRotationMode.RespectMapRotation)
+        text_item.setZIndex(_Z_TEXT)
+        item_meta["dim_ids"].append(layer.addItem(text_item))
+
+
+def _dimension_specs(layer, item_id: str, item_meta: dict) -> list[tuple[str, QgsPointXY, float]]:
+    """(text, automatic anchor in layer CRS, angle) of every measurement label of an item."""
+    kind = item_kind(layer, item_id)
     geom = entry_geometry(layer, item_id)
     if geom is None or geom.isEmpty():
-        return
+        return []
     da = distance_area(layer.crs())
 
-    labels: list[tuple[str, QgsPointXY, float]] = []  # (text, anchor in layer CRS, angle)
+    labels: list[tuple[str, QgsPointXY, float]] = []
     if kind == KIND_POINT:
         radius = item_meta.get("radius_m") or 0.0
         center = geom.asPoint()
@@ -1110,17 +1247,37 @@ def _refresh_dimensions(layer, meta: dict, item_id: str) -> None:
             length = da.convertLengthMeasurement(da.measureLine(a, b), Qgis.DistanceUnit.Meters)
             middle = QgsPointXY((a.x() + b.x()) / 2, (a.y() + b.y()) / 2)
             labels.append((format_meters(length), middle, _upright_angle(a, b)))
+    return labels
 
-    for text, anchor, angle in labels:
-        text_item = QgsAnnotationPointTextItem(text, anchor)
-        text_item.setFormat(_dimension_format())
-        text_item.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        text_item.setAngle(angle)
-        if kind != KIND_POINT:
-            # The angle is computed in map coordinates; keep it aligned with the edge on a rotated map
-            text_item.setRotationMode(Qgis.SymbolRotationMode.RespectMapRotation)
-        text_item.setZIndex(_Z_TEXT)
-        item_meta["dim_ids"].append(layer.addItem(text_item))
+
+def _record_dimension_override(layer, label_id: str) -> None:
+    """Remember a manual move/resize/rotation of a measurement label so it survives rebuilding the labels.
+
+    The offset is stored relative to the automatic position (so the label follows its edge
+    when vertices move); size and angle only if they differ from the automatic values.
+    """
+    meta = _read_meta(layer)
+    owner = next((item_id for item_id, m in meta.items() if label_id in m.get("dim_ids", [])), None)
+    item = layer.item(label_id)
+    if owner is None or not isinstance(item, QgsAnnotationPointTextItem):
+        return
+    item_meta = meta[owner]
+    index = item_meta["dim_ids"].index(label_id)
+    specs = _dimension_specs(layer, owner, item_meta)
+    if index >= len(specs):
+        return
+
+    anchor, auto_angle = specs[index][1], specs[index][2]
+    point = QgsPointXY(item.point())
+    override = {"dx": point.x() - anchor.x(), "dy": point.y() - anchor.y()}
+    size = item.format().size()
+    if abs(size - item_meta.get("dim_size_mm", DIMENSION_TEXT_SIZE_MM)) > 1e-6:
+        override["size"] = size
+    if abs(_normalize_angle(item.angle() - auto_angle)) > 1e-6:
+        override["angle"] = item.angle()
+    item_meta.setdefault("dim_overrides", {})[str(index)] = override
+    item_meta["dim_count"] = len(specs)
+    _write_meta(layer, meta)
 
 
 def _layer_units_per_meter(da: QgsDistanceArea, point: QgsPointXY) -> float:
@@ -1141,14 +1298,14 @@ def _upright_angle(a: QgsPointXY, b: QgsPointXY) -> float:
     return -angle
 
 
-def _dimension_format() -> QgsTextFormat:
+def _dimension_format(size_mm: float = DIMENSION_TEXT_SIZE_MM) -> QgsTextFormat:
     fmt = QgsTextFormat()
-    fmt.setSize(DIMENSION_TEXT_SIZE_MM)
+    fmt.setSize(size_mm)
     fmt.setSizeUnit(Qgis.RenderUnit.Millimeters)
     fmt.setColor(QColor(30, 30, 30))
     buffer = fmt.buffer()
     buffer.setEnabled(True)
-    buffer.setSize(0.6)
+    buffer.setSize(0.6 * size_mm / DIMENSION_TEXT_SIZE_MM)  # halo grows with the text
     buffer.setSizeUnit(Qgis.RenderUnit.Millimeters)
     buffer.setColor(QColor(255, 255, 255))
     fmt.setBuffer(buffer)

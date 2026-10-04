@@ -317,6 +317,7 @@ class THWToolboxPlugin:
                     self.settings.annotation_mgrs_resolution_m,
                     dialog.arrows(),
                     dialog.arrow_size_mm(),
+                    dialog.dimension_size_mm(),
                 )
         self._refresh_annotation_list()
 

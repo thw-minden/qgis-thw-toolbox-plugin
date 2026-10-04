@@ -162,6 +162,22 @@ class AnnotationEditDialog(QDialog):
                 self._dimensions_check.setEnabled(self._radius_spin.value() > 0)
                 self._radius_spin.valueChanged.connect(lambda value: self._dimensions_check.setEnabled(value > 0))
 
+        self._dimension_size_spin = None
+        if entry.kind in (KIND_LINE, KIND_POLYGON):
+            self._dimension_size_spin = QDoubleSpinBox()
+            self._dimension_size_spin.setDecimals(1)
+            self._dimension_size_spin.setRange(1.0, 20.0)
+            self._dimension_size_spin.setSingleStep(0.5)
+            self._dimension_size_spin.setSuffix(" mm")
+            self._dimension_size_spin.setValue(entry.dimension_size_mm)
+            self._dimension_size_spin.setToolTip(
+                "Textgröße der Längenbeschriftungen. Eine Änderung setzt von Hand skalierte Beschriftungen "
+                "auf diese Größe zurück (verschobene Positionen bleiben erhalten)."
+            )
+            form.addRow("Größe Längenbeschriftung", self._dimension_size_spin)
+            self._dimension_size_spin.setEnabled(self._dimensions_check.isChecked())
+            self._dimensions_check.toggled.connect(self._dimension_size_spin.setEnabled)
+
         if entry.kind == KIND_POLYGON:
             self._fill_check = QCheckBox("Fläche füllen")
             self._fill_check.setChecked(entry.fill_color is not None)
@@ -232,6 +248,10 @@ class AnnotationEditDialog(QDialog):
     def arrow_size_mm(self) -> float | None:
         """Arrowhead size in mm (0 = automatic); None for objects other than lines."""
         return self._arrow_size_spin.value() if self._arrow_size_spin is not None else None
+
+    def dimension_size_mm(self) -> float | None:
+        """Text size of the length labels in mm; None for objects without edge lengths."""
+        return self._dimension_size_spin.value() if self._dimension_size_spin is not None else None
 
     def line_width(self) -> float | None:
         """Line width in mm, or None for objects without a line (points, texts)."""
