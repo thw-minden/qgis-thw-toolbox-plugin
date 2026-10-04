@@ -30,13 +30,78 @@ Ein QGIS-Plugin für das einfache Hinzufügen und Verwalten von taktischen Zeich
 - **Verschieben** - Symbole per Maus an neue Position ziehen
 - **Größenanpassung** - Dynamische Größenänderung mit Schieberegler
 - **Labeling** - Beschriftung mit anpassbarem Text und Positionierung
+- **Koordinaten** - MGRS-Koordinate des Symbols in den Marker-Details, mit Kopier-Button
 - **Echtzeit-Vorschau** - Sofortige visuelle Rückmeldung bei Änderungen
 
-### Einstellungen (neu in 2.0)
+### Annotationen
+
+Eigene Werkzeugleiste **„THW Toolbox Annotationen“** für Lagekarten-Eintragungen. Annotationen liegen im Layer „THW Toolbox Annotationen“ und werden mit der Projektdatei gespeichert.
+
+#### Zeichnen
+
+| Werkzeug | Bedienung |
+|----------|-----------|
+| **Text setzen** | Klick auf die Karte, Text eingeben (mehrzeilig); der Text steht mittig über dem Klickpunkt |
+| **Punkt setzen** | Klick auf die Karte; optional Beschreibung und Radius in Metern |
+| **Linie zeichnen** | Linksklick = Stützpunkt, Rechtsklick/Enter = fertig, Rücktaste = letzten Punkt entfernen, Esc = abbrechen |
+| **Polygon zeichnen** | wie Linie; wahlweise nur Umriss oder gefüllt |
+
+Beim Zeichnen von Linien und Polygonen zeigt ein Hinweis am Mauszeiger die Länge des aktuellen Segments sowie die Gesamtlänge bzw. Umfang und Fläche.
+
+#### Auf der Karte bearbeiten (Verschieben-Werkzeug)
+
+| Aktion | Wirkung |
+|--------|---------|
+| Punkt/Stützpunkt ziehen | verschieben (aktuelle MGRS-Koordinate am Mauszeiger) |
+| Schwerpunkt ⊕ ziehen | ganze Linie bzw. Fläche samt Beschreibung verschieben |
+| Linksklick auf Linie/Umriss | Stützpunkt einfügen |
+| Rechtsklick auf Stützpunkt | Stützpunkt entfernen (Linien behalten mind. 2, Polygone mind. 3) |
+| Text, Beschreibung oder Längenangabe ziehen | verschieben |
+| Ecke des Textrahmens ziehen | Textgröße ändern |
+| knapp außerhalb einer Rahmenecke ziehen | Text drehen (Umschalt = 15°-Schritte) |
+| Doppelklick auf Punkt, Text, Beschreibung oder ⊕ | Bearbeiten-Dialog öffnen |
+| Esc | laufende Aktion abbrechen |
+
+#### Bearbeiten-Dialog
+
+Öffnet per Klick in der Dock-Liste oder per Doppelklick auf der Karte.
+
+- **Beschreibung / Text** - mehrzeilig (Enter = neue Zeile, Strg+Enter bestätigt)
+- **Darstellung** - Farbe inkl. Transparenz, Linienbreite, Füllung
+- **Punkte** - Radius in Metern als maßstabsgetreuer Kreis (z. B. Gefahren- oder Sperrbereich) mit eigener Füllfarbe
+- **Linien** - Pfeilspitzen am Anfang, Ende oder beiden Enden mit einstellbarer Größe
+- **Maße auf der Karte** - Radius bzw. Segment-/Kantenlängen einblenden, Textgröße einstellbar
+- **Messwerte** - Länge, Umfang und Fläche
+- **Koordinaten (MGRS)** - einklappbare Liste aller Punkte; Doppelklick kopiert eine Koordinate; im Bearbeiten-Modus Koordinaten eingeben sowie Punkte einfügen oder löschen
+- **Löschen** des Objekts
+
+#### Koordinaten
+
+- **`$POS`** in einer Punktbeschreibung oder einem Text wird auf der Karte durch die MGRS-/UTMRef-Koordinate ersetzt, z. B. `32U MB 12345 98765`, und beim Verschieben aktualisiert
+- Die Auflösung (0,1 m, 1 m, 10 m oder 100 m) ist im Einstellungs-Dialog projektweit einstellbar
+
+#### Dock-Tab „Annotationen“ und Export
+
+- **Liste** aller Objekte mit Vorschau-Symbol; Klick öffnet den Bearbeiten-Dialog
+- **KMZ-Export** - Export-Symbol in der Zeile eines Polygons; Name und Farbe bleiben erhalten (drohnentauglich, z. B. DJI Pilot 2)
+- **MBTiles-Export** - Button unten im Tab erzeugt eine Kachel-Ebene mit allen Annotationen (Zoomstufen wählbar)
+
+#### Rückgängig / Wiederherstellen
+
+**Strg+Z** macht Annotations-Änderungen der laufenden Sitzung rückgängig, **Strg+Y** (oder Strg+Umschalt+Z) stellt sie wieder her. Voraussetzung: Karte oder THW-Dock haben den Fokus und kein Vektorlayer ist im Bearbeitungsmodus (dann gilt das Strg+Z von QGIS).
+
+### Adress- und Koordinatensuche
+
+- **Alt+S** öffnet die Suche nach Adressen und Orten (OpenStreetMap / Nominatim)
+- Eine eingegebene **MGRS-Koordinate** (z. B. `32U MB 12345 98765`) wird direkt angesprungen und kurz hervorgehoben
+
+### Einstellungen
 
 - **Einstellungs-Dialog** - Zentrale Konfiguration über das Zahnrad-Icon im Dock
 - **Icon-Standardwerte** - Standardgröße und Kartenskalierung konfigurierbar
 - **Label-Konfiguration** - Schriftgröße, Buffer-Größe und Labels ein-/ausschalten
+- **Annotationen** - Standard-Linien- und Füllfarbe (inkl. Transparenz) und Standard-Linienbreite
+- **MGRS-Auflösung** - Genauigkeit der Koordinaten für `$POS`, Koordinaten-Tabellen und Marker-Details
 
 ### Symbol-Bibliothek
 
@@ -76,7 +141,7 @@ Umfassende Sammlung von über 1000 taktischen Zeichen:
 
 ### Voraussetzungen
 
-- **QGIS** 3.0 oder höher
+- **QGIS** 3.44 oder höher
 - **Python** 3.x (wird mit QGIS mitgeliefert)
 - **Betriebssystem** - Windows, Linux oder macOS
 
@@ -201,7 +266,7 @@ Dieses Plugin steht unter der **MIT-Lizenz**. Siehe `LICENSE` für Details.
 **Plugin erscheint nicht in der Toolbar**
 - Plugin im Plugin-Manager aktiviert?
 - QGIS neu starten
-- QGIS-Version mindestens 3.0?
+- QGIS-Version mindestens 3.44?
 
 **Symbole werden nicht angezeigt**
 - Layer "THW Toolbox Marker" sichtbar?

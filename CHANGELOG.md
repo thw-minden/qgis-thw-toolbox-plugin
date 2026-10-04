@@ -1,5 +1,53 @@
 # Changelog
 
+## [Unreleased]
+
+### Hinzugefügt
+
+#### Annotationen
+Neue Werkzeugleiste **„THW Toolbox Annotationen“** zum Zeichnen und Bearbeiten von Lagekarten-Annotationen. Alle Annotationen liegen im Layer „THW Toolbox Annotationen“ und werden mit der Projektdatei gespeichert.
+
+- **Zeichenwerkzeuge**: Text, Punkt, Linie, Polygon und gefülltes Polygon
+  - Punkte optional mit Beschreibung und Radius, Texte mehrzeilig
+  - Beim Zeichnen zeigt ein Hinweis am Mauszeiger Segmentlänge sowie Gesamtlänge bzw. Umfang und Fläche (ellipsoidisch gemessen)
+- **Bearbeiten-Dialog** (Klick in der Dock-Liste oder Doppelklick auf der Karte)
+  - Mehrzeilige Beschreibung für Punkte, Linien und Polygone; Text für Texte
+  - Farbe inkl. Transparenz, Linienbreite, Füllung
+  - Punkte: maßstabsgetreuer Radius-Kreis in Metern mit eigener Füllfarbe
+  - Linien: Pfeilspitzen am Anfang, Ende oder beiden Enden, Größe einstellbar
+  - Maße auf der Karte: Radius bzw. Segment-/Kantenlängen, Textgröße einstellbar
+  - „Messwerte“: Länge, Umfang, Fläche
+  - „Koordinaten (MGRS)“: einklappbare Tabelle aller Punkte; Doppelklick kopiert eine Koordinate; im Bearbeiten-Modus Koordinaten eingeben sowie Punkte einfügen und löschen (Linien behalten mind. 2, Polygone mind. 3 Punkte)
+  - Löschen des Objekts
+- **Verschieben-Werkzeug**
+  - Punkte und Stützpunkte ziehen (aktuelle MGRS-Koordinate am Mauszeiger); ganze Linien und Polygone am Schwerpunkt ⊕ verschieben
+  - Linksklick auf eine Kante fügt einen Stützpunkt ein, Rechtsklick auf einen Stützpunkt entfernt ihn (Mindestanzahl bleibt gewahrt)
+  - Beschreibungen, Texte und Maßbeschriftungen verschieben, über Eck-Anfasser skalieren und knapp außerhalb einer Ecke drehen (Umschalt = 15°-Schritte); der Rahmen dreht sich mit dem Text, das zugehörige Objekt wird hervorgehoben
+  - Manuell angepasste Maßbeschriftungen behalten Versatz, Größe und Winkel beim Bearbeiten der Geometrie
+  - Doppelklick auf Punkt, Text, Beschreibung oder ⊕ öffnet den Bearbeiten-Dialog
+- **Positionsplatzhalter `$POS`** in Punktbeschreibungen und Texten: wird durch die MGRS-/UTMRef-Koordinate ersetzt (z. B. `32U MB 12345 98765`) und beim Verschieben aktualisiert
+- **Dock-Tab „Annotationen“**: Liste aller Objekte mit Vorschau-Symbol; KMZ-Export je Polygon (drohnentauglich, Name und Farbe bleiben erhalten); MBTiles-Export aller Annotationen
+- **Rückgängig / Wiederherstellen** mit Strg+Z bzw. Strg+Y (oder Strg+Umschalt+Z) für alle Annotations-Änderungen der laufenden Sitzung (bis zu 100 Schritte). Wirkt, wenn Karte oder THW-Dock den Fokus haben und kein Vektorlayer im Bearbeitungsmodus ist – dann behält QGIS sein eigenes Strg+Z.
+
+#### Einstellungen
+- Neue Gruppe „Annotationen“: Standard-Linien- und Füllfarbe (inkl. Transparenz), Standard-Linienbreite
+- **MGRS-Auflösung** (0,1 / 1 / 10 / 100 m) projektweit für `$POS`, Koordinaten-Tabellen und Marker-Details
+
+#### Koordinaten und Suche
+- Adress-Suche (Alt+S) springt bei Eingabe einer MGRS-/UTMRef-Koordinate direkt dorthin und hebt die Position kurz hervor
+- MGRS-Umrechnung in beide Richtungen (`point_to_mgrs`, `mgrs_to_point` in `layout/mgrs_grid.py`) inkl. UTM-Sonderzonen Norwegen/Spitzbergen
+
+### Geändert
+- `DjiMbtilesExporter.export` akzeptiert jeden Kartenlayer (nicht nur Vektorlayer) und optional eine eigene Ausdehnung
+- Millimeter-Einstellungen werden beim Speichern gerundet statt abgeschnitten
+
+### Behoben
+- Marker-Details zeigten „UTM 32N: …E …N“ (fest Zone 32, ohne 100-km-Quadrat und Band); jetzt vollständige MGRS-Koordinate mit Zone und Band aus der Position. „Kopieren“ kopiert nur die Koordinate und ist breit genug für seinen Text
+- MBTiles-Zoomstufen-Dialog war zu schmal; Titel und Hinweistext wurden abgeschnitten
+
+### Technisch
+- Neue Module: `layer/annotations.py` (Annotations-Layer und -Objekte), `layer/annotation_history.py` (Rückgängig/Wiederherstellen), `tools/annotation_tool.py` (Zeichnen), `tools/annotation_move_tool.py` (Verschieben/Bearbeiten), `tools/cursor_label.py` (Hinweis am Mauszeiger), `tools/undo_shortcuts.py` (Strg+Z/Strg+Y), `ui/annotation_dialog.py` (Dialoge), `ui/coordinate_box.py` (Koordinaten-Tabelle), `util/units.py` (Zahlenformatierung)
+
 ## [2.1.1]
 
 ### Verbessert

@@ -1,22 +1,35 @@
 import os
 import re
 
-from qgis.PyQt.QtCore import QMimeData, QSize, Qt
-from qgis.PyQt.QtGui import QDrag, QIcon, QPixmap
+from qgis.core import QgsApplication
+from qgis.PyQt.QtCore import QMimeData, QPointF, QSize, Qt
+from qgis.PyQt.QtGui import QColor, QDrag, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from qgis.PyQt.QtWidgets import (
     QButtonGroup,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QSizePolicy,
     QStackedWidget,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from ..layer.annotations import (
+    ARROWS_BOTH,
+    ARROWS_END,
+    ARROWS_START,
+    KIND_LINE,
+    KIND_POINT,
+    KIND_POLYGON,
+    AnnotationEntry,
+)
 from ..logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -31,12 +44,24 @@ class SvgDock(QWidget):
         layer_provider=None,
         navigate_callback=None,
         progress_callback=None,
+        annotation_provider=None,
+        annotation_callback=None,
+        annotation_export_callback=None,
+        annotation_mbtiles_callback=None,
     ):
         super().__init__()
         self.plugin_dir = plugin_dir
         self.select_callback = select_callback
         self.layer_provider = layer_provider
         self.navigate_callback = navigate_callback
+        # Callable returning list[AnnotationEntry] (or None if no annotation layer exists)
+        self.annotation_provider = annotation_provider
+        # Called with the item id when an annotation is clicked
+        self.annotation_callback = annotation_callback
+        # Called with a polygon's item id to export that polygon (KMZ)
+        self.annotation_export_callback = annotation_export_callback
+        # Called without arguments to export all annotations as MBTiles
+        self.annotation_mbtiles_callback = annotation_mbtiles_callback
         self.icon_cache = {}  # Cache für Icons
         self._initial_progress_callback = progress_callback
 
@@ -62,6 +87,10 @@ class SvgDock(QWidget):
         # Seite 1: Verwendet (Liste aller Marker auf der Karte)
         self.start_page = self._build_start_page()
         self.stack.addWidget(self.start_page)
+
+        # Seite 2: Annotationen (Punkte, Linien, Polygone)
+        self.annotations_page = self._build_annotations_page()
+        self.stack.addWidget(self.annotations_page)
 
         # Standard-Ansicht: Explorer
         self._select_tab(0)
@@ -99,17 +128,21 @@ class SvgDock(QWidget):
         self.btn_tab_symbols.setCheckable(True)
         self.btn_tab_start = QPushButton("Verwendet")
         self.btn_tab_start.setCheckable(True)
-        for btn in (self.btn_tab_symbols, self.btn_tab_start):
+        self.btn_tab_annotations = QPushButton("Annotationen")
+        self.btn_tab_annotations.setCheckable(True)
+        for btn in (self.btn_tab_symbols, self.btn_tab_start, self.btn_tab_annotations):
             btn.setMinimumHeight(32)
 
         self.tab_group = QButtonGroup(bar)
         self.tab_group.setExclusive(True)
         self.tab_group.addButton(self.btn_tab_symbols, 0)
         self.tab_group.addButton(self.btn_tab_start, 1)
+        self.tab_group.addButton(self.btn_tab_annotations, 2)
         self.tab_group.idClicked.connect(self._select_tab)
 
         layout.addWidget(self.btn_tab_symbols, 1)
         layout.addWidget(self.btn_tab_start, 1)
+        layout.addWidget(self.btn_tab_annotations, 1)
         return bar
 
     def _select_tab(self, index: int):
@@ -119,6 +152,8 @@ class SvgDock(QWidget):
             btn.setChecked(True)
         if index == 1:
             self.refresh_marker_list()
+        elif index == 2:
+            self.refresh_annotation_list()
 
     def _build_start_page(self) -> QWidget:
         page = QWidget()
@@ -253,6 +288,95 @@ class SvgDock(QWidget):
         if fid is None or not self.navigate_callback:
             return
         self.navigate_callback(fid)
+
+    # ------------------------------------------------------------------
+    # Annotationen-Seite
+    # ------------------------------------------------------------------
+
+    def _build_annotations_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(6, 6, 6, 6)
+
+        self.annotation_list = QListWidget()
+        self.annotation_list.setIconSize(QSize(24, 24))
+        self.annotation_list.itemClicked.connect(self._on_annotation_activated)
+        layout.addWidget(self.annotation_list)
+
+        self.btn_refresh_annotations = QPushButton("Aktualisieren")
+        self.btn_refresh_annotations.clicked.connect(self.refresh_annotation_list)
+        layout.addWidget(self.btn_refresh_annotations)
+
+        self.btn_export_mbtiles = QPushButton("Alle Annotationen als MBTiles exportieren")
+        self.btn_export_mbtiles.setToolTip(
+            "Alle Punkte, Linien, Polygone und Beschreibungen als Kachel-Ebene (MBTiles) speichern, z. B. für Drohnen"
+        )
+        self.btn_export_mbtiles.clicked.connect(lambda: self.annotation_mbtiles_callback())
+        self.btn_export_mbtiles.setVisible(self.annotation_mbtiles_callback is not None)
+        layout.addWidget(self.btn_export_mbtiles)
+        return page
+
+    def refresh_annotation_list(self):
+        """Listet alle Objekte des Annotations-Layers auf."""
+        self.annotation_list.clear()
+        entries = self.annotation_provider() if self.annotation_provider else None
+        if not entries:
+            placeholder = QListWidgetItem("Keine Annotationen auf der Karte")
+            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.annotation_list.addItem(placeholder)
+            return
+
+        for entry in entries:
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, entry.item_id)
+            item.setToolTip(entry.title)
+            row = self._annotation_row(entry)
+            item.setSizeHint(row.sizeHint())
+            self.annotation_list.addItem(item)
+            self.annotation_list.setItemWidget(item, row)
+
+    def _annotation_row(self, entry: AnnotationEntry) -> QWidget:
+        """Row widget: preview icon, title and — for polygons — a KMZ export button.
+
+        Icon and title ignore the mouse, so clicks on them reach the list (opening the
+        edit dialog); the export button handles its own click.
+        """
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(6)
+
+        icon = QLabel()
+        icon.setPixmap(_annotation_icon(entry).pixmap(24, 24))
+        icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        layout.addWidget(icon)
+
+        title = QLabel(entry.title)
+        title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        # Long descriptions are clipped instead of widening the dock (full text in the tooltip)
+        title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        layout.addWidget(title, 1)
+
+        if entry.kind == KIND_POLYGON and self.annotation_export_callback is not None:
+            button = QToolButton()
+            export_icon = QgsApplication.getThemeIcon("/mActionSharingExport.svg")
+            if export_icon.isNull():
+                button.setText("KMZ")
+            else:
+                button.setIcon(export_icon)
+            button.setAutoRaise(True)
+            button.setToolTip("Dieses Polygon als KMZ exportieren (z. B. für Drohnen)")
+            button.clicked.connect(
+                lambda _checked=False, item_id=entry.item_id: self.annotation_export_callback(item_id)
+            )
+            layout.addWidget(button)
+        return row
+
+    def _on_annotation_activated(self, item: QListWidgetItem):
+        item_id = item.data(Qt.ItemDataRole.UserRole)
+        if item_id is None or not self.annotation_callback:
+            return
+        self.annotation_callback(item_id)
 
     # ------------------------------------------------------------------
     # Symbols-Seite (unverändert gegenüber vorher)
@@ -634,3 +758,45 @@ class SvgDock(QWidget):
             kein_treffer.setIcon(0, QIcon.fromTheme("dialog-error"))
 
         self.treeWidget.repaint()
+
+
+def _annotation_icon(entry: AnnotationEntry) -> QIcon:
+    """Kleines Vorschau-Symbol in den Farben der Annotation."""
+    size = 24
+    pixmap = QPixmap(size, size)
+    pixmap.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(entry.line_color, 2.5)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+
+    if entry.kind == KIND_POINT:
+        painter.setPen(QPen(QColor(255, 255, 255), 1.5))
+        painter.setBrush(entry.line_color)
+        painter.drawEllipse(QPointF(size / 2, size / 2), 7, 7)
+    elif entry.kind == KIND_LINE:
+        painter.setPen(pen)
+        painter.drawPolyline(QPolygonF([QPointF(3, 19), QPointF(9, 8), QPointF(15, 15), QPointF(21, 5)]))
+        painter.setBrush(entry.line_color)
+        painter.setPen(Qt.PenStyle.NoPen)
+        if entry.arrows in (ARROWS_END, ARROWS_BOTH):
+            painter.drawPolygon(QPolygonF([QPointF(22, 3), QPointF(21.5, 10), QPointF(16, 6)]))
+        if entry.arrows in (ARROWS_START, ARROWS_BOTH):
+            painter.drawPolygon(QPolygonF([QPointF(2, 21), QPointF(2.5, 14), QPointF(8, 18.5)]))
+    elif entry.kind == KIND_POLYGON:
+        painter.setPen(pen)
+        painter.setBrush(entry.fill_color if entry.fill_color is not None else Qt.BrushStyle.NoBrush)
+        painter.drawPolygon(
+            QPolygonF([QPointF(4, 7), QPointF(14, 3), QPointF(21, 11), QPointF(16, 21), QPointF(5, 18)])
+        )
+    else:
+        font = painter.font()
+        font.setBold(True)
+        font.setPixelSize(18)
+        painter.setFont(font)
+        painter.setPen(entry.line_color)
+        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "T")
+
+    painter.end()
+    return QIcon(pixmap)

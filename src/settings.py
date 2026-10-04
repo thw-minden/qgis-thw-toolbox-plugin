@@ -1,3 +1,5 @@
+from qgis.PyQt.QtGui import QColor
+
 from .logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -12,6 +14,14 @@ class THWToolboxSettings:
     LABEL_ENABLE_DEFAULT = True
     LABEL_FONT_SIZE_DEFAULT_UM = 6000
     LABEL_BUFFER_SIZE_DEFAULT_UM = 1000
+    # Annotation colors as "#AARRGGBB" (QColor.NameFormat.HexArgb) incl. transparency
+    ANNOTATION_LINE_COLOR_DEFAULT = "#ffe30613"
+    ANNOTATION_FILL_COLOR_DEFAULT = "#59e30613"
+    # Line width for lines and polygon outlines; stored in µm like the label sizes
+    ANNOTATION_LINE_WIDTH_DEFAULT_UM = 800
+    # MGRS resolution for $POS in point descriptions, in decimeters (1 = 0.1 m, 10 = 1 m, 100 = 10 m, 1000 = 100 m)
+    ANNOTATION_MGRS_RESOLUTION_DM_DEFAULT = 10
+    ANNOTATION_MGRS_RESOLUTIONS_DM = (1, 10, 100, 1000)
 
     # Save-File values
     PLUGIN_NAME = "taktischezeichen"
@@ -25,6 +35,11 @@ class THWToolboxSettings:
         self._label_enable = self.LABEL_ENABLE_DEFAULT
         self._label_font_size_mm = self.LABEL_FONT_SIZE_DEFAULT_UM / 1000.0
         self._label_buffer_size_mm = self.LABEL_BUFFER_SIZE_DEFAULT_UM / 1000.0
+
+        self._annotation_line_color = self.ANNOTATION_LINE_COLOR_DEFAULT
+        self._annotation_fill_color = self.ANNOTATION_FILL_COLOR_DEFAULT
+        self._annotation_line_width_mm = self.ANNOTATION_LINE_WIDTH_DEFAULT_UM / 1000.0
+        self._annotation_mgrs_resolution_dm = self.ANNOTATION_MGRS_RESOLUTION_DM_DEFAULT
 
     @property
     def new_icon_scaling_with_map(self) -> bool:
@@ -96,6 +111,46 @@ class THWToolboxSettings:
             raise ValueError("Buffer size must be a positive number")
         self._label_buffer_size_mm = int(value)
 
+    @property
+    def annotation_line_color(self) -> str:
+        return self._annotation_line_color
+
+    @annotation_line_color.setter
+    def annotation_line_color(self, value):
+        self._annotation_line_color = _validated_color(value)
+
+    @property
+    def annotation_fill_color(self) -> str:
+        return self._annotation_fill_color
+
+    @annotation_fill_color.setter
+    def annotation_fill_color(self, value):
+        self._annotation_fill_color = _validated_color(value)
+
+    @property
+    def annotation_line_width_mm(self) -> float:
+        return self._annotation_line_width_mm
+
+    @annotation_line_width_mm.setter
+    def annotation_line_width_mm(self, value):
+        if not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError("Line width must be a positive number")
+        self._annotation_line_width_mm = float(value)
+
+    @property
+    def annotation_mgrs_resolution_dm(self) -> int:
+        return self._annotation_mgrs_resolution_dm
+
+    @annotation_mgrs_resolution_dm.setter
+    def annotation_mgrs_resolution_dm(self, value):
+        if value not in self.ANNOTATION_MGRS_RESOLUTIONS_DM:
+            raise ValueError(f"MGRS resolution must be one of {self.ANNOTATION_MGRS_RESOLUTIONS_DM} dm")
+        self._annotation_mgrs_resolution_dm = int(value)
+
+    @property
+    def annotation_mgrs_resolution_m(self) -> float:
+        return self._annotation_mgrs_resolution_dm / 10.0
+
     def load_settings(self, proj):
         """Loads settings automatically from the defined private parameters"""
         for attr_name in dir(self):
@@ -142,8 +197,16 @@ class THWToolboxSettings:
                     proj.writeEntry(self.PLUGIN_NAME, config_key, value)
                 elif attr_name.endswith("_mm"):
                     config_key = config_key.replace("_mm", "_um")
-                    proj.writeEntry(self.PLUGIN_NAME, config_key, int(value * 1000))
+                    proj.writeEntry(self.PLUGIN_NAME, config_key, round(value * 1000))
                 else:
                     proj.writeEntry(self.PLUGIN_NAME, config_key, int(value))
 
         proj.setDirty(True)
+
+
+def _validated_color(value) -> str:
+    """Normalize a color (QColor or color string) to "#AARRGGBB"; raise ValueError if invalid."""
+    color = QColor(value)
+    if not color.isValid():
+        raise ValueError(f"Invalid color: {value!r}")
+    return color.name(QColor.NameFormat.HexArgb)

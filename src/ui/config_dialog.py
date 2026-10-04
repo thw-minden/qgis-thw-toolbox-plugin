@@ -1,8 +1,11 @@
+from qgis.gui import QgsColorButton
+from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QSpinBox,
@@ -15,7 +18,7 @@ _MM_TO_INT = 10
 
 
 class ConfigDialog(QDialog):
-    """Plugin settings dialog: defaults for new icons + label appearance.
+    """Plugin settings dialog: defaults for new icons, label appearance and annotation colors.
 
     Reads current values from `settings` on construction and writes them
     back when the user clicks OK. Caller is responsible for persisting
@@ -33,6 +36,7 @@ class ConfigDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(self._build_default_icon_group())
         layout.addWidget(self._build_label_group())
+        layout.addWidget(self._build_annotation_group())
 
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         layout.addWidget(button_box)
@@ -104,6 +108,44 @@ class ConfigDialog(QDialog):
         box.setLayout(form)
         return box
 
+    def _build_annotation_group(self) -> QGroupBox:
+        box = QGroupBox("Annotationen")
+        form = QFormLayout()
+
+        self._btn_annotation_line_color = self._color_button(
+            "Linienfarbe für Annotationen", self._settings.annotation_line_color
+        )
+        form.addRow("Linienfarbe (Linien, Umrisse, Punkte)", self._btn_annotation_line_color)
+
+        self._btn_annotation_fill_color = self._color_button(
+            "Füllfarbe für Annotationen", self._settings.annotation_fill_color
+        )
+        form.addRow("Füllfarbe (gefüllte Polygone)", self._btn_annotation_fill_color)
+
+        self._sb_annotation_line_width = line_width_spinbox(self._settings.annotation_line_width_mm)
+        form.addRow("Linienbreite (Linien, Umrisse)", self._sb_annotation_line_width)
+
+        self._cb_mgrs_resolution = QComboBox()
+        for dm, label in zip(self._settings.ANNOTATION_MGRS_RESOLUTIONS_DM, ("0,1 m", "1 m", "10 m", "100 m")):
+            self._cb_mgrs_resolution.addItem(label, dm)
+        self._cb_mgrs_resolution.setCurrentIndex(
+            max(0, self._cb_mgrs_resolution.findData(self._settings.annotation_mgrs_resolution_dm))
+        )
+        self._cb_mgrs_resolution.setToolTip(
+            "Genauigkeit von MGRS-Koordinaten: $POS in Punktbeschreibungen, Koordinaten-Tabellen und Marker-Details"
+        )
+        form.addRow("MGRS-Auflösung", self._cb_mgrs_resolution)
+
+        box.setLayout(form)
+        return box
+
+    def _color_button(self, title: str, color: str) -> QgsColorButton:
+        btn = QgsColorButton(self, title)
+        btn.setAllowOpacity(True)
+        btn.setShowNoColor(False)
+        btn.setColor(QColor(color))
+        return btn
+
     def _apply_to_settings(self) -> None:
         self._settings.new_icon_scaling_with_map = self._cb_scale.isChecked()
         self._settings.new_icon_fixed_size = self._cb_fixed_size.isChecked()
@@ -113,3 +155,19 @@ class ConfigDialog(QDialog):
         self._settings.label_enable = self._cb_label_enable.isChecked()
         self._settings.label_font_size_mm = self._sb_label_font_size.value() / _MM_TO_INT
         self._settings.label_buffer_size_mm = self._sb_label_buffer_size.value() / _MM_TO_INT
+
+        self._settings.annotation_line_color = self._btn_annotation_line_color.color()
+        self._settings.annotation_fill_color = self._btn_annotation_fill_color.color()
+        self._settings.annotation_line_width_mm = self._sb_annotation_line_width.value()
+        self._settings.annotation_mgrs_resolution_dm = self._cb_mgrs_resolution.currentData()
+
+
+def line_width_spinbox(value_mm: float) -> QDoubleSpinBox:
+    """Spin box for annotation line widths in mm (shared by settings and edit dialog)."""
+    spin = QDoubleSpinBox()
+    spin.setDecimals(1)
+    spin.setRange(0.1, 10.0)
+    spin.setSingleStep(0.1)
+    spin.setSuffix(" mm")
+    spin.setValue(value_mm)
+    return spin

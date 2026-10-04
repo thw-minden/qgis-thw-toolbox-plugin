@@ -6,11 +6,12 @@ import urllib.request
 from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
+    QgsGeometry,
     QgsPointXY,
     QgsProject,
     QgsRectangle,
 )
-from qgis.PyQt.QtCore import QObject, QSize, Qt, QThread, pyqtSignal
+from qgis.PyQt.QtCore import QObject, QSize, Qt, QThread, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QFont
 from qgis.PyQt.QtWidgets import (
     QApplication,
@@ -26,11 +27,18 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
 )
 
+from ..layout.mgrs_grid import mgrs_to_point
+
 _NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 _USER_AGENT = "QGIS-THW-Toolbox-Plugin/1.0 (https://github.com/thw-minden/qgis-thw-toolbox-plugin)"
 _REQUEST_TIMEOUT = 10
 _MIN_QUERY_LEN = 3
 _COUNTRY_CODES = "de,at,ch"
+
+# Jumping to an MGRS coordinate: zoom in to at least this scale, then flash the position
+_MGRS_MAX_SCALE = 10_000
+_FLASH_RADIUS_PX = 25
+_FLASH_COLOR = QColor(230, 0, 0)
 
 # Erkennt z.B. "Pflugstraße 7", "Hauptstr. 12a", optional gefolgt von ", Berlin" oder ", 10117 Berlin"
 _HOUSENUMBER_RE = re.compile(r"^\s*(?P<street>.+?)\s+(?P<number>\d+\s*[a-zA-Z]?)\s*(?:,\s*(?P<rest>.+))?\s*$")
@@ -182,12 +190,16 @@ class _ResultDelegate(QStyledItemDelegate):
 
 
 class NominatimSearchDialog(QDialog):
-    """Adress-Suchdialog mit Nominatim. Tippen löst Suche aus, Klick navigiert."""
+    """Adress-Suchdialog mit Nominatim. Tippen löst Suche aus, Klick navigiert.
+
+    Eine MGRS-/UTMRef-Koordinate (z. B. ``32U MB 12345 98765``) wird direkt angesprungen
+    und kurz hervorgehoben, ohne Nominatim zu befragen.
+    """
 
     def __init__(self, canvas, parent=None):
         super().__init__(parent)
         self._canvas = canvas
-        self.setWindowTitle("Adresse suchen (Nominatim / OpenStreetMap)")
+        self.setWindowTitle("Adresse oder MGRS-Koordinate suchen")
         self.resize(550, 450)
 
         layout = QVBoxLayout(self)
@@ -196,7 +208,7 @@ class NominatimSearchDialog(QDialog):
 
         search_row = QHBoxLayout()
         self._input = QLineEdit()
-        self._input.setPlaceholderText("Adresse oder Ort eingeben...")
+        self._input.setPlaceholderText("Adresse, Ort oder MGRS-Koordinate (z. B. 32U MB 12345 98765)")
         self._input.returnPressed.connect(self._search)
         search_row.addWidget(self._input)
 
@@ -224,6 +236,8 @@ class NominatimSearchDialog(QDialog):
 
     def _search(self):
         query = self._input.text().strip()
+        if self._jump_to_mgrs(query):
+            return
         if len(query) < _MIN_QUERY_LEN:
             self._status.setText(f"Bitte mindestens {_MIN_QUERY_LEN} Zeichen eingeben")
             return
@@ -269,6 +283,28 @@ class NominatimSearchDialog(QDialog):
             item.setData(_SUBTITLE_ROLE, subtitle)
             self._results.addItem(item)
 
+    def _jump_to_mgrs(self, query: str) -> bool:
+        """Center the map on ``query`` if it is an MGRS coordinate; returns False for anything else."""
+        crs = self._canvas.mapSettings().destinationCrs()
+        if not crs.isValid():
+            return False
+        try:
+            point = mgrs_to_point(query, crs)
+        except Exception:
+            point = None
+        if point is None:
+            return False
+
+        self._canvas.setCenter(point)
+        if self._canvas.scale() > _MGRS_MAX_SCALE:
+            self._canvas.zoomScale(_MGRS_MAX_SCALE)
+        self._canvas.refresh()
+        self.accept()
+        # Flash once the dialog is closed, so the highlight is not hidden behind it
+        canvas = self._canvas  # captured directly: the dialog may be gone when the timer fires
+        QTimer.singleShot(0, lambda: _flash_position(canvas, point))
+        return True
+
     def _zoom_to_item(self, item):
         data = item.data(Qt.ItemDataRole.UserRole)
         if not data:
@@ -302,6 +338,17 @@ class NominatimSearchDialog(QDialog):
         self._canvas.setExtent(rect)
         self._canvas.refresh()
         self.accept()
+
+
+def _flash_position(canvas, point: QgsPointXY):
+    """Briefly highlight ``point`` (canvas CRS) with a pulsing ring and dot."""
+    crs = canvas.mapSettings().destinationCrs()
+    radius = _FLASH_RADIUS_PX * canvas.mapUnitsPerPixel()
+    ring = QgsGeometry.fromPointXY(point).buffer(radius, 24)
+    dot = QgsGeometry.fromPointXY(point)
+    end = QColor(_FLASH_COLOR)
+    end.setAlpha(0)
+    canvas.flashGeometries([ring, dot], crs, _FLASH_COLOR, end, 4, 500)
 
 
 def _format_result(result):

@@ -7,9 +7,10 @@ from qgis.core import (
     QgsVectorLayer,
 )
 from qgis.PyQt.QtCore import QCoreApplication, Qt, QTimer
-from qgis.PyQt.QtGui import QIcon, QKeySequence
+from qgis.PyQt.QtGui import QColor, QIcon, QKeySequence
 from qgis.PyQt.QtWidgets import (
     QAction,
+    QApplication,
     QDialog,
     QDialogButtonBox,
     QDockWidget,
@@ -27,6 +28,8 @@ from .export.dji_kml_export import DjiKmlExporter
 from .export.dji_mbtiles_export import DjiMbtilesExporter
 from .export.dji_mbtiles_export import _ZoomDialog as _MbtilesZoomDialog
 from .export.portable_export import PortableExporter
+from .layer import annotations
+from .layer.annotation_history import AnnotationHistory
 from .layer.feature_ops import FeatureOperations
 from .layer.labeling import apply_labeling
 from .layer.layer_manager import LayerManager
@@ -36,9 +39,20 @@ from .logging_utils import get_logger
 from .paths import plugin_root
 from .settings import THWToolboxSettings
 from .tools import style_library
+from .tools.annotation_move_tool import AnnotationMoveTool
+from .tools.annotation_tool import (
+    MODE_LINE,
+    MODE_POINT,
+    MODE_POLYGON,
+    MODE_POLYGON_FILLED,
+    MODE_TEXT,
+    AnnotationTool,
+)
 from .tools.canvas_drop_filter import CanvasDropFilter
 from .tools.identify_tool import IdentifyTool
 from .tools.move_tool import MoveTool
+from .tools.undo_shortcuts import UndoShortcutFilter
+from .ui.annotation_dialog import AnnotationEditDialog
 from .ui.config_dialog import ConfigDialog
 from .ui.nominatim_search_dialog import NominatimSearchDialog
 from .ui.setup_common import SETUP_MODE_WIZARD, get_setup_mode
@@ -65,6 +79,12 @@ class THWToolboxPlugin:
         self.move_tool = None
         self.action = None
         self.dock = None
+        self.annotation_toolbar = None
+        self.annotation_actions = []
+        self.annotation_tools = []
+        # Undo/redo of annotation changes within this session (Ctrl+Z / Ctrl+Y)
+        self.annotation_history = AnnotationHistory(annotations.META_PROPERTY)
+        self.undo_filter = None
         # True während QGIS das Projekt leert (Projekt schließen / anderes laden).
         # In dem Fall sollen wir die Layer-Entfernung still hinnehmen statt den
         # Nutzer mit der Deaktivierungs-Warnung zu konfrontieren.
@@ -180,6 +200,9 @@ class THWToolboxPlugin:
         self.dji_mbtiles_action.triggered.connect(self._export_selected_layer_as_mbtiles)
         self.iface.addPluginToMenu("THW Toolbox", self.dji_mbtiles_action)
 
+        self._init_annotation_tools()
+        self._init_annotation_undo()
+
         # Verbinde Projekt-Events für automatisches Speichern
         QgsProject.instance().writeProject.connect(self._on_project_save)
         # Reagiere auf Layer-Entfernung, damit wir das Plugin sauber deaktivieren,
@@ -197,6 +220,225 @@ class THWToolboxPlugin:
         # DB-Einträge in mSymbols beim Start). Deferred via QTimer, damit der
         # Plugin-Init nicht blockiert.
         QTimer.singleShot(0, self._rehydrate_style_cache)
+
+    def _init_annotation_tools(self):
+        """Eigene Werkzeugleiste mit den Werkzeugen für Annotationen (Zeichnen und Verschieben)."""
+        self.annotation_toolbar = self.iface.addToolBar("THW Toolbox Annotationen")
+        self.annotation_toolbar.setObjectName("THWToolboxAnnotationToolbar")
+
+        def draw_tool(mode):
+            return AnnotationTool(
+                self.canvas, mode, self.settings, self._show_status_hint, on_created=self._refresh_annotation_list
+            )
+
+        for icon_name, text, tool in (
+            ("annotation_text.svg", "Text setzen", draw_tool(MODE_TEXT)),
+            ("annotation_point.svg", "Punkt setzen", draw_tool(MODE_POINT)),
+            ("annotation_line.svg", "Linie zeichnen", draw_tool(MODE_LINE)),
+            ("annotation_polygon.svg", "Polygon zeichnen", draw_tool(MODE_POLYGON)),
+            ("annotation_polygon_filled.svg", "Polygon zeichnen (gefüllt)", draw_tool(MODE_POLYGON_FILLED)),
+            (
+                "annotation_move.svg",
+                "Annotation verschieben",
+                AnnotationMoveTool(
+                    self.canvas,
+                    self._show_status_hint,
+                    on_moved=self._refresh_annotation_list,
+                    on_edit=self._edit_annotation,
+                    mgrs_resolution=lambda: self.settings.annotation_mgrs_resolution_m,
+                ),
+            ),
+        ):
+            icon = QIcon(os.path.join(self.plugin_dir, "icons", icon_name))
+            action = QAction(icon, text, self.iface.mainWindow())
+            action.setCheckable(True)
+            # QgsMapTool hält den Haken der Aktion beim (De-)Aktivieren selbst aktuell
+            tool.setAction(action)
+            action.triggered.connect(lambda checked, t=tool: self._toggle_annotation_tool(t, checked))
+            self.annotation_toolbar.addAction(action)
+            self.iface.addPluginToMenu("THW Toolbox", action)
+            self.annotation_actions.append(action)
+            self.annotation_tools.append(tool)
+
+    def _init_annotation_undo(self):
+        """Ctrl+Z / Ctrl+Y (Ctrl+Umschalt+Z) machen Annotations-Änderungen rückgängig bzw. stellen sie wieder her."""
+        annotations.set_history(self.annotation_history)
+        # Moving/rotating a $POS text keeps its coordinate current at the project's resolution
+        annotations.set_mgrs_resolution_provider(lambda: self.settings.annotation_mgrs_resolution_m)
+        self.undo_filter = UndoShortcutFilter(
+            scopes=lambda: [self.canvas, self.dock],
+            is_available=self._annotation_undo_available,
+            on_undo=self._undo_annotation,
+            on_redo=self._redo_annotation,
+            parent=self.iface.mainWindow(),
+        )
+        QApplication.instance().installEventFilter(self.undo_filter)
+
+    def _annotation_undo_available(self) -> bool:
+        """Only while no vector layer is being edited — then QGIS's own Ctrl+Z (edit buffer) has priority."""
+        for lyr in QgsProject.instance().mapLayers().values():
+            if isinstance(lyr, QgsVectorLayer) and lyr.isEditable():
+                return False
+        return True
+
+    def _undo_annotation(self):
+        self._apply_history_step(self.annotation_history.undo(), "Rückgängig", "Nichts rückgängig zu machen.")
+
+    def _redo_annotation(self):
+        self._apply_history_step(self.annotation_history.redo(), "Wiederhergestellt", "Nichts wiederherzustellen.")
+
+    def _apply_history_step(self, label, done_text, empty_text):
+        # Drags/hover markers of the move tool refer to the old state — reset them
+        for tool in self.annotation_tools:
+            if self.canvas.mapTool() is tool and hasattr(tool, "reset_state"):
+                tool.reset_state()
+        message = f"{done_text}: {label}" if label else empty_text
+        self.iface.messageBar().pushMessage("Annotationen", message, Qgis.MessageLevel.Info, 2)
+        if label:
+            self._refresh_annotation_list()
+
+    def _toggle_annotation_tool(self, tool, checked):
+        if checked:
+            self.canvas.setMapTool(tool)
+        elif self.canvas.mapTool() is tool:
+            # Erneuter Klick auf das aktive Werkzeug: zurück zum Verschieben (Toolbox aktiv) bzw. Pan
+            if self.move_tool and self.action and self.action.isChecked():
+                self.canvas.setMapTool(self.move_tool)
+            else:
+                self.iface.actionPan().trigger()
+
+    def _list_annotations(self):
+        layer = annotations.find_annotation_layer()
+        if layer is None:
+            return None
+        annotations.migrate_legacy_labels(layer, self.canvas.mapSettings())
+        return annotations.list_entries(layer)
+
+    def _refresh_annotation_list(self):
+        if getattr(self, "svg_dock_widget", None):
+            # Verzögert, da der Aufruf aus dem itemClicked-Slot der Liste selbst kommen kann
+            QTimer.singleShot(0, self.svg_dock_widget.refresh_annotation_list)
+
+    def _edit_annotation(self, item_id):
+        """Dock-/Werkzeug-Callback: Annotation auf der Karte hervorheben und Bearbeiten-Dialog öffnen."""
+        layer = annotations.find_annotation_layer()
+        entry = annotations.get_entry(layer, item_id) if layer else None
+        if entry is None:
+            # Objekt wurde inzwischen außerhalb des Plugins gelöscht
+            self._refresh_annotation_list()
+            return
+
+        self._flash_annotation(layer, item_id)
+        dialog = AnnotationEditDialog(
+            entry,
+            QColor(self.settings.annotation_fill_color),
+            annotations.measure_entry(layer, item_id),
+            self.iface.mainWindow(),
+            vertices=annotations.vertex_points(layer, item_id),
+            crs=layer.crs(),
+            mgrs_resolution_m=self.settings.annotation_mgrs_resolution_m,
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            # Everything one dialog changes is undone with a single Ctrl+Z
+            with annotations.undo_step(layer, "Annotation bearbeiten"):
+                self._apply_annotation_dialog(layer, item_id, dialog)
+        self._refresh_annotation_list()
+
+    def _apply_annotation_dialog(self, layer, item_id, dialog):
+        if dialog.deleted:
+            annotations.delete_entry(layer, item_id)
+        else:
+            # Geometry first, so description ($POS) and measurement labels use the new vertices
+            vertices = dialog.edited_vertices()
+            if vertices is not None and not annotations.set_vertices(
+                layer, item_id, vertices, self.settings.annotation_mgrs_resolution_m
+            ):
+                self.iface.messageBar().pushMessage(
+                    "Annotation", "Koordinaten konnten nicht übernommen werden.", Qgis.MessageLevel.Warning
+                )
+            annotations.update_entry(
+                layer,
+                item_id,
+                dialog.name(),
+                dialog.line_color(),
+                dialog.fill_color(),
+                dialog.line_width(),
+                annotations.map_units_per_mm(self.canvas.mapSettings()),
+                dialog.radius_m(),
+                dialog.show_dimensions(),
+                self.settings.annotation_mgrs_resolution_m,
+                dialog.arrows(),
+                dialog.arrow_size_mm(),
+                dialog.dimension_size_mm(),
+            )
+
+    def _export_annotation_polygon(self, item_id):
+        """Dock-Callback: ein Annotations-Polygon mit dem vorhandenen KMZ-Exporter speichern."""
+        layer = annotations.find_annotation_layer()
+        export_layer = annotations.polygon_export_layer(layer, [item_id]) if layer else None
+        if export_layer is None:
+            # Polygon was deleted meanwhile (e.g. with the native QGIS tools)
+            self._refresh_annotation_list()
+            return
+        DjiKmlExporter(
+            on_success=lambda path: self.iface.messageBar().pushMessage(
+                "Polygon-Export", f"„{export_layer.name()}“ exportiert: {path}", Qgis.MessageLevel.Success
+            ),
+            on_error=self._show_error_alert,
+        ).prompt_and_export(export_layer, self.iface.mainWindow())
+
+    def _export_annotations_as_mbtiles(self):
+        """Dock-Callback: den kompletten Annotations-Layer mit dem vorhandenen MBTiles-Exporter rendern."""
+        title = "Annotationen als MBTiles"
+        layer = annotations.find_annotation_layer()
+        extent = annotations.export_extent(layer) if layer else None
+        if extent is None:
+            self.iface.messageBar().pushMessage(title, "Keine Annotationen vorhanden.", Qgis.MessageLevel.Info)
+            return
+
+        zoom = _MbtilesZoomDialog.ask(self.iface.mainWindow())
+        if zoom is None:
+            return
+        zoom_min, zoom_max = zoom
+        path = self._ask_single_save_path(layer, "mbtiles", "MBTiles (*.mbtiles)")
+        if not path:
+            return
+
+        # Same progress/cancel dialog as the MBTiles export in the plugin menu
+        self._run_batch_export(
+            title=title,
+            layers=[layer],
+            target_paths=[path],
+            run=lambda lyr, target, on_fb, chk: DjiMbtilesExporter(
+                on_success=lambda _p: None,
+                on_error=lambda *a: None,
+                on_feedback=on_fb,
+                on_cancel_check=chk,
+            ).export(lyr, target, zoom_min, zoom_max, extent=extent),
+        )
+
+    def _flash_annotation(self, layer, item_id):
+        """Zentriert die Karte auf die Annotation, falls sie außerhalb liegt, und lässt sie aufblinken."""
+        geom = annotations.entry_geometry(layer, item_id)
+        if geom is None or geom.isEmpty():
+            return
+        canvas_crs = self.canvas.mapSettings().destinationCrs()
+        if layer.crs() != canvas_crs:
+            try:
+                geom.transform(QgsCoordinateTransform(layer.crs(), canvas_crs, QgsProject.instance()))
+            except Exception:
+                logger.exception("Konnte Annotations-Geometrie nicht transformieren")
+                return
+        if not self.canvas.extent().intersects(geom.boundingBox()):
+            self.canvas.setCenter(geom.boundingBox().center())
+            self.canvas.refresh()
+        self.canvas.flashGeometries([geom], canvas_crs)
+
+    def _show_status_hint(self, text):
+        if text:
+            self.iface.statusBarIface().showMessage(text)
+        else:
+            self.iface.statusBarIface().clearMessage()
 
     def _rehydrate_style_cache(self):
         try:
@@ -220,6 +462,19 @@ class THWToolboxPlugin:
         if self.move_tool:
             self.canvas.unsetMapTool(self.move_tool)
             self.move_tool.dispose()
+        for tool in self.annotation_tools:
+            if self.canvas.mapTool() is tool:
+                self.canvas.unsetMapTool(tool)
+            if hasattr(tool, "dispose"):
+                tool.dispose()
+        self.annotation_tools = []
+        for action in self.annotation_actions:
+            self.iface.removePluginMenu("THW Toolbox", action)
+        self.annotation_actions = []
+        if self.annotation_toolbar:
+            self.iface.mainWindow().removeToolBar(self.annotation_toolbar)
+            self.annotation_toolbar.deleteLater()
+            self.annotation_toolbar = None
         if self.action:
             self.iface.removeToolBarIcon(self.action)
             self.iface.removePluginMenu("THW Toolbox", self.action)
@@ -263,6 +518,14 @@ class THWToolboxPlugin:
             QgsProject.instance().cleared.disconnect(self._on_project_cleared)
         except (TypeError, RuntimeError):
             pass
+
+        # Undo/Redo abmelden
+        if self.undo_filter is not None:
+            QApplication.instance().removeEventFilter(self.undo_filter)
+            self.undo_filter = None
+        annotations.set_history(None)
+        annotations.set_mgrs_resolution_provider(None)
+        self.annotation_history.clear()
 
         # Räume temporäre Dateien auf
         cleanup_temp_files(self.plugin_dir)
@@ -368,6 +631,8 @@ class THWToolboxPlugin:
 
     def _on_project_cleared(self):
         self._project_clearing = False
+        # Undo steps refer to the closed project's annotations
+        self.annotation_history.clear()
 
     def _on_layers_will_be_removed(self, layer_ids):
         """Wenn der Marker-Layer aus dem Projekt entfernt wird, Plugin sauber deaktivieren."""
@@ -446,6 +711,10 @@ class THWToolboxPlugin:
                 self._open_config_dialog,
                 layer_provider=lambda: self.layer,
                 navigate_callback=self._navigate_to_feature,
+                annotation_provider=self._list_annotations,
+                annotation_callback=self._edit_annotation,
+                annotation_export_callback=self._export_annotation_polygon,
+                annotation_mbtiles_callback=self._export_annotations_as_mbtiles,
                 progress_callback=on_load_progress,
             )
             self.dock.setWidget(self.svg_dock_widget)
@@ -656,6 +925,11 @@ class THWToolboxPlugin:
             self.settings.save_settings(QgsProject.instance())
             if self.layer:
                 self._init_renderer(self.layer)
+            # $POS in point descriptions follows the (possibly changed) MGRS resolution
+            annotation_layer = annotations.find_annotation_layer()
+            if annotation_layer is not None:
+                annotations.refresh_positions(annotation_layer, self.settings.annotation_mgrs_resolution_m)
+                self._refresh_annotation_list()
 
     def _pick_vector_layers(self, title: str) -> list[QgsVectorLayer] | None:
         """Open a checkbox-list dialog for selecting one or more vector layers.
