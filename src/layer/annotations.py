@@ -23,6 +23,7 @@ from qgis.core import (
     QgsGeometry,
     QgsLineString,
     QgsLineSymbol,
+    QgsMarkerLineSymbolLayer,
     QgsMarkerSymbol,
     QgsPoint,
     QgsPointXY,
@@ -55,7 +56,9 @@ _LAYER_PROPERTY = "thw_toolbox/annotation_layer"
 # {item_id: {"n": running number, "name": legacy list-only name, "label_id": linked description item,
 #            "radius_m": radius circle of a point in meters (optional),
 #            "show_dims": show radius / edge lengths on the map, "dim_ids": the generated length labels,
-#            "desc_template": point description as entered, with POSITION_PLACEHOLDER (optional)}}
+#            "desc_template": point description as entered, with POSITION_PLACEHOLDER (optional),
+#            "arrows": arrowheads of a line, one of ARROWS_* (optional),
+#            "arrow_size_mm": arrowhead size, 0 = automatic from the line width (optional)}}
 
 # Placeholder in point descriptions, replaced on the map by the point's MGRS coordinate
 POSITION_PLACEHOLDER = "$POS"
@@ -92,6 +95,13 @@ _Z_LINE = 1
 _Z_MARKER = 2
 _Z_TEXT = 3
 
+# Arrowheads on lines
+ARROWS_NONE = "none"
+ARROWS_END = "end"
+ARROWS_START = "start"
+ARROWS_BOTH = "both"
+ARROW_MODES = (ARROWS_NONE, ARROWS_END, ARROWS_START, ARROWS_BOTH)
+
 KIND_POINT = "point"
 KIND_LINE = "line"
 KIND_POLYGON = "polygon"
@@ -114,6 +124,8 @@ class AnnotationEntry:
     radius_m: float | None = None  # radius circle in meters; only for points (0 = none)
     show_dimensions: bool = False  # radius / edge lengths shown on the map
     map_text: str = ""  # description as shown on the map ($POS resolved); empty = same as name
+    arrows: str = ARROWS_NONE  # arrowheads of a line (ARROWS_*)
+    arrow_size_mm: float = 0.0  # arrowhead size; 0 = automatic (see arrow_size_for)
 
     @property
     def short_title(self) -> str:
@@ -297,6 +309,8 @@ def update_entry(
     radius_m: float | None = None,
     show_dimensions: bool | None = None,
     mgrs_resolution_m: float = 1.0,
+    arrows: str | None = None,
+    arrow_size_mm: float | None = None,
 ) -> None:
     """Apply new colors, line width, radius, text and measurement display to an object.
 
@@ -308,6 +322,8 @@ def update_entry(
     (see ``add_point``). ``show_dimensions`` toggles the radius / edge length
     labels on the map (None keeps the current setting). ``$POS`` in a point
     description is replaced by the MGRS coordinate at ``mgrs_resolution_m``.
+    ``arrows`` (ARROWS_*) sets the arrowheads of a line and ``arrow_size_mm`` their
+    size (0 = automatic); None keeps the current setting.
     """
     width_mm = line_width if line_width is not None else DEFAULT_LINE_WIDTH_MM
     item = layer.item(item_id)
@@ -324,7 +340,18 @@ def update_entry(
         meta[item_id]["radius_m"] = radius
         _set_description(layer, meta, item_id, kind, name, units_per_mm, mgrs_resolution_m)
     elif kind == KIND_LINE:
-        item.setSymbol(_line_symbol(line_color, width_mm))
+        if arrows in ARROW_MODES:
+            meta[item_id]["arrows"] = arrows
+        if arrow_size_mm is not None:
+            meta[item_id]["arrow_size_mm"] = max(0.0, float(arrow_size_mm))
+        item.setSymbol(
+            _line_symbol(
+                line_color,
+                width_mm,
+                meta[item_id].get("arrows", ARROWS_NONE),
+                meta[item_id].get("arrow_size_mm", 0.0),
+            )
+        )
         _set_description(layer, meta, item_id, kind, name)
         meta[item_id]["name"] = ""  # superseded by the map description
     elif kind == KIND_POLYGON:
@@ -931,6 +958,8 @@ def _entry_for(layer, meta, item_id, item, kind) -> AnnotationEntry:
         radius_m,
         bool(item_meta.get("show_dims")),
         map_text,
+        item_meta.get("arrows", ARROWS_NONE) if kind == KIND_LINE else ARROWS_NONE,
+        item_meta.get("arrow_size_mm", 0.0) if kind == KIND_LINE else 0.0,
     )
 
 
@@ -1206,10 +1235,52 @@ def _marker_symbol(color: QColor, radius_m: float = 0.0, fill_color: QColor | No
     return symbol
 
 
-def _line_symbol(color: QColor, width_mm: float) -> QgsLineSymbol:
+def arrow_size_for(width_mm: float, arrow_size_mm: float = 0.0) -> float:
+    """Effective arrowhead size (mm): the chosen size, or automatic from the line width."""
+    return arrow_size_mm if arrow_size_mm > 0 else max(3.0, width_mm * 4)
+
+
+def _line_symbol(
+    color: QColor, width_mm: float, arrows: str = ARROWS_NONE, arrow_size_mm: float = 0.0
+) -> QgsLineSymbol:
+    """Line in ``color``/``width_mm``, optionally with arrowheads (ARROWS_*) at its ends.
+
+    The filled arrowhead is a triangle with its tip on the end vertex, as long as half its
+    size and as wide as its size. Without trimming, the line (and its round cap) would
+    run through the arrowhead up to the tip and poke out there; so the line is trimmed
+    under each arrowhead by one line width — far enough for the triangle to cover the
+    rounded line end completely.
+    """
     symbol = QgsLineSymbol.createSimple({"line_width": str(width_mm), "capstyle": "round", "joinstyle": "round"})
-    symbol.symbolLayer(0).setColor(color)
+    line_layer = symbol.symbolLayer(0)
+    line_layer.setColor(color)
+    if arrows == ARROWS_NONE or arrows not in ARROW_MODES:
+        return symbol
+
+    size = arrow_size_for(width_mm, arrow_size_mm)
+    trim = min(width_mm, 0.9 * size / 2)  # stay inside the arrowhead even for very small arrows
+    if arrows in (ARROWS_END, ARROWS_BOTH):
+        line_layer.setTrimDistanceEnd(trim)
+        line_layer.setTrimDistanceEndUnit(Qgis.RenderUnit.Millimeters)
+        symbol.appendSymbolLayer(_arrowhead_layer(color, size, Qgis.MarkerLinePlacement.LastVertex, 0))
+    if arrows in (ARROWS_START, ARROWS_BOTH):
+        line_layer.setTrimDistanceStart(trim)
+        line_layer.setTrimDistanceStartUnit(Qgis.RenderUnit.Millimeters)
+        # Markers are rotated along the line direction — turn the start arrow around
+        symbol.appendSymbolLayer(_arrowhead_layer(color, size, Qgis.MarkerLinePlacement.FirstVertex, 180))
     return symbol
+
+
+def _arrowhead_layer(color: QColor, size_mm: float, placement, angle: float) -> QgsMarkerLineSymbolLayer:
+    """Filled arrowhead on the first/last vertex; its tip sits exactly on the vertex."""
+    head = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.ArrowHeadFilled, size_mm)
+    head.setColor(color)
+    head.setStrokeStyle(Qt.PenStyle.NoPen)
+    head.setAngle(angle)
+    marker_line = QgsMarkerLineSymbolLayer(True)  # rotate the marker along the line
+    marker_line.setPlacements(placement)
+    marker_line.setSubSymbol(QgsMarkerSymbol([head]))
+    return marker_line
 
 
 def _fill_symbol(line_color: QColor, fill_color: QColor | None, width_mm: float) -> QgsFillSymbol:

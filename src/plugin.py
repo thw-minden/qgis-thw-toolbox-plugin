@@ -315,6 +315,8 @@ class THWToolboxPlugin:
                     dialog.radius_m(),
                     dialog.show_dimensions(),
                     self.settings.annotation_mgrs_resolution_m,
+                    dialog.arrows(),
+                    dialog.arrow_size_mm(),
                 )
         self._refresh_annotation_list()
 

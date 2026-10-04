@@ -4,6 +4,7 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor, QKeySequence
 from qgis.PyQt.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -21,6 +22,10 @@ except ImportError:  # Qt5 (QGIS 3)
     from qgis.PyQt.QtWidgets import QShortcut
 
 from ..layer.annotations import (
+    ARROWS_BOTH,
+    ARROWS_END,
+    ARROWS_NONE,
+    ARROWS_START,
     KIND_LINE,
     KIND_POINT,
     KIND_POLYGON,
@@ -93,6 +98,36 @@ class AnnotationEditDialog(QDialog):
         if entry.kind in (KIND_LINE, KIND_POLYGON):
             self._line_width_spin = line_width_spinbox(entry.line_width)
             form.addRow("Linienbreite", self._line_width_spin)
+
+        self._arrows_combo = None
+        self._arrow_size_spin = None
+        if entry.kind == KIND_LINE:
+            self._arrows_combo = QComboBox()
+            for mode, label in (
+                (ARROWS_NONE, "Kein Pfeil"),
+                (ARROWS_END, "Pfeil am Ende"),
+                (ARROWS_START, "Pfeil am Anfang"),
+                (ARROWS_BOTH, "Pfeile an beiden Enden"),
+            ):
+                self._arrows_combo.addItem(label, mode)
+            self._arrows_combo.setCurrentIndex(max(0, self._arrows_combo.findData(entry.arrows)))
+            self._arrows_combo.setToolTip("Ende = letzter gezeichneter Punkt, Anfang = erster Punkt")
+            form.addRow("Pfeilspitzen", self._arrows_combo)
+
+            self._arrow_size_spin = QDoubleSpinBox()
+            self._arrow_size_spin.setDecimals(1)
+            self._arrow_size_spin.setRange(0.0, 30.0)
+            self._arrow_size_spin.setSingleStep(0.5)
+            self._arrow_size_spin.setSuffix(" mm")
+            # 0 = automatic: grows with the line width
+            self._arrow_size_spin.setSpecialValueText("automatisch")
+            self._arrow_size_spin.setValue(entry.arrow_size_mm)
+            self._arrow_size_spin.setToolTip("Größe der Pfeilspitzen; „automatisch“ richtet sich nach der Linienbreite")
+            form.addRow("Pfeilgröße", self._arrow_size_spin)
+            self._arrow_size_spin.setEnabled(entry.arrows != ARROWS_NONE)
+            self._arrows_combo.currentIndexChanged.connect(
+                lambda _i: self._arrow_size_spin.setEnabled(self._arrows_combo.currentData() != ARROWS_NONE)
+            )
 
         self._radius_spin = None
         self._fill_check = None
@@ -189,6 +224,14 @@ class AnnotationEditDialog(QDialog):
     def show_dimensions(self) -> bool | None:
         """Whether radius / edge lengths are shown on the map; None for texts."""
         return self._dimensions_check.isChecked() if self._dimensions_check is not None else None
+
+    def arrows(self) -> str | None:
+        """Arrowhead mode (ARROWS_*) of a line; None for other objects."""
+        return self._arrows_combo.currentData() if self._arrows_combo is not None else None
+
+    def arrow_size_mm(self) -> float | None:
+        """Arrowhead size in mm (0 = automatic); None for objects other than lines."""
+        return self._arrow_size_spin.value() if self._arrow_size_spin is not None else None
 
     def line_width(self) -> float | None:
         """Line width in mm, or None for objects without a line (points, texts)."""

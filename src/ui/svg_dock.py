@@ -21,7 +21,15 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from ..layer.annotations import KIND_LINE, KIND_POINT, KIND_POLYGON, AnnotationEntry
+from ..layer.annotations import (
+    ARROWS_BOTH,
+    ARROWS_END,
+    ARROWS_START,
+    KIND_LINE,
+    KIND_POINT,
+    KIND_POLYGON,
+    AnnotationEntry,
+)
 from ..logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -770,6 +778,12 @@ def _annotation_icon(entry: AnnotationEntry) -> QIcon:
     elif entry.kind == KIND_LINE:
         painter.setPen(pen)
         painter.drawPolyline(QPolygonF([QPointF(3, 19), QPointF(9, 8), QPointF(15, 15), QPointF(21, 5)]))
+        painter.setBrush(entry.line_color)
+        painter.setPen(Qt.PenStyle.NoPen)
+        if entry.arrows in (ARROWS_END, ARROWS_BOTH):
+            painter.drawPolygon(QPolygonF([QPointF(22, 3), QPointF(21.5, 10), QPointF(16, 6)]))
+        if entry.arrows in (ARROWS_START, ARROWS_BOTH):
+            painter.drawPolygon(QPolygonF([QPointF(2, 21), QPointF(2.5, 14), QPointF(8, 18.5)]))
     elif entry.kind == KIND_POLYGON:
         painter.setPen(pen)
         painter.setBrush(entry.fill_color if entry.fill_color is not None else Qt.BrushStyle.NoBrush)

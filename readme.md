@@ -39,6 +39,7 @@ Ein QGIS-Plugin für das einfache Hinzufügen und Verwalten von taktischen Zeich
 - **Position in der Beschreibung** - `$POS` in einer Punktbeschreibung zeigt die MGRS-/UTMRef-Koordinate des Punktes (z. B. `32U MB 12345 98765`) und wandert beim Verschieben mit; Auflösung (0,1 m bis 100 m) im Einstellungs-Dialog
 - **Koordinaten im Bearbeiten-Dialog** - einklappbare Liste der MGRS-Koordinaten aller Punkte; im Bearbeiten-Modus Koordinaten eingeben, Punkte einfügen oder löschen (Linien behalten mind. 2, Polygone mind. 3 Punkte)
 - **Linie zeichnen** - Linksklick setzt Stützpunkte, Rechtsklick/Enter beendet, Rücktaste entfernt den letzten Punkt, Esc bricht ab
+- **Pfeilspitzen** - Linien können im Bearbeiten-Dialog am Ende, am Anfang oder an beiden Enden einen Pfeil erhalten
 - **Längenanzeige** - beim Zeichnen zeigt ein Hinweis am Mauszeiger die Länge des aktuellen Segments und die Gesamtlänge (Linie) bzw. Umfang und Fläche (Polygon)
 - **Messwerte im Bearbeiten-Dialog** - Länge einer Linie bzw. Umfang und Fläche eines Polygons
 - **Radius für Punkte** - im Bearbeiten-Dialog einstellbarer, maßstabsgetreuer Kreis in Metern um einen Punkt
