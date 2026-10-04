@@ -28,6 +28,8 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QVariant
 from qgis.PyQt.QtGui import QColor, QFont
 
+from .legend import LEGEND_PROPERTY
+
 BAND_LETTERS = "CDEFGHJKLMNPQRSTUVWX"
 COL_SETS = ("ABCDEFGH", "JKLMNPQR", "STUVWXYZ")
 ROW_ODD = "ABCDEFGHJKLMNPQRSTUV"
@@ -165,5 +167,7 @@ def build_mgrs_grid_layer(
     layer.setLabelsEnabled(True)
     # Markiere als temporär — bleibt nicht im Projekt erhalten nach Speichern/Neuladen.
     layer.setCustomProperty("skipMemoryLayersCheck", 1)
+    # Ein Gitter braucht keinen Eintrag in der Zeichenerklärung der Druckvorlagen
+    layer.setCustomProperty(LEGEND_PROPERTY, 0)
 
     return layer, f"Gitter: {zone}{band} {square_center}, {interval} m, {len(features)} Linien"
