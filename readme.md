@@ -202,6 +202,8 @@ Die taktischen Zeichen stammen aus dem hervorragenden Projekt [Taktische-Zeichen
 
 Ein besonderer Dank geht auch an **[ZeiberKreim](https://github.com/ZeiberKreim)** für wertvolle Beiträge und Erweiterungen des Plugins.
 
+Danke an **Steven Recktenwald** als Ideengeber für das Feature „Leitungsroller“ und für den Anstoß zum Thema Zeltplanung.
+
 ### Verwendete Ressourcen
 
 | Ressource | Lizenz | Quelle |
