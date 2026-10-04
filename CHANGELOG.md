@@ -25,9 +25,12 @@
 - Doppelklick auf einen Punkt (Verschieben-Werkzeug) öffnet dessen Bearbeiten-Dialog
 - Koordinaten-Tabelle im Bearbeiten-Dialog: Doppelklick auf eine Zeile kopiert die MGRS-Koordinate in die Zwischenablage (außerhalb des Bearbeiten-Modus)
 - Adress-Suche (Alt+S) springt bei Eingabe einer MGRS-/UTMRef-Koordinate direkt dorthin (Zoom auf mind. 1:10.000) und hebt die Position kurz blinkend hervor
+- Export-Symbol in jeder Polygon-Zeile der Dock-Liste „Annotationen“: exportiert dieses Polygon über den vorhandenen Drohnen-KMZ-Exporter (`DjiKmlExporter`) mit Name (Listenbezeichnung, auch als Dateiname vorgeschlagen) und Farbe; temporärer Export-Layer über `annotations.polygon_export_layer`
+- Button „Alle Annotationen als MBTiles exportieren“ unten im Dock-Tab „Annotationen“: rendert den gesamten Annotations-Layer (inkl. Radius-Kreise und Beschreibungen) über den vorhandenen `DjiMbtilesExporter` mit Zoom-Auswahl und Fortschrittsanzeige; `DjiMbtilesExporter.export` akzeptiert dafür jeden Kartenlayer und optional eine eigene Ausdehnung (`annotations.export_extent`)
 
 ### Behoben
 - Marker-Details zeigen statt „UTM 32N: …E …N“ (fest Zone 32, ohne 100-km-Quadrat) jetzt die vollständige MGRS-/UTMRef-Koordinate, z. B. `32U MB 12345 98765`; Zone und Band ergeben sich aus der Position, die Auflösung folgt der projektweiten Einstellung „MGRS-Auflösung“; „Kopieren“ kopiert nur die Koordinate
+- MBTiles-Zoomstufen-Dialog war zu schmal: Titel und Hinweistext wurden abgeschnitten (Mindestbreite, Höhe passt sich dem umbrochenen Text an)
 - Bei gesetztem Radius ist die Füllfarbe des Kreises im Bearbeiten-Dialog wählbar (Standard: Punktfarbe mit 25 % Deckkraft, folgt der Punktfarbe bis zur eigenen Wahl)
 - Option im Bearbeiten-Dialog, Maße auf der Karte anzuzeigen: Radius eines Punktes (über dem Kreis), Segmentlängen einer Linie bzw. Kantenlängen eines Polygons (mittig an jeder Kante, entlang der Kante ausgerichtet); die Beschriftungen werden bei jeder Geometrieänderung automatisch aktualisiert
 

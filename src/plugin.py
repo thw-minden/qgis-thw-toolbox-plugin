@@ -318,6 +318,51 @@ class THWToolboxPlugin:
                 )
         self._refresh_annotation_list()
 
+    def _export_annotation_polygon(self, item_id):
+        """Dock-Callback: ein Annotations-Polygon mit dem vorhandenen KMZ-Exporter speichern."""
+        layer = annotations.find_annotation_layer()
+        export_layer = annotations.polygon_export_layer(layer, [item_id]) if layer else None
+        if export_layer is None:
+            # Polygon was deleted meanwhile (e.g. with the native QGIS tools)
+            self._refresh_annotation_list()
+            return
+        DjiKmlExporter(
+            on_success=lambda path: self.iface.messageBar().pushMessage(
+                "Polygon-Export", f"„{export_layer.name()}“ exportiert: {path}", Qgis.MessageLevel.Success
+            ),
+            on_error=self._show_error_alert,
+        ).prompt_and_export(export_layer, self.iface.mainWindow())
+
+    def _export_annotations_as_mbtiles(self):
+        """Dock-Callback: den kompletten Annotations-Layer mit dem vorhandenen MBTiles-Exporter rendern."""
+        title = "Annotationen als MBTiles"
+        layer = annotations.find_annotation_layer()
+        extent = annotations.export_extent(layer) if layer else None
+        if extent is None:
+            self.iface.messageBar().pushMessage(title, "Keine Annotationen vorhanden.", Qgis.MessageLevel.Info)
+            return
+
+        zoom = _MbtilesZoomDialog.ask(self.iface.mainWindow())
+        if zoom is None:
+            return
+        zoom_min, zoom_max = zoom
+        path = self._ask_single_save_path(layer, "mbtiles", "MBTiles (*.mbtiles)")
+        if not path:
+            return
+
+        # Same progress/cancel dialog as the MBTiles export in the plugin menu
+        self._run_batch_export(
+            title=title,
+            layers=[layer],
+            target_paths=[path],
+            run=lambda lyr, target, on_fb, chk: DjiMbtilesExporter(
+                on_success=lambda _p: None,
+                on_error=lambda *a: None,
+                on_feedback=on_fb,
+                on_cancel_check=chk,
+            ).export(lyr, target, zoom_min, zoom_max, extent=extent),
+        )
+
     def _flash_annotation(self, layer, item_id):
         """Zentriert die Karte auf die Annotation, falls sie außerhalb liegt, und lässt sie aufblinken."""
         geom = annotations.entry_geometry(layer, item_id)
@@ -604,6 +649,8 @@ class THWToolboxPlugin:
                 navigate_callback=self._navigate_to_feature,
                 annotation_provider=self._list_annotations,
                 annotation_callback=self._edit_annotation,
+                annotation_export_callback=self._export_annotation_polygon,
+                annotation_mbtiles_callback=self._export_annotations_as_mbtiles,
                 progress_callback=on_load_progress,
             )
             self.dock.setWidget(self.svg_dock_widget)

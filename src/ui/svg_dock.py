@@ -1,16 +1,20 @@
 import os
 import re
 
+from qgis.core import QgsApplication
 from qgis.PyQt.QtCore import QMimeData, QPointF, QSize, Qt
 from qgis.PyQt.QtGui import QColor, QDrag, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from qgis.PyQt.QtWidgets import (
     QButtonGroup,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QSizePolicy,
     QStackedWidget,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -34,6 +38,8 @@ class SvgDock(QWidget):
         progress_callback=None,
         annotation_provider=None,
         annotation_callback=None,
+        annotation_export_callback=None,
+        annotation_mbtiles_callback=None,
     ):
         super().__init__()
         self.plugin_dir = plugin_dir
@@ -44,6 +50,10 @@ class SvgDock(QWidget):
         self.annotation_provider = annotation_provider
         # Called with the item id when an annotation is clicked
         self.annotation_callback = annotation_callback
+        # Called with a polygon's item id to export that polygon (KMZ)
+        self.annotation_export_callback = annotation_export_callback
+        # Called without arguments to export all annotations as MBTiles
+        self.annotation_mbtiles_callback = annotation_mbtiles_callback
         self.icon_cache = {}  # Cache für Icons
         self._initial_progress_callback = progress_callback
 
@@ -288,6 +298,14 @@ class SvgDock(QWidget):
         self.btn_refresh_annotations = QPushButton("Aktualisieren")
         self.btn_refresh_annotations.clicked.connect(self.refresh_annotation_list)
         layout.addWidget(self.btn_refresh_annotations)
+
+        self.btn_export_mbtiles = QPushButton("Alle Annotationen als MBTiles exportieren")
+        self.btn_export_mbtiles.setToolTip(
+            "Alle Punkte, Linien, Polygone und Beschreibungen als Kachel-Ebene (MBTiles) speichern, z. B. für Drohnen"
+        )
+        self.btn_export_mbtiles.clicked.connect(lambda: self.annotation_mbtiles_callback())
+        self.btn_export_mbtiles.setVisible(self.annotation_mbtiles_callback is not None)
+        layout.addWidget(self.btn_export_mbtiles)
         return page
 
     def refresh_annotation_list(self):
@@ -301,9 +319,50 @@ class SvgDock(QWidget):
             return
 
         for entry in entries:
-            item = QListWidgetItem(_annotation_icon(entry), entry.title)
+            item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, entry.item_id)
+            item.setToolTip(entry.title)
+            row = self._annotation_row(entry)
+            item.setSizeHint(row.sizeHint())
             self.annotation_list.addItem(item)
+            self.annotation_list.setItemWidget(item, row)
+
+    def _annotation_row(self, entry: AnnotationEntry) -> QWidget:
+        """Row widget: preview icon, title and — for polygons — a KMZ export button.
+
+        Icon and title ignore the mouse, so clicks on them reach the list (opening the
+        edit dialog); the export button handles its own click.
+        """
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(6)
+
+        icon = QLabel()
+        icon.setPixmap(_annotation_icon(entry).pixmap(24, 24))
+        icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        layout.addWidget(icon)
+
+        title = QLabel(entry.title)
+        title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        # Long descriptions are clipped instead of widening the dock (full text in the tooltip)
+        title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        layout.addWidget(title, 1)
+
+        if entry.kind == KIND_POLYGON and self.annotation_export_callback is not None:
+            button = QToolButton()
+            export_icon = QgsApplication.getThemeIcon("/mActionSharingExport.svg")
+            if export_icon.isNull():
+                button.setText("KMZ")
+            else:
+                button.setIcon(export_icon)
+            button.setAutoRaise(True)
+            button.setToolTip("Dieses Polygon als KMZ exportieren (z. B. für Drohnen)")
+            button.clicked.connect(
+                lambda _checked=False, item_id=entry.item_id: self.annotation_export_callback(item_id)
+            )
+            layout.addWidget(button)
+        return row
 
     def _on_annotation_activated(self, item: QListWidgetItem):
         item_id = item.data(Qt.ItemDataRole.UserRole)

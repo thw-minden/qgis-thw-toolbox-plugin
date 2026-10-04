@@ -112,12 +112,18 @@ class DjiMbtilesExporter:
 
     def export(
         self,
-        layer: QgsVectorLayer,
+        layer: QgsMapLayer,
         target_path: str,
         zoom_min: int,
         zoom_max: int,
+        extent: QgsRectangle | None = None,
     ) -> bool:
-        extent_4326 = _layer_extent_in_wgs84(layer)
+        """Render ``layer`` (any map layer in the layer tree) into MBTiles.
+
+        ``extent`` (layer CRS) overrides the layer's own extent — e.g. for annotation
+        layers, whose extent ignores radius circles and texts.
+        """
+        extent_4326 = _layer_extent_in_wgs84(layer, extent)
         if extent_4326 is None or extent_4326.isEmpty():
             self._on_error(
                 "Ebenenlayer-Export (Drohne)",
@@ -177,7 +183,7 @@ class DjiMbtilesExporter:
         return True
 
 
-def _solo_layer_visibility(layer: QgsVectorLayer) -> dict[str, bool]:
+def _solo_layer_visibility(layer: QgsMapLayer) -> dict[str, bool]:
     """Hide every layer in the tree except `layer`; return previous state."""
     root = QgsProject.instance().layerTreeRoot()
     previous = {n.layerId(): n.isVisible() for n in root.findLayers()}
@@ -196,8 +202,8 @@ def _restore_layer_visibility(previous: dict[str, bool]) -> None:
         logger.warning("Konnte Layer-Sichtbarkeit nicht zurücksetzen: %s", e)
 
 
-def _layer_extent_in_wgs84(layer: QgsMapLayer) -> QgsRectangle | None:
-    extent = layer.extent()
+def _layer_extent_in_wgs84(layer: QgsMapLayer, extent: QgsRectangle | None = None) -> QgsRectangle | None:
+    extent = extent if extent is not None else layer.extent()
     if extent.isEmpty():
         return None
     src_crs = layer.crs()
@@ -223,6 +229,9 @@ class _ZoomDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
         self.setWindowTitle("MBTiles-Zoomstufen")
+        # Without a minimum width Qt shrinks the dialog to the spin boxes, which cuts off
+        # the window title and the wrapped info text
+        self.setMinimumWidth(420)
 
         self.min_spin = QSpinBox(self)
         self.min_spin.setRange(0, 22)
@@ -250,6 +259,9 @@ class _ZoomDialog(QDialog):
         layout.addLayout(form)
         layout.addWidget(info)
         layout.addWidget(buttons)
+        # Height must follow the wrapped text at the final width
+        layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)
+        self.adjustSize()
 
     @classmethod
     def ask(cls, parent) -> tuple[int, int] | None:

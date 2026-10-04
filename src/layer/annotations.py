@@ -14,8 +14,11 @@ from qgis.core import (
     QgsAnnotationMarkerItem,
     QgsAnnotationPointTextItem,
     QgsAnnotationPolygonItem,
+    QgsCategorizedSymbolRenderer,
     QgsCoordinateReferenceSystem,
     QgsDistanceArea,
+    QgsExpression,
+    QgsFeature,
     QgsFillSymbol,
     QgsGeometry,
     QgsLineString,
@@ -27,9 +30,11 @@ from qgis.core import (
     QgsProject,
     QgsRectangle,
     QgsRenderContext,
+    QgsRendererCategory,
     QgsSimpleMarkerSymbolLayer,
     QgsTextFormat,
     QgsTextRenderer,
+    QgsVectorLayer,
     QgsVertexId,
 )
 from qgis.PyQt.QtCore import Qt
@@ -38,6 +43,7 @@ from qgis.PyQt.QtGui import QColor
 from ..layout.mgrs_grid import point_to_mgrs
 from ..logging_utils import get_logger
 from ..util.units import format_meters
+from .fields import string_field
 
 logger = get_logger(__name__)
 
@@ -364,6 +370,94 @@ def entry_geometry(layer: QgsAnnotationLayer, item_id: str) -> QgsGeometry | Non
     if isinstance(geometry, QgsPointXY):
         return QgsGeometry.fromPointXY(geometry)
     return QgsGeometry(geometry.clone())
+
+
+# ----------------------------------------------------------------------
+# Export
+# ----------------------------------------------------------------------
+
+
+def polygon_export_layer(layer: QgsAnnotationLayer, item_ids: list[str] | None = None) -> QgsVectorLayer | None:
+    """Temporary (not added to the project) polygon layer with annotation polygons, for exporters.
+
+    ``item_ids`` limits the layer to these polygons (default: all). Each feature is named
+    like its dock list entry (e.g. "Polygon 2: Sammelraum") and styled in its own color —
+    the fill color, or for unfilled polygons the outline color with a fully transparent
+    fill. A single polygon also names the layer (and thus the suggested file name).
+    None if there are no matching polygons.
+    """
+    entries = [e for e in list_entries(layer) if e.kind == KIND_POLYGON and (item_ids is None or e.item_id in item_ids)]
+    if not entries:
+        return None
+
+    layer_name = entries[0].title if len(entries) == 1 else "THW Annotationen Polygone"
+    export = QgsVectorLayer("Polygon", layer_name, "memory")
+    export.setCrs(layer.crs())
+    provider = export.dataProvider()
+    provider.addAttributes([string_field("name"), string_field("item_id")])
+    export.updateFields()
+
+    features = []
+    categories = []
+    for entry in entries:
+        geom = entry_geometry(layer, entry.item_id)
+        if geom is None or geom.isEmpty():
+            continue
+        feature = QgsFeature(export.fields())
+        feature.setGeometry(geom)
+        feature.setAttributes([entry.title, entry.item_id])
+        features.append(feature)
+
+        if entry.fill_color is not None:
+            color = QColor(entry.fill_color)
+        else:
+            color = QColor(entry.line_color)
+            color.setAlpha(0)
+        symbol = QgsFillSymbol.createSimple({})
+        symbol.setColor(color)
+        categories.append(QgsRendererCategory(entry.item_id, symbol, entry.title))
+
+    provider.addFeatures(features)
+    export.updateExtents()
+    # Exporters take per-feature colors from the renderer and labels from the display field
+    export.setRenderer(QgsCategorizedSymbolRenderer("item_id", categories))
+    export.setDisplayExpression(QgsExpression.quotedColumnRef("name"))
+    return export
+
+
+def export_extent(layer: QgsAnnotationLayer, margin_m: float = 50.0) -> QgsRectangle | None:
+    """Area (layer CRS) covering all annotations, for rendering exports such as MBTiles.
+
+    QGIS counts a marker or text only by its anchor point, so radius circles are added
+    explicitly and everything is padded by ``margin_m`` (plus 5 %) for descriptions.
+    None if the layer is empty.
+    """
+    items = layer.items()
+    if not items:
+        return None
+    meta = _read_meta(layer)
+    da = distance_area(layer.crs())
+
+    extent = QgsRectangle()
+    extent.setNull()
+    for item_id, item in items.items():
+        geom = entry_geometry(layer, item_id) if hasattr(item, "geometry") else None
+        if geom is None and isinstance(item, QgsAnnotationPointTextItem):
+            geom = QgsGeometry.fromPointXY(QgsPointXY(item.point()))
+        if geom is None or geom.isEmpty():
+            continue
+        box = geom.boundingBox()
+        radius = meta.get(item_id, {}).get("radius_m") or 0.0
+        if radius > 0:
+            box.grow(radius * _layer_units_per_meter(da, box.center()))
+        extent.combineExtentWith(box)
+    if extent.isNull():
+        return None
+
+    padding = margin_m * _layer_units_per_meter(da, extent.center())
+    padding += 0.05 * max(extent.width(), extent.height())
+    extent.grow(padding)
+    return extent
 
 
 # ----------------------------------------------------------------------

@@ -45,6 +45,11 @@ def build_qgs_fields() -> list[QgsField]:
     return [QgsField(name, vtype) for name, vtype in LAYER_FIELDS]
 
 
+def string_field(name: str) -> QgsField:
+    """A text field with the Qt5/Qt6-safe type constant (e.g. for temporary export layers)."""
+    return QgsField(name, _T_STRING)
+
+
 def field_types_dict() -> dict[str, object]:
     """{field_name: type_constant} for runtime field-presence checks."""
     return dict(LAYER_FIELDS)
