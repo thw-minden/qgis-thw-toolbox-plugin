@@ -10,6 +10,7 @@ from qgis.PyQt.QtCore import QCoreApplication, Qt, QTimer
 from qgis.PyQt.QtGui import QColor, QIcon, QKeySequence
 from qgis.PyQt.QtWidgets import (
     QAction,
+    QApplication,
     QDialog,
     QDialogButtonBox,
     QDockWidget,
@@ -28,6 +29,7 @@ from .export.dji_mbtiles_export import DjiMbtilesExporter
 from .export.dji_mbtiles_export import _ZoomDialog as _MbtilesZoomDialog
 from .export.portable_export import PortableExporter
 from .layer import annotations
+from .layer.annotation_history import AnnotationHistory
 from .layer.feature_ops import FeatureOperations
 from .layer.labeling import apply_labeling
 from .layer.layer_manager import LayerManager
@@ -48,6 +50,7 @@ from .tools.annotation_tool import (
 from .tools.canvas_drop_filter import CanvasDropFilter
 from .tools.identify_tool import IdentifyTool
 from .tools.move_tool import MoveTool
+from .tools.undo_shortcuts import UndoShortcutFilter
 from .ui.annotation_dialog import AnnotationEditDialog
 from .ui.config_dialog import ConfigDialog
 from .ui.nominatim_search_dialog import NominatimSearchDialog
@@ -78,6 +81,9 @@ class THWToolboxPlugin:
         self.annotation_toolbar = None
         self.annotation_actions = []
         self.annotation_tools = []
+        # Undo/redo of annotation changes within this session (Ctrl+Z / Ctrl+Y)
+        self.annotation_history = AnnotationHistory(annotations.META_PROPERTY)
+        self.undo_filter = None
         # True während QGIS das Projekt leert (Projekt schließen / anderes laden).
         # In dem Fall sollen wir die Layer-Entfernung still hinnehmen statt den
         # Nutzer mit der Deaktivierungs-Warnung zu konfrontieren.
@@ -194,6 +200,7 @@ class THWToolboxPlugin:
         self.iface.addPluginToMenu("THW Toolbox", self.dji_mbtiles_action)
 
         self._init_annotation_tools()
+        self._init_annotation_undo()
 
         # Verbinde Projekt-Events für automatisches Speichern
         QgsProject.instance().writeProject.connect(self._on_project_save)
@@ -251,6 +258,41 @@ class THWToolboxPlugin:
             self.annotation_actions.append(action)
             self.annotation_tools.append(tool)
 
+    def _init_annotation_undo(self):
+        """Ctrl+Z / Ctrl+Y (Ctrl+Umschalt+Z) machen Annotations-Änderungen rückgängig bzw. stellen sie wieder her."""
+        annotations.set_history(self.annotation_history)
+        self.undo_filter = UndoShortcutFilter(
+            scopes=lambda: [self.canvas, self.dock],
+            is_available=self._annotation_undo_available,
+            on_undo=self._undo_annotation,
+            on_redo=self._redo_annotation,
+            parent=self.iface.mainWindow(),
+        )
+        QApplication.instance().installEventFilter(self.undo_filter)
+
+    def _annotation_undo_available(self) -> bool:
+        """Only while no vector layer is being edited — then QGIS's own Ctrl+Z (edit buffer) has priority."""
+        for lyr in QgsProject.instance().mapLayers().values():
+            if isinstance(lyr, QgsVectorLayer) and lyr.isEditable():
+                return False
+        return True
+
+    def _undo_annotation(self):
+        self._apply_history_step(self.annotation_history.undo(), "Rückgängig", "Nichts rückgängig zu machen.")
+
+    def _redo_annotation(self):
+        self._apply_history_step(self.annotation_history.redo(), "Wiederhergestellt", "Nichts wiederherzustellen.")
+
+    def _apply_history_step(self, label, done_text, empty_text):
+        # Drags/hover markers of the move tool refer to the old state — reset them
+        for tool in self.annotation_tools:
+            if self.canvas.mapTool() is tool and hasattr(tool, "reset_state"):
+                tool.reset_state()
+        message = f"{done_text}: {label}" if label else empty_text
+        self.iface.messageBar().pushMessage("Annotationen", message, Qgis.MessageLevel.Info, 2)
+        if label:
+            self._refresh_annotation_list()
+
     def _toggle_annotation_tool(self, tool, checked):
         if checked:
             self.canvas.setMapTool(tool)
@@ -293,33 +335,38 @@ class THWToolboxPlugin:
             mgrs_resolution_m=self.settings.annotation_mgrs_resolution_m,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            if dialog.deleted:
-                annotations.delete_entry(layer, item_id)
-            else:
-                # Geometry first, so description ($POS) and measurement labels use the new vertices
-                vertices = dialog.edited_vertices()
-                if vertices is not None and not annotations.set_vertices(
-                    layer, item_id, vertices, self.settings.annotation_mgrs_resolution_m
-                ):
-                    self.iface.messageBar().pushMessage(
-                        "Annotation", "Koordinaten konnten nicht übernommen werden.", Qgis.MessageLevel.Warning
-                    )
-                annotations.update_entry(
-                    layer,
-                    item_id,
-                    dialog.name(),
-                    dialog.line_color(),
-                    dialog.fill_color(),
-                    dialog.line_width(),
-                    annotations.map_units_per_mm(self.canvas.mapSettings()),
-                    dialog.radius_m(),
-                    dialog.show_dimensions(),
-                    self.settings.annotation_mgrs_resolution_m,
-                    dialog.arrows(),
-                    dialog.arrow_size_mm(),
-                    dialog.dimension_size_mm(),
-                )
+            # Everything one dialog changes is undone with a single Ctrl+Z
+            with annotations.undo_step(layer, "Annotation bearbeiten"):
+                self._apply_annotation_dialog(layer, item_id, dialog)
         self._refresh_annotation_list()
+
+    def _apply_annotation_dialog(self, layer, item_id, dialog):
+        if dialog.deleted:
+            annotations.delete_entry(layer, item_id)
+        else:
+            # Geometry first, so description ($POS) and measurement labels use the new vertices
+            vertices = dialog.edited_vertices()
+            if vertices is not None and not annotations.set_vertices(
+                layer, item_id, vertices, self.settings.annotation_mgrs_resolution_m
+            ):
+                self.iface.messageBar().pushMessage(
+                    "Annotation", "Koordinaten konnten nicht übernommen werden.", Qgis.MessageLevel.Warning
+                )
+            annotations.update_entry(
+                layer,
+                item_id,
+                dialog.name(),
+                dialog.line_color(),
+                dialog.fill_color(),
+                dialog.line_width(),
+                annotations.map_units_per_mm(self.canvas.mapSettings()),
+                dialog.radius_m(),
+                dialog.show_dimensions(),
+                self.settings.annotation_mgrs_resolution_m,
+                dialog.arrows(),
+                dialog.arrow_size_mm(),
+                dialog.dimension_size_mm(),
+            )
 
     def _export_annotation_polygon(self, item_id):
         """Dock-Callback: ein Annotations-Polygon mit dem vorhandenen KMZ-Exporter speichern."""
@@ -468,6 +515,13 @@ class THWToolboxPlugin:
         except (TypeError, RuntimeError):
             pass
 
+        # Undo/Redo abmelden
+        if self.undo_filter is not None:
+            QApplication.instance().removeEventFilter(self.undo_filter)
+            self.undo_filter = None
+        annotations.set_history(None)
+        self.annotation_history.clear()
+
         # Räume temporäre Dateien auf
         cleanup_temp_files(self.plugin_dir)
 
@@ -572,6 +626,8 @@ class THWToolboxPlugin:
 
     def _on_project_cleared(self):
         self._project_clearing = False
+        # Undo steps refer to the closed project's annotations
+        self.annotation_history.clear()
 
     def _on_layers_will_be_removed(self, layer_ids):
         """Wenn der Marker-Layer aus dem Projekt entfernt wird, Plugin sauber deaktivieren."""

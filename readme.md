@@ -45,6 +45,7 @@ Ein QGIS-Plugin für das einfache Hinzufügen und Verwalten von taktischen Zeich
 - **Radius für Punkte** - im Bearbeiten-Dialog einstellbarer, maßstabsgetreuer Kreis in Metern um einen Punkt
 - **Radius-Füllfarbe** - bei gesetztem Radius frei wählbar inkl. Transparenz
 - **Längenbeschriftungen anpassen** - Textgröße im Bearbeiten-Dialog; einzelne Beschriftungen mit dem Verschieben-Werkzeug verschieben und skalieren
+- **Rückgängig / Wiederherstellen** - Strg+Z / Strg+Y für alle Annotations-Änderungen der laufenden Sitzung (Karte oder THW-Dock muss den Fokus haben)
 - **Texte drehen** - im Verschieben-Werkzeug knapp außerhalb einer Ecke des (mitgedrehten) Rahmens ziehen; Umschalt rastet in 15°-Schritten ein
 - **Maße auf der Karte** - pro Objekt zuschaltbar: Radius eines Punktes, Segment- bzw. Kantenlängen von Linien und Polygonen; aktualisieren sich beim Bearbeiten automatisch
 - **Polygon zeichnen** - wahlweise nur Umriss oder gefüllt

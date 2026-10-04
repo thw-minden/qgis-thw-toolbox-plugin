@@ -1,5 +1,7 @@
+import functools
 import json
 import math
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from qgis.core import (
@@ -66,7 +68,7 @@ _LAYER_PROPERTY = "thw_toolbox/annotation_layer"
 # Placeholder in point descriptions, replaced on the map by the point's MGRS coordinate
 POSITION_PLACEHOLDER = "$POS"
 _POSITION_UNAVAILABLE = "(Position außerhalb UTM)"
-_META_PROPERTY = "thw_toolbox/annotation_items"
+META_PROPERTY = "thw_toolbox/annotation_items"
 
 # Fallback when an item's line width cannot be read (e.g. restyled with native QGIS tools)
 DEFAULT_LINE_WIDTH_MM = 0.8
@@ -189,6 +191,50 @@ class NodeHandle:
 
 
 # ----------------------------------------------------------------------
+# Undo / redo
+# ----------------------------------------------------------------------
+
+_history = None  # AnnotationHistory, set by the plugin (see set_history)
+_history_depth = 0  # > 0 while an undo step is being recorded — nested changes join it
+
+
+def set_history(history) -> None:
+    """Record every following change in ``history`` (an ``AnnotationHistory``; None disables recording)."""
+    global _history
+    _history = history
+
+
+@contextmanager
+def undo_step(layer: QgsAnnotationLayer, label: str):
+    """Group all changes inside the ``with`` block into one undo step called ``label``."""
+    global _history_depth
+    if _history is None or _history_depth > 0 or layer is None:
+        yield
+        return
+    before = _history.capture(layer, label)
+    _history_depth += 1
+    try:
+        yield
+    finally:
+        _history_depth -= 1
+        _history.commit(layer, before)
+
+
+def _undoable(label: str):
+    """Decorator: the call (whose first argument is the annotation layer) becomes one undo step."""
+
+    def decorate(func):
+        @functools.wraps(func)
+        def wrapper(layer, *args, **kwargs):
+            with undo_step(layer, label):
+                return func(layer, *args, **kwargs)
+
+        return wrapper
+
+    return decorate
+
+
+# ----------------------------------------------------------------------
 # Layer
 # ----------------------------------------------------------------------
 
@@ -226,6 +272,7 @@ def get_or_create_annotation_layer(crs: QgsCoordinateReferenceSystem) -> QgsAnno
 # ----------------------------------------------------------------------
 
 
+@_undoable("Punkt setzen")
 def add_point(
     layer: QgsAnnotationLayer,
     point: QgsPointXY,
@@ -256,6 +303,7 @@ def add_point(
     _finish(layer)
 
 
+@_undoable("Linie zeichnen")
 def add_line(layer: QgsAnnotationLayer, points: list[QgsPointXY], color: QColor, width_mm: float) -> None:
     """Add a polyline through ``points`` (layer CRS) with a line width of ``width_mm``."""
     item = QgsAnnotationLineItem(QgsLineString([QgsPoint(p) for p in points]))
@@ -264,6 +312,7 @@ def add_line(layer: QgsAnnotationLayer, points: list[QgsPointXY], color: QColor,
     _register_and_finish(layer, layer.addItem(item))
 
 
+@_undoable("Polygon zeichnen")
 def add_polygon(
     layer: QgsAnnotationLayer,
     points: list[QgsPointXY],
@@ -329,6 +378,7 @@ def get_entry(layer: QgsAnnotationLayer, item_id: str) -> AnnotationEntry | None
     return next((e for e in list_entries(layer) if e.item_id == item_id), None)
 
 
+@_undoable("Annotation bearbeiten")
 def update_entry(
     layer: QgsAnnotationLayer,
     item_id: str,
@@ -413,6 +463,7 @@ def update_entry(
     _finish(layer)
 
 
+@_undoable("Annotation löschen")
 def delete_entry(layer: QgsAnnotationLayer, item_id: str) -> None:
     """Remove an object, including its linked description and measurement labels."""
     meta = _read_meta(layer)
@@ -592,6 +643,7 @@ def preview_moved_node(layer: QgsAnnotationLayer, handle: NodeHandle, new_point:
     return results.representativeGeometry() if results else None
 
 
+@_undoable("Punkt verschieben")
 def move_node(
     layer: QgsAnnotationLayer, handle: NodeHandle, new_point: QgsPointXY, mgrs_resolution_m: float = 1.0
 ) -> bool:
@@ -722,6 +774,7 @@ def label_frame(layer: QgsAnnotationLayer, label_id: str, context: QgsRenderCont
     return LabelFrame(corners, anchor, angle)
 
 
+@_undoable("Beschriftung drehen")
 def rotate_label(layer: QgsAnnotationLayer, label_id: str, clockwise_deg: float, pivot: QgsPointXY) -> bool:
     """Rotate a text by ``clockwise_deg`` around ``pivot`` (layer CRS).
 
@@ -798,6 +851,7 @@ def clamp_label_scale(layer: QgsAnnotationLayer, label_id: str, factor: float) -
     return max(MIN_TEXT_SIZE_MM / size, min(MAX_TEXT_SIZE_MM / size, factor))
 
 
+@_undoable("Beschriftung skalieren")
 def scale_label(layer: QgsAnnotationLayer, label_id: str, factor: float, pivot: QgsPointXY | None = None) -> bool:
     """Multiply the text size (and its halo) of a description by ``factor`` (clamped).
 
@@ -827,6 +881,7 @@ def scale_label(layer: QgsAnnotationLayer, label_id: str, factor: float, pivot: 
     return True
 
 
+@_undoable("Beschriftung verschieben")
 def translate_label(layer: QgsAnnotationLayer, label_id: str, dx: float, dy: float) -> bool:
     """Shift a text item by ``dx``/``dy`` (layer CRS units)."""
     result = layer.applyEditV2(
@@ -851,6 +906,7 @@ def edge_geometries(layer: QgsAnnotationLayer) -> list[tuple[str, QgsGeometry]]:
     return result
 
 
+@_undoable("Stützpunkt einfügen")
 def add_node(layer: QgsAnnotationLayer, item_id: str, point: QgsPointXY) -> bool:
     """Insert a vertex at ``point`` (layer CRS) into the nearest segment of a line/polygon."""
     result = layer.applyEditV2(
@@ -884,6 +940,7 @@ def can_delete_node(layer: QgsAnnotationLayer, handle: NodeHandle) -> bool:
     return False
 
 
+@_undoable("Stützpunkt entfernen")
 def delete_node(layer: QgsAnnotationLayer, handle: NodeHandle) -> bool:
     """Remove a line/polygon vertex. Returns False (without changing anything) if not allowed."""
     if not can_delete_node(layer, handle):
@@ -914,6 +971,7 @@ def centroids(layer: QgsAnnotationLayer) -> list[tuple[str, QgsPointXY]]:
     return result
 
 
+@_undoable("Objekt verschieben")
 def translate_item(layer: QgsAnnotationLayer, item_id: str, dx: float, dy: float) -> bool:
     """Shift a whole line/polygon by ``dx``/``dy`` (layer CRS units).
 
@@ -953,6 +1011,7 @@ def vertex_points(layer: QgsAnnotationLayer, item_id: str) -> list[QgsPointXY]:
     return ring[:-1] if len(ring) > 1 and ring[0] == ring[-1] else ring
 
 
+@_undoable("Koordinaten ändern")
 def set_vertices(
     layer: QgsAnnotationLayer, item_id: str, points: list[QgsPointXY], mgrs_resolution_m: float = 1.0
 ) -> bool:
@@ -1317,7 +1376,7 @@ def _strip_indent(text: str) -> str:
 
 
 def _read_meta(layer) -> dict:
-    raw = layer.customProperty(_META_PROPERTY, "")
+    raw = layer.customProperty(META_PROPERTY, "")
     try:
         meta = json.loads(raw) if raw else {}
     except (TypeError, ValueError):
@@ -1327,7 +1386,7 @@ def _read_meta(layer) -> dict:
 
 
 def _write_meta(layer, meta: dict) -> None:
-    layer.setCustomProperty(_META_PROPERTY, json.dumps(meta))
+    layer.setCustomProperty(META_PROPERTY, json.dumps(meta))
 
 
 def _register(meta: dict, item_id: str) -> None:

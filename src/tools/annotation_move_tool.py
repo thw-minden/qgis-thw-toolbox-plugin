@@ -345,6 +345,11 @@ class AnnotationMoveTool(QgsMapTool):
         else:
             e.ignore()
 
+    def reset_state(self):
+        """Forget drags and hover highlights, e.g. after undo/redo replaced the annotations."""
+        self._cancel_drag()
+        self._clear_hover()
+
     def dispose(self):
         """Remove canvas items owned by the tool (call on plugin unload)."""
         self._cancel_drag()
