@@ -20,6 +20,7 @@ from qgis.PyQt.QtWidgets import QApplication
 
 from ..layer.labeling import label_size_pt
 from ..logging_utils import get_logger
+from ..ui.symbol_picker import Symbol, symbol_catalog, symbol_prefs
 from .capacity_dialog import CapacityDialog
 from .catalog import FootprintType, fmt_m, load_catalog
 from .dock import PlanningDock
@@ -48,7 +49,17 @@ from .layers import (
     label_visible,
     sign_visible,
 )
-from .tools import AreaTool, ArrowTool, CableTool, FootprintTool, PointTool, SelectTool, VertexTool, ZoneTool
+from .tools import (
+    AreaTool,
+    ArrowTool,
+    CableTool,
+    FootprintTool,
+    MarkerTool,
+    PointTool,
+    SelectTool,
+    VertexTool,
+    ZoneTool,
+)
 
 logger = get_logger(__name__)
 
@@ -78,6 +89,9 @@ TOOL_LIGHT = "light"
 TOOL_ZONE = "zone"
 TOOL_ARROW = "arrow"
 TOOL_EDIT = "edit"
+TOOL_MARKER = "marker"
+# Taktische Zeichen in der Hotbar bzw. auf den Tasten 1–9
+MAX_MARKER_SLOTS = 9
 
 POINT_TOOL_ROLES = {TOOL_DISTRIBUTOR: ROLE_DISTRIBUTORS, TOOL_GENERATOR: ROLE_GENERATORS, TOOL_LIGHT: ROLE_LIGHTS}
 # Werkzeuge, deren Typ über ``point_ids`` gewählt wird (Punkt-Objekte, Gebiete, Pfeile)
@@ -123,6 +137,8 @@ class PlanningController(QObject):
         self.hotbar_enabled = settings.value(_SETTINGS_PREFIX + "hotbar", True, type=bool)
         self._canvas_active = False
         self.rotation = 0.0
+        # SVG des Zeichens, das das Werkzeug „Zeichen setzen“ gerade in der Hand hat
+        self.marker_path: str | None = None
         self.grid_rows = 1
         self.grid_cols = 1
         # Aus welcher Dock-Gruppe die Flächenprüfung gestartet wurde (Zelte/Fahrzeuge)
@@ -316,6 +332,40 @@ class PlanningController(QObject):
         tool = self.marker_tool()
         return tool.outline(feature) if tool is not None else QgsGeometry()
 
+    def add_marker_at(self, map_point: QgsPointXY, global_pos):
+        """Rechtsklick auf die Karte: taktisches Zeichen im Picker wählen und an der Klickstelle setzen."""
+        if self.plugin is not None:
+            self.plugin.pick_marker_at(map_point, global_pos)
+
+    def marker_slots(self) -> tuple[list[Symbol], bool]:
+        """Zeichen für Hotbar und Tasten 1–9 und ob es Favoriten sind.
+
+        Die Favoriten in ihrer gemerkten Reihenfolge (fest auf den Tasten); ohne
+        Favoriten springen die zuletzt verwendeten Zeichen ein.
+        """
+        prefs = symbol_prefs(self.plugin_dir)
+        favorites = prefs.favorites()
+        if favorites:
+            return favorites[:MAX_MARKER_SLOTS], True
+        return prefs.recent()[:MAX_MARKER_SLOTS], False
+
+    def activate_marker_slot(self, index: int) -> bool:
+        """Taste ``index + 1``: das Zeichen von diesem Platz der Hotbar in die Hand nehmen."""
+        symbols, _favorites = self.marker_slots()
+        if not 0 <= index < len(symbols):
+            self._message(
+                f"Auf Taste {index + 1} liegt noch kein Zeichen – Favoriten mit dem Stern im Zeichen-Picker merken."
+            )
+            return False
+        return self.activate_tool(TOOL_MARKER, symbols[index].path)
+
+    def place_marker(self, svg_path: str, map_point: QgsPointXY, keep_tool: bool = False) -> bool:
+        """Zeichen an ``map_point`` (Karten-CRS) setzen; ohne ``keep_tool`` danach zurück zur Auswahl."""
+        if self.plugin is None or not self.plugin.place_marker(svg_path, map_point, select=not keep_tool):
+            return False
+        symbol_prefs(self.plugin_dir).add_recent(svg_path)
+        return True
+
     def marker_clicked(self):
         """Ein Zeichen wurde angeklickt: rechts kommen seine Details nach vorn."""
         self.layers.selection_changed.emit()
@@ -423,9 +473,13 @@ class PlanningController(QObject):
     # ------------------------------------------------------------------
 
     def activate_tool(self, kind: str, type_id: str | None = None) -> bool:
-        # Auswählen braucht keine Layer – beim bloßen Öffnen nichts im Projekt anlegen
+        # Auswählen und Zeichen setzen brauchen keine Objektplanungs-Layer – nichts im Projekt anlegen
         if kind == TOOL_SELECT:
             self.layers._adopt_project_layers()
+        elif kind == TOOL_MARKER:
+            if not type_id:
+                return False
+            self.marker_path = type_id
         elif not self._ensure_layers():
             self._sync_ui()
             return False
@@ -452,6 +506,9 @@ class PlanningController(QObject):
             tool = ZoneTool(self.canvas, self)
         elif kind == TOOL_ARROW:
             tool = ArrowTool(self.canvas, self)
+        elif kind == TOOL_MARKER:
+            symbol = symbol_catalog(self.plugin_dir).by_path(type_id)
+            tool = MarkerTool(self.canvas, self, type_id, symbol.name if symbol else type_id)
         else:
             tool = PointTool(self.canvas, self, POINT_TOOL_ROLES[kind])
         # Neues Objekt pro Aktivierung: die Rubberbands werden beim Deaktivieren entsorgt
@@ -505,6 +562,8 @@ class PlanningController(QObject):
                     return kind, self.point_ids.get(TYPE_TOOL_ROLES[kind])
                 if kind == TOOL_AREA:
                     return kind, self.area_role
+                if kind == TOOL_MARKER:
+                    return kind, self.marker_path
                 return kind, None
         return None, None
 

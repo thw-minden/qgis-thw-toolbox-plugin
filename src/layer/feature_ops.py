@@ -25,6 +25,14 @@ _ADAPTIVE_MAX = 500.0
 _MIN_SIZE = 1.0
 
 
+def default_origin(svg_path: str) -> tuple[int, int]:
+    """Ankerpunkt neuer Zeichen als (origin_x, origin_y): 0/1/2 = links/Mitte/rechts bzw. oben/Mitte/unten.
+
+    Schadensstellen hängen mit dem oberen Rand am Punkt, alle anderen sitzen mittig darauf.
+    """
+    return (1, 0) if os.path.basename(svg_path).startswith("Schadensstelle") else (1, 1)
+
+
 class FeatureOperations:
     """All single- and multi-attribute mutations on the toolbox layer.
 
@@ -317,9 +325,7 @@ class FeatureOperations:
         f.setAttribute("show_label", False)
         f.setAttribute("white_background", False)
         f.setAttribute("rotation", 0.0)
-        origin_x, origin_y = 1, 1
-        if os.path.basename(svg_path).startswith("Schadensstelle"):
-            origin_y = 0
+        origin_x, origin_y = default_origin(svg_path)
         f.setAttribute("origin_x", origin_x)
         f.setAttribute("origin_y", origin_y)
 

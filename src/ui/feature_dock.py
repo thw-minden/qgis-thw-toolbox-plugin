@@ -265,7 +265,8 @@ class FeatureDock(QDockWidget):
         hint = QLabel(
             "• Klicken Sie auf ein taktisches Zeichen oder ein Objekt der Objektplanung<br>"
             "• Shift+Klick oder Rahmen aufziehen wählt mehrere aus<br>"
-            "• Oder ziehen Sie ein Symbol aus der Symbolpalette auf die Karte"
+            "• Oder ziehen Sie ein Symbol aus der Symbolpalette auf die Karte<br>"
+            "• Oder klicken Sie mit rechts auf die Karte und wählen Sie ein Zeichen"
         )
         hint.setTextFormat(Qt.TextFormat.RichText)
         hint.setWordWrap(True)

@@ -1,44 +1,45 @@
 import os
 import re
 
-from qgis.PyQt.QtCore import QMimeData, QSize, Qt
-from qgis.PyQt.QtGui import QDrag, QIcon, QPixmap
+from qgis.PyQt.QtCore import QSize, Qt
+from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import (
     QButtonGroup,
     QHBoxLayout,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QPushButton,
     QStackedWidget,
-    QTreeWidget,
-    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from ..logging_utils import get_logger
+from .symbol_picker import DOCK_MODE, SymbolPickerWidget, symbol_catalog, symbol_prefs
 
 logger = get_logger(__name__)
 
 
 class SvgDock(QWidget):
+    """Symbolpalette: der gemeinsame Zeichen-Picker (Explorer) und die Zeichen auf der Karte.
+
+    Zeichen werden aus dem Picker auf die Karte gezogen; ein Doppelklick ruft
+    ``place_callback(svg_path)`` auf (die Toolbox setzt das Zeichen in die Kartenmitte).
+    """
+
     def __init__(
         self,
         plugin_dir,
-        select_callback,
+        place_callback,
         settings_callback,
         layer_provider=None,
         navigate_callback=None,
-        progress_callback=None,
     ):
         super().__init__()
         self.plugin_dir = plugin_dir
-        self.select_callback = select_callback
         self.layer_provider = layer_provider
         self.navigate_callback = navigate_callback
         self.icon_cache = {}  # Cache für Icons
-        self._initial_progress_callback = progress_callback
 
         logger.info(f"Initialisiere SvgDock mit Plugin-Verzeichnis: {plugin_dir}")
 
@@ -47,7 +48,7 @@ class SvgDock(QWidget):
         root_layout.setSpacing(0)
         self.setLayout(root_layout)
 
-        # Navbar (Start | Taktische Zeichen)
+        # Navbar (Explorer | Auf der Karte)
         self.navbar = self._build_navbar()
         root_layout.addWidget(self.navbar)
 
@@ -55,11 +56,11 @@ class SvgDock(QWidget):
         self.stack = QStackedWidget()
         root_layout.addWidget(self.stack)
 
-        # Seite 0: Explorer (SVG-Baum zum Platzieren)
-        self.symbols_page = self._build_symbols_page(settings_callback)
+        # Seite 0: Explorer (Zeichen-Picker zum Platzieren)
+        self.symbols_page = self._build_symbols_page(place_callback, settings_callback)
         self.stack.addWidget(self.symbols_page)
 
-        # Seite 1: Verwendet (Liste aller Marker auf der Karte)
+        # Seite 1: Auf der Karte (Liste aller Marker)
         self.start_page = self._build_start_page()
         self.stack.addWidget(self.start_page)
 
@@ -97,7 +98,8 @@ class SvgDock(QWidget):
 
         self.btn_tab_symbols = QPushButton("Explorer")
         self.btn_tab_symbols.setCheckable(True)
-        self.btn_tab_start = QPushButton("Verwendet")
+        # „Verwendet“ hieß das früher – zu leicht mit „Zuletzt verwendet“ im Picker zu verwechseln
+        self.btn_tab_start = QPushButton("Auf der Karte")
         self.btn_tab_start.setCheckable(True)
         for btn in (self.btn_tab_symbols, self.btn_tab_start):
             btn.setMinimumHeight(32)
@@ -136,47 +138,16 @@ class SvgDock(QWidget):
         layout.addWidget(self.btn_refresh_markers)
         return page
 
-    def _build_symbols_page(self, settings_callback) -> QWidget:
+    def _build_symbols_page(self, place_callback, settings_callback) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(6, 6, 6, 6)
 
-        # Suchleiste
-        self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("Symbol suchen...")
-        self.search_box.textChanged.connect(self.on_search)
-        layout.addWidget(self.search_box)
-
-        self.treeWidget = QTreeWidget()
-        self.treeWidget.setHeaderLabel("Taktische Zeichen")
-        self.treeWidget.setDragEnabled(True)
-        self.treeWidget.setIconSize(QSize(48, 48))
-        self.treeWidget.setIndentation(16)
-        self.treeWidget.setColumnCount(1)
-        self.treeWidget.setSortingEnabled(False)
-        self.treeWidget.setRootIsDecorated(True)
-        self.treeWidget.setStyleSheet("""
-            QTreeWidget {
-                border: none;
-                outline: none;
-            }
-            QTreeWidget::item {
-                padding: 2px 0px;
-            }
-            QTreeWidget::branch:has-children:!has-siblings:closed,
-            QTreeWidget::branch:closed:has-children:has-siblings {
-                border-image: none;
-            }
-            QTreeWidget::branch:open:has-children:!has-siblings,
-            QTreeWidget::branch:open:has-children:has-siblings {
-                border-image: none;
-            }
-        """)
-        layout.addWidget(self.treeWidget)
-
-        self.populate_root_folders(progress_callback=self._initial_progress_callback)
-        self.treeWidget.itemPressed.connect(self.on_item_pressed)
-        self.treeWidget.itemExpanded.connect(self.on_item_expanded)
+        self.picker = SymbolPickerWidget(
+            symbol_catalog(self.plugin_dir), symbol_prefs(self.plugin_dir), page, DOCK_MODE
+        )
+        self.picker.chosen.connect(place_callback)
+        layout.addWidget(self.picker)
 
         self.btn_config = QPushButton("Einstellungen")
         self.btn_config.clicked.connect(settings_callback)
@@ -184,7 +155,7 @@ class SvgDock(QWidget):
         return page
 
     # ------------------------------------------------------------------
-    # Start-Seite: Marker-Liste
+    # Seite „Auf der Karte“: Marker-Liste
     # ------------------------------------------------------------------
 
     def refresh_marker_list(self):
@@ -254,16 +225,6 @@ class SvgDock(QWidget):
             return
         self.navigate_callback(fid)
 
-    # ------------------------------------------------------------------
-    # Symbols-Seite (unverändert gegenüber vorher)
-    # ------------------------------------------------------------------
-
-    def _set_category_font(self, item):
-        """Setzt die Schrift für Kategorie-Einträge (fett) zur visuellen Unterscheidung."""
-        font = item.font(0)
-        font.setBold(True)
-        item.setFont(0, font)
-
     def get_cached_icon(self, path):
         if path not in self.icon_cache:
             self.icon_cache[path] = QIcon(path)
@@ -276,361 +237,3 @@ class SvgDock(QWidget):
             return int(text_part) if text_part.isdigit() else text_part.lower()
 
         return [convert(c) for c in re.split(r"(\d+)", text)]
-
-    def get_category_folders(self):
-        categories = {
-            "Allgemein": {
-                "Einheiten": "Einheiten",
-                "Einrichtungen": "Einrichtungen",
-                "Fahrzeuge": "Fahrzeuge",
-                "Fernmeldewesen": "Fernmeldewesen",
-                "Gebäude": "Gebäude",
-                "Gefahren": "Gefahren",
-                "Führungsstellen": "Führungsstellen",
-                "Maßnahmen": "Maßnahmen",
-                "Personen": "Personen",
-                "Schäden": "Schäden",
-                "Schadenskonten": {
-                    "gelb": {"folder": "Schadenskonten/gelb", "filter": "Schadenskonto"},
-                    "rot": {"folder": "Schadenskonten/rot", "filter": "Schadenskonto"},
-                    "weiß": {"folder": "Schadenskonten/weiß", "filter": "Schadenskonto"},
-                },
-                "Schadensstellen": {
-                    "gelb": {"folder": "Schadenskonten/gelb", "filter": "Schadensstelle"},
-                    "rot": {"folder": "Schadenskonten/rot", "filter": "Schadensstelle"},
-                    "weiß": {"folder": "Schadenskonten/weiß", "filter": "Schadensstelle"},
-                },
-                "Sonstiges": "Sonstiges",
-            },
-            "THW": {
-                "Einheiten": "THW_Einheiten",
-                "Fahrzeuge": "THW_Fahrzeuge",
-                "Gebäude": "THW_Gebäude",
-                "Personen": "THW_Personen",
-            },
-            "Weitere Einheiten": {
-                "Bundeswehr": {
-                    "Einheiten": "Bundeswehr_Einheiten",
-                    "Fahrzeuge": "Bundeswehr_Fahrzeuge",
-                    "Personen": "Bundeswehr_Personen",
-                },
-                "Feuerwehr": {
-                    "Einheiten": "Feuerwehr_Einheiten",
-                    "Fahrzeuge": "Feuerwehr_Fahrzeuge",
-                    "Gebäude": "Feuerwehr_Gebäude",
-                    "Personen": "Feuerwehr_Personen",
-                },
-                "Rettungswesen": {
-                    "Einheiten": "Rettungswesen_Einheiten",
-                    "Einrichtungen": "Rettungswesen_Einrichtungen",
-                    "Fahrzeuge": "Rettungswesen_Fahrzeuge",
-                    "Personen": "Rettungswesen_Personen",
-                },
-                "Wasserrettung": {
-                    "Einheiten": "Wasserrettung_Einheiten",
-                    "Einrichtungen": "Wasserrettung_Einrichtungen",
-                    "Fahrzeuge": "Wasserrettung_Fahrzeuge",
-                    "Gebäude": "Wasserrettung_Gebäude",
-                    "Personen": "Wasserrettung_Personen",
-                },
-                "Polizei": {"Einheiten": "Polizei_Einheiten", "Fahrzeuge": "Polizei_Fahrzeuge"},
-                "Zoll": {"Einheiten": "Zoll_Einheiten", "Fahrzeuge": "Zoll_Fahrzeuge"},
-                "Katastrophenschutz": {
-                    "Einheiten": "Katastrophenschutz_Einheiten",
-                    "Fahrzeuge": "Katastrophenschutz_Fahrzeuge",
-                },
-            },
-        }
-        return categories
-
-    def populate_root_folders(self, progress_callback=None):
-        self.treeWidget.clear()
-        self.treeWidget.setSortingEnabled(False)
-
-        svg_path = os.path.join(self.plugin_dir, "svgs")
-        logger.info(f"Plugin-Verzeichnis: {self.plugin_dir}")
-        logger.info(f"SVG-Pfad: {svg_path}")
-
-        if not os.path.exists(svg_path):
-            logger.error(f"SVG-Pfad existiert nicht: {svg_path}")
-            return
-
-        categories = self.get_category_folders()
-        # Items in eager-loaded categories (Allgemein/THW) whose SVG files we
-        # still need to populate — collected so we can report per-subfolder
-        # progress in a second pass.
-        pending_loads: list[QTreeWidgetItem] = []
-
-        for category, subcategories in categories.items():
-            category_item = QTreeWidgetItem(self.treeWidget)
-            category_item.setText(0, category)
-            self._set_category_font(category_item)
-
-            if isinstance(subcategories, dict):
-                sorted_subcategories = sorted(subcategories.items(), key=lambda x: self.natural_sort_key(x[0]))
-                for subcategory, folder_name in sorted_subcategories:
-                    subcategory_item = QTreeWidgetItem(category_item)
-                    subcategory_item.setText(0, subcategory)
-
-                    if isinstance(folder_name, dict):
-                        first_value = list(folder_name.values())[0] if folder_name else ""
-                        if isinstance(first_value, dict):
-                            base_folder = first_value["folder"].split("/")[0]
-                        elif isinstance(first_value, str):
-                            base_folder = first_value.split("/")[0] if "/" in first_value else subcategory
-                        else:
-                            base_folder = subcategory
-                        subcategory_item.setData(0, Qt.ItemDataRole.UserRole, base_folder)
-                        for subsubcategory, actual_folder in folder_name.items():
-                            subsubcategory_item = QTreeWidgetItem(subcategory_item)
-                            subsubcategory_item.setText(0, subsubcategory)
-                            if isinstance(actual_folder, dict):
-                                subsubcategory_item.setData(0, Qt.ItemDataRole.UserRole, actual_folder["folder"])
-                                subsubcategory_item.setData(0, Qt.ItemDataRole.UserRole + 1, actual_folder["filter"])
-                            else:
-                                subsubcategory_item.setData(0, Qt.ItemDataRole.UserRole, actual_folder)
-                            placeholder = QTreeWidgetItem(subsubcategory_item)
-                            placeholder.setText(0, "Laden...")
-                    else:
-                        subcategory_item.setData(0, Qt.ItemDataRole.UserRole, folder_name)
-                        placeholder = QTreeWidgetItem(subcategory_item)
-                        placeholder.setText(0, "Laden...")
-
-            if category in ["Allgemein", "THW"]:
-                self.treeWidget.expandItem(category_item)
-                for i in range(category_item.childCount()):
-                    child = category_item.child(i)
-                    if child.childCount() > 0 and child.child(0).text(0) != "Laden...":
-                        self.treeWidget.expandItem(child)
-                        for j in range(child.childCount()):
-                            pending_loads.append(child.child(j))
-                    else:
-                        folder_name = child.data(0, Qt.ItemDataRole.UserRole)
-                        if folder_name:
-                            folder_path = os.path.join(self.plugin_dir, "svgs", folder_name)
-                            if os.path.exists(folder_path):
-                                subdirs = [
-                                    d for d in os.listdir(folder_path) if os.path.isdir(os.path.join(folder_path, d))
-                                ]
-                                if subdirs:
-                                    self.populate_subfolders(child, folder_path, subdirs)
-                                    self.treeWidget.expandItem(child)
-                                    for j in range(child.childCount()):
-                                        pending_loads.append(child.child(j))
-                                else:
-                                    pending_loads.append(child)
-
-        total = len(pending_loads)
-        for idx, item in enumerate(pending_loads):
-            if progress_callback:
-                progress_callback(idx, total, item.text(0))
-            self.populate_svg_files(item)
-        if progress_callback:
-            progress_callback(total, total, "")
-
-    def on_item_expanded(self, item):
-        if item.childCount() == 1 and item.child(0).text(0) == "Laden...":
-            item.removeChild(item.child(0))
-        elif item.childCount() > 0:
-            return
-
-        if item.parent() is None:
-            if item.text(0) == "Weitere Einheiten":
-                self.populate_other_units(item)
-            else:
-                self.populate_category(item)
-        else:
-            parent = item.parent()
-            if parent and parent.text(0) == "Weitere Einheiten":
-                categories = self.get_category_folders()["Weitere Einheiten"]
-                subcategory_name = item.text(0)
-                if subcategory_name in categories:
-                    subfolders = categories[subcategory_name]
-                    if item.childCount() == 1 and item.child(0).text(0) == "Laden...":
-                        item.removeChild(item.child(0))
-                    sorted_subfolders = sorted(subfolders.items(), key=lambda x: self.natural_sort_key(x[0]))
-                    for subsubcategory, folder_name in sorted_subfolders:
-                        subsubcategory_item = QTreeWidgetItem(item)
-                        subsubcategory_item.setText(0, subsubcategory)
-                        subsubcategory_item.setData(0, Qt.ItemDataRole.UserRole, folder_name)
-                        placeholder = QTreeWidgetItem(subsubcategory_item)
-                        placeholder.setText(0, "Laden...")
-                return
-
-            folder_name = item.data(0, Qt.ItemDataRole.UserRole)
-            if folder_name:
-                folder_path = os.path.join(self.plugin_dir, "svgs", folder_name)
-                if os.path.exists(folder_path):
-                    subdirs = [d for d in os.listdir(folder_path) if os.path.isdir(os.path.join(folder_path, d))]
-                    if subdirs:
-                        self.populate_subfolders(item, folder_path, subdirs)
-                        return
-            self.populate_svg_files(item)
-
-    def populate_other_units(self, category_item):
-        while category_item.childCount() > 0:
-            category_item.removeChild(category_item.child(0))
-
-        categories = self.get_category_folders()["Weitere Einheiten"]
-        sorted_categories = sorted(categories.items(), key=lambda x: self.natural_sort_key(x[0]))
-
-        for subcategory, subfolders in sorted_categories:
-            subcategory_item = QTreeWidgetItem(category_item)
-            subcategory_item.setText(0, subcategory)
-            subcategory_item.setData(0, Qt.ItemDataRole.UserRole, None)
-            placeholder = QTreeWidgetItem(subcategory_item)
-            placeholder.setText(0, "Laden...")
-
-    def populate_category(self, category_item):
-        while category_item.childCount() > 0:
-            category_item.removeChild(category_item.child(0))
-
-        category_name = category_item.text(0)
-        categories = self.get_category_folders()
-
-        if category_name in categories:
-            svg_path = os.path.join(self.plugin_dir, "svgs")
-            subfolders = categories[category_name]
-
-            if isinstance(subfolders, dict):
-                sorted_subfolders = sorted(subfolders.keys(), key=self.natural_sort_key)
-            else:
-                sorted_subfolders = sorted(subfolders, key=self.natural_sort_key)
-
-            for subfolder in sorted_subfolders:
-                folder_name = subfolders[subfolder] if isinstance(subfolders, dict) else subfolder
-
-                if isinstance(folder_name, dict):
-                    subfolder_item = QTreeWidgetItem(category_item)
-                    subfolder_item.setText(0, subfolder)
-                    first_value = list(folder_name.values())[0] if folder_name else ""
-                    if isinstance(first_value, dict):
-                        base_folder = first_value["folder"].split("/")[0]
-                    elif isinstance(first_value, str):
-                        base_folder = first_value.split("/")[0] if "/" in first_value else subfolder
-                    else:
-                        base_folder = subfolder
-                    subfolder_item.setData(0, Qt.ItemDataRole.UserRole, base_folder)
-                    for subsubcategory, actual_folder in folder_name.items():
-                        subsubcategory_item = QTreeWidgetItem(subfolder_item)
-                        subsubcategory_item.setText(0, subsubcategory)
-                        if isinstance(actual_folder, dict):
-                            subsubcategory_item.setData(0, Qt.ItemDataRole.UserRole, actual_folder["folder"])
-                            subsubcategory_item.setData(0, Qt.ItemDataRole.UserRole + 1, actual_folder["filter"])
-                        else:
-                            subsubcategory_item.setData(0, Qt.ItemDataRole.UserRole, actual_folder)
-                        placeholder = QTreeWidgetItem(subsubcategory_item)
-                        placeholder.setText(0, "Laden...")
-                else:
-                    folder_path = os.path.join(svg_path, folder_name)
-                    if os.path.exists(folder_path):
-                        subfolder_item = QTreeWidgetItem(category_item)
-                        display_name = folder_name.split("_", 1)[1] if "_" in folder_name else folder_name
-                        subfolder_item.setText(0, display_name)
-                        subfolder_item.setData(0, Qt.ItemDataRole.UserRole, folder_name)
-                        placeholder = QTreeWidgetItem(subfolder_item)
-                        placeholder.setText(0, "Laden...")
-
-    def populate_subfolders(self, parent_item, base_folder_path, subdirs):
-        """Lädt Unterordner in einem Ordner (z.B. gelb, rot, weiß in Schadenskonten)"""
-        while parent_item.childCount() > 0:
-            parent_item.removeChild(parent_item.child(0))
-
-        subdirs.sort(key=self.natural_sort_key)
-
-        base_folder_name = parent_item.data(0, Qt.ItemDataRole.UserRole)
-
-        for subdir in subdirs:
-            subfolder_item = QTreeWidgetItem(parent_item)
-            subfolder_item.setText(0, subdir)
-            full_folder_path = f"{base_folder_name}/{subdir}" if base_folder_name else subdir
-            subfolder_item.setData(0, Qt.ItemDataRole.UserRole, full_folder_path)
-            placeholder = QTreeWidgetItem(subfolder_item)
-            placeholder.setText(0, "Laden...")
-
-    def populate_svg_files(self, subfolder_item):
-        while subfolder_item.childCount() > 0:
-            subfolder_item.removeChild(subfolder_item.child(0))
-
-        folder_name = subfolder_item.data(0, Qt.ItemDataRole.UserRole)
-        if not folder_name:
-            return
-
-        file_filter = subfolder_item.data(0, Qt.ItemDataRole.UserRole + 1)
-
-        folder_path = os.path.join(self.plugin_dir, "svgs", folder_name)
-        logger.info(f"Suche Symbole in: {folder_path}")
-
-        try:
-            if os.path.exists(folder_path):
-                logger.info(f"Ordner existiert: {folder_path}")
-                files = [f for f in os.listdir(folder_path) if f.endswith(".svg")]
-                if file_filter:
-                    files = [
-                        f
-                        for f in files
-                        if os.path.splitext(f)[0] == file_filter or os.path.splitext(f)[0].startswith(file_filter + "_")
-                    ]
-                logger.info(f"Gefundene SVG-Dateien: {files}")
-                files.sort(key=self.natural_sort_key)
-
-                for file in files:
-                    full_path = os.path.join(folder_path, file)
-                    symbol_item = QTreeWidgetItem(subfolder_item)
-                    display_name = os.path.splitext(file)[0]
-                    symbol_item.setText(0, display_name)
-                    symbol_item.setIcon(0, self.get_cached_icon(full_path))
-                    symbol_item.setData(0, Qt.ItemDataRole.UserRole, full_path)
-            else:
-                logger.warning(f"Ordner existiert NICHT: {folder_path}")
-        except Exception as e:
-            logger.error(f"Fehler beim Lesen des Ordners {folder_path}: {str(e)}")
-
-    def on_item_pressed(self, item):
-        svg_path = item.data(0, Qt.ItemDataRole.UserRole)
-        if svg_path:
-            self.select_callback(svg_path)
-            drag = QDrag(self)
-            mime = QMimeData()
-            mime.setText(svg_path)
-            drag.setMimeData(mime)
-            drag.setPixmap(QPixmap(svg_path).scaled(48, 48))
-            drag.exec(Qt.DropAction.CopyAction)
-
-    def on_search(self, text):
-        logger.debug("on_search aufgerufen mit: %s", text)
-        if not text:
-            self.populate_root_folders()
-            return
-
-        self.treeWidget.clear()
-        self.treeWidget.setSortingEnabled(False)
-
-        svg_path = os.path.join(self.plugin_dir, "svgs")
-        thw_treffer = []
-        andere_treffer = []
-
-        for root, dirs, files in os.walk(svg_path):
-            for file in files:
-                if file.endswith(".svg"):
-                    display_name = os.path.splitext(file)[0].replace("_", " ")
-                    if text.lower() in file.lower() or text.lower() in display_name.lower():
-                        full_path = os.path.join(root, file)
-                        rel_path = os.path.relpath(root, svg_path)
-                        if rel_path.startswith("THW_"):
-                            thw_treffer.append((display_name, full_path))
-                        else:
-                            andere_treffer.append((display_name, full_path))
-
-        for display_name, full_path in thw_treffer + andere_treffer:
-            symbol_item = QTreeWidgetItem(self.treeWidget)
-            symbol_item.setText(0, display_name)
-            symbol_item.setIcon(0, self.get_cached_icon(full_path))
-            symbol_item.setData(0, Qt.ItemDataRole.UserRole, full_path)
-
-        if not thw_treffer and not andere_treffer:
-            kein_treffer = QTreeWidgetItem(self.treeWidget)
-            kein_treffer.setText(0, "Keine Treffer gefunden")
-            kein_treffer.setIcon(0, QIcon.fromTheme("dialog-error"))
-
-        self.treeWidget.repaint()

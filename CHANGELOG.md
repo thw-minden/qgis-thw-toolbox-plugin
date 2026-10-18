@@ -41,9 +41,23 @@
   - Speicherung in `<projekt>_objektplanung.gpkg` neben der Projektdatei; Katalog mit Maßen und Leistungen in `data/objektplanung.json`
 - **Marker-Tabelle: Import aus CSV/Excel** (`.csv`, `.tsv`, `.xlsx`, `.ods`) mit Spalten-Zuordnung für Position (UTMREF, „Breite Länge“ oder getrennte Spalten), Beschriftung und Zeichen, Standard-Zeichen und Vorschau; unvollständige Zeilen bleiben als Entwurf in der Tabelle; „Vorlage speichern …“ legt eine Beispieltabelle zum Ausfüllen an
 - **Auf eigenen Standort zoomen** (Toolbar-Button neben der Adresssuche): zeigt die eigene Position als blauen Punkt mit Genauigkeitskreis und zoomt dorthin; der Punkt läuft danach mit. Quelle ist ein in QGIS verbundener GPS-Empfänger (Ansicht → Bedienfelder → GPS-Informationen), sonst der Standortdienst des Systems (unter Windows WLAN-/IP-Ortung bzw. eingebautes GPS). Die Meldung nennt die Position in UTMREF samt Genauigkeit (mit „Kopieren“); bei verweigertem Zugriff führt „Einstellungen öffnen“ zu den Windows-Standorteinstellungen. Ausblenden über den Pfeil am Button oder das Plugin-Menü
+- **Einheitlicher Zeichen-Picker** für Symbolpalette, Auswahldialog (Marker-Tabelle, Import, Drohnenfoto) und Karte (`ui/symbol_picker.py`):
+  - Reiter **Favoriten**, **Zuletzt verwendet** und **Alle**; die Kategorie (ganze Organisation wie „THW“ oder einzeln wie „THW · Fahrzeuge“) grenzt in jedem Reiter ein
+  - **Favoriten**: Stern oben rechts an jedem Zeichen, Strg+D oder Rechtsklick auf ein Zeichen; gelten in allen Projekten (QGIS-Benutzereinstellungen) und sofort in allen offenen Pickern
+  - **Zuletzt verwendet**: gesetzte, gezogene und gewählte Zeichen, das neueste zuerst (max. 24); **Zuletzt gesucht** als Chips unter dem Suchfeld
+  - **Bessere Suche**: über Name, Kategorie und Organisation, beste Treffer zuerst (Name gleich → beginnt mit → Wortanfang), Favoriten bei Gleichstand vorn; Umlaute auch als ae/oe/ue (`fuehrungstrupp`)
+  - **Rechtsklick auf die Karte** (Auswahlwerkzeug): auf freier Fläche öffnet sich der Picker am Mauszeiger, ein Klick setzt das Zeichen genau an die markierte Stelle; auf einem Objekt steht „Taktisches Zeichen hier hinzufügen …“ im Kontextmenü. Ist die Toolbox noch aus, wird sie dabei eingeschaltet
+  - Symbolpalette: Doppelklick bzw. Enter setzt das Zeichen in die Kartenmitte; Ziehen auf die Karte wie bisher
+- **Zeichen-Favoriten in der Hotbar**: Gleich nach der Auswahl liegen die Favoriten aus dem Zeichen-Picker (ohne Favoriten die zuletzt verwendeten Zeichen) als Kacheln mit Tasten-Badge 1–9, dahinter „Alle Zeichen …“ (Picker über der Hotbar)
+  - Klick oder **Taste 1–9** nimmt das Zeichen in die Hand: Es hängt als Vorschau am Mauszeiger, ein Klick auf die Karte setzt es und führt zurück zur Auswahl (neues Zeichen ausgewählt), **Shift+Klick** setzt weitere; Esc oder Rechtsklick bricht ab, eine andere Ziffer wechselt das Zeichen
+  - Kacheln lassen sich auch direkt auf die Karte ziehen; ist die Karte zu schmal, fallen hintere Kacheln weg, ihre Tasten gelten weiter
+  - Ist die Toolbox noch aus (nur die Objektplanung offen), schaltet das Setzen sie ein
 
 ### Verbessert
 - **Zeichen-Auswahl** (Icon-Picker): Namen werden vollständig und mehrzeilig angezeigt statt abgekürzt, das Raster füllt die ganze Breite, das gewählte Zeichen steht mit Kategorie unter dem Raster, Pfeiltasten im Suchfeld bewegen die Auswahl
+- Symbolpalette ohne Ladedialog: Der Zeichen-Picker lädt Icons erst beim Anzeigen; der Reiter „Verwendet“ heißt jetzt „Auf der Karte“ (nicht zu verwechseln mit „Zuletzt verwendet“)
+- Rechtsklick auf ein einzelnes taktisches Zeichen zeigt ein Kontextmenü (Duplizieren, Löschen)
+- Zeichen-Raster: Bei manchen Fensterbreiten fiel die letzte Spalte weg
 - Marker-Tabelle hat ein eigenes Toolbar-Icon im Stil der übrigen
 - **Einheitliche Legende**: jedes taktische Zeichen erscheint einmal, ungedreht und in fester Größe (max. Symbolgröße der Vorlage), unabhängig von Größe/Drehung auf der Karte (`layout/legend.py`)
 - Der Layout-Designer öffnet sich aus dem Druckvorlagen-Dialog im Vordergrund statt hinter dem QGIS-Hauptfenster

@@ -13,10 +13,11 @@ from qgis.core import (
     QgsRectangle,
 )
 from qgis.gui import QgsMapTool, QgsRubberBand, QgsVertexMarker
-from qgis.PyQt.QtCore import QPoint, QPointF, Qt, QTimer
-from qgis.PyQt.QtGui import QColor, QCursor, QPolygonF
+from qgis.PyQt.QtCore import QPoint, QPointF, QRect, QSize, Qt, QTimer
+from qgis.PyQt.QtGui import QColor, QCursor, QIcon, QPainter, QPixmap, QPolygonF
 from qgis.PyQt.QtWidgets import QMenu, QToolTip
 
+from ..layer.feature_ops import default_origin
 from ..logging_utils import get_logger
 from ..tools.selection_frame import rotate_cursor
 from .catalog import fmt_m
@@ -327,6 +328,88 @@ class PointTool(_PlanningTool):
         layer = self.controller.layers.layer(self.role)
         if layer is not None:
             self.controller.place_point(self.role, self.toLayerCoordinates(layer, event.mapPoint()))
+
+
+# ----------------------------------------------------------------------
+# Taktisches Zeichen setzen (Hotbar-Favoriten, Tasten 1–9)
+# ----------------------------------------------------------------------
+
+_MARKER_CURSOR_PX = 44
+_DIGIT_KEYS = (
+    Qt.Key.Key_1,
+    Qt.Key.Key_2,
+    Qt.Key.Key_3,
+    Qt.Key.Key_4,
+    Qt.Key.Key_5,
+    Qt.Key.Key_6,
+    Qt.Key.Key_7,
+    Qt.Key.Key_8,
+    Qt.Key.Key_9,
+)
+
+
+def digit_slot(event) -> int | None:
+    """Tasten 1–9 (auch Ziffernblock, ohne Strg/Alt) → Platz 0–8 der Zeichen in der Hotbar."""
+    if event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier):
+        return None
+    key = event.key()
+    return _DIGIT_KEYS.index(key) if key in _DIGIT_KEYS else None
+
+
+def _marker_cursor(svg_path: str) -> QCursor:
+    """Das Zeichen selbst als Mauszeiger; der Hotspot liegt dort, wo das Zeichen am Punkt hängt."""
+    size = _MARKER_CURSOR_PX
+    icon = QIcon(svg_path)
+    drawn = icon.actualSize(QSize(size, size))
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setOpacity(0.85)
+    icon.paint(painter, QRect(0, 0, size, size))
+    painter.end()
+    _origin_x, origin_y = default_origin(svg_path)
+    top = (size - drawn.height()) // 2
+    hot_y = top if origin_y == 0 else size // 2
+    return QCursor(pixmap, size // 2, hot_y)
+
+
+class MarkerTool(_PlanningTool):
+    """Taktisches Zeichen per Klick setzen (Hotbar-Favorit oder Taste 1–9).
+
+    Das Zeichen hängt als Vorschau am Mauszeiger. Ein Klick setzt es und führt
+    zurück zur Auswahl – das neue Zeichen ist dann ausgewählt und verschiebbar.
+    Shift+Klick setzt es und bleibt im Werkzeug für weitere. Tasten 1–9 wechseln
+    das Zeichen, Esc oder Rechtsklick brechen ab.
+    """
+
+    def __init__(self, canvas, controller, svg_path: str, label: str):
+        super().__init__(canvas, controller)
+        self.svg_path = svg_path
+        self.label = label
+        self.setCursor(_marker_cursor(svg_path))
+
+    def canvasMoveEvent(self, event):
+        # Unter das Zeichen am Mauszeiger, damit der Tooltip es nicht verdeckt
+        self._tooltip_at(
+            QPoint(event.pos()) + QPoint(0, _MARKER_CURSOR_PX // 2), f"{self.label} · Shift+Klick: mehrere"
+        )
+
+    def canvasReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.RightButton:
+            self.cancel()
+            return
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        keep = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        self.controller.place_marker(self.svg_path, QgsPointXY(event.mapPoint()), keep_tool=keep)
+
+    def keyPressEvent(self, event):
+        slot = digit_slot(event)
+        if slot is not None:
+            self.controller.activate_marker_slot(slot)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 # ----------------------------------------------------------------------
@@ -898,6 +981,9 @@ class SelectTool(_PlanningTool):
     Pfeiltasten schieben um 0,5 m (Shift: 5 m), Entf löscht, R dreht,
     D dupliziert, Enter / Doppelklick bearbeitet die Bezeichnung,
     Rechtsklick öffnet ein Kontextmenü, Esc hebt die Auswahl auf.
+    Ein Rechtsklick auf freie Fläche öffnet den Zeichen-Picker: Das gewählte
+    taktische Zeichen landet genau an dieser Stelle. Tasten 1–9 nehmen das
+    n-te Zeichen der Hotbar in die Hand (``MarkerTool``).
 
     Derselbe Cursor bedient auch die taktischen Zeichen: Ein Klick auf ein
     einzelnes Zeichen reicht die Geste an das MoveTool weiter (Rahmen mit
@@ -1363,32 +1449,46 @@ class SelectTool(_PlanningTool):
         self._refresh_overlay()
 
     def _context_menu(self, pos: QPoint, map_point: QgsPointXY):
+        """Rechtsklick: auf freier Fläche gleich der Zeichen-Picker, auf einem Objekt dessen Menü."""
+        global_pos = self.canvas.mapToGlobal(pos)
         hit = self._find(map_point)
+        if hit is None and self._frame_hit(QPointF(pos)) != "move":
+            self.controller.add_marker_at(map_point, global_pos)
+            return
         if hit is not None and hit[1].id() not in self.controller.selection_ids().get(hit[0], set()):
             self.controller.select([(hit[0], hit[1].id())])
-        if not self.controller.selection_ids():
-            return
         menu = QMenu(self.canvas)
-        if self.controller.editable_shape() is not None:
-            menu.addAction("Punkte bearbeiten\tDoppelklick", self.controller.edit_vertices)
-        menu.addAction("Bezeichnung bearbeiten …\tEnter", self.controller.focus_label)
-        labels_shown = all(self.controller.selection_labels_visible())
-        menu.addAction(
-            "Beschriftung ausblenden" if labels_shown else "Beschriftung einblenden",
-            self.controller.toggle_selection_labels,
-        )
-        signs = self.controller.selection_signs_visible()
-        if signs:
+        # Auch auf einem Objekt (z. B. im Zelt) lässt sich hier ein Zeichen setzen
+        add_marker = menu.addAction("Taktisches Zeichen hier hinzufügen …")
+        if self.controller.selection_ids():
+            menu.addSeparator()
+            if self.controller.editable_shape() is not None:
+                menu.addAction("Punkte bearbeiten\tDoppelklick", self.controller.edit_vertices)
+            menu.addAction("Bezeichnung bearbeiten …\tEnter", self.controller.focus_label)
+            labels_shown = all(self.controller.selection_labels_visible())
             menu.addAction(
-                "Taktisches Zeichen ausblenden" if all(signs) else "Taktisches Zeichen einblenden",
-                self.controller.toggle_selection_signs,
+                "Beschriftung ausblenden" if labels_shown else "Beschriftung einblenden",
+                self.controller.toggle_selection_labels,
             )
-        menu.addAction("Duplizieren\tD", self.controller.duplicate_selection)
-        menu.addAction("Drehen 90°", lambda: self.controller.rotate_selection(90))
-        menu.addAction("Drehen 15°\tR", lambda: self.controller.rotate_selection(15))
-        menu.addSeparator()
-        menu.addAction("Löschen\tEntf", self.controller.delete_selection)
-        menu.exec(self.canvas.mapToGlobal(pos))
+            signs = self.controller.selection_signs_visible()
+            if signs:
+                menu.addAction(
+                    "Taktisches Zeichen ausblenden" if all(signs) else "Taktisches Zeichen einblenden",
+                    self.controller.toggle_selection_signs,
+                )
+            menu.addAction("Duplizieren\tD", self.controller.duplicate_selection)
+            menu.addAction("Drehen 90°", lambda: self.controller.rotate_selection(90))
+            menu.addAction("Drehen 15°\tR", lambda: self.controller.rotate_selection(15))
+            menu.addSeparator()
+            menu.addAction("Löschen\tEntf", self.controller.delete_selection)
+        elif self.controller.single_marker() is not None:
+            # Einzelnes Zeichen: Drehen und Bezeichnung stehen in den Marker-Details
+            menu.addSeparator()
+            menu.addAction("Duplizieren\tD", self.controller.duplicate_selection)
+            menu.addSeparator()
+            menu.addAction("Löschen\tEntf", self.controller.delete_selection)
+        if menu.exec(global_pos) is add_marker:
+            self.controller.add_marker_at(map_point, global_pos)
 
     # -- Tastatur -----------------------------------------------------------
 
@@ -1411,6 +1511,9 @@ class SelectTool(_PlanningTool):
         elif self._gesture == "marker":
             # Mitten im Ziehen eines Zeichens nichts verändern
             pass
+        elif digit_slot(event) is not None and not self._gesture:
+            # Taste n: n-tes Zeichen der Hotbar setzen (Favoriten, sonst zuletzt verwendet)
+            self.controller.activate_marker_slot(digit_slot(event))
         elif key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and (has_selection or single_marker):
             self.controller.delete_selection()
         elif key == Qt.Key.Key_R and not ctrl and has_selection:

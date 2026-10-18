@@ -6,8 +6,9 @@ from qgis.core import (
     QgsProject,
     QgsVectorLayer,
 )
+from qgis.gui import QgsVertexMarker
 from qgis.PyQt.QtCore import QCoreApplication, Qt, QTimer
-from qgis.PyQt.QtGui import QIcon, QKeySequence
+from qgis.PyQt.QtGui import QColor, QIcon, QKeySequence
 from qgis.PyQt.QtWidgets import (
     QAction,
     QDialog,
@@ -56,6 +57,7 @@ from .ui.setup_common import SETUP_MODE_WIZARD, get_setup_mode
 from .ui.setup_dialog import SetupDialog
 from .ui.setup_dialog_classic import ClassicSetupDialog
 from .ui.svg_dock import SvgDock
+from .ui.symbol_picker import SymbolPickerPopup, symbol_catalog
 from .ui.template_dialog import TemplateDialog
 from .util.coordinates import WGS84
 from .util.temp_files import cleanup_temp_files
@@ -76,7 +78,6 @@ class THWToolboxPlugin:
         self.layer = None
         self.layer_manager = None
         self.feature_ops = None
-        self.current_svg = None
         self.drop_filter = None
         self.ident_tool = None
         self.move_tool = None
@@ -564,45 +565,18 @@ class THWToolboxPlugin:
             self.dock.raise_()
             return
 
-        progress = QProgressDialog(
-            "Taktische Zeichen werden geladen …",
-            "",
-            0,
-            100,
-            self.iface.mainWindow(),
+        # Der Zeichen-Picker lädt Icons erst beim Anzeigen – kein Ladedialog nötig
+        self.dock = QDockWidget("THW Toolbox", self.iface.mainWindow())
+        self.dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
+        self.svg_dock_widget = SvgDock(
+            self.plugin_dir,
+            self._place_at_map_center,
+            self._open_config_dialog,
+            layer_provider=lambda: self.layer,
+            navigate_callback=self._navigate_to_feature,
         )
-        progress.setWindowTitle("THW Toolbox")
-        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
-        progress.setMinimumDuration(0)
-        progress.setAutoClose(False)
-        progress.setAutoReset(False)
-        progress.setCancelButton(None)
-        progress.setValue(0)
-        progress.show()
-        QCoreApplication.processEvents()
-
-        def on_load_progress(current: int, total: int, text: str):
-            pct = int(current * 100 / total) if total > 0 else 100
-            progress.setValue(pct)
-            if text:
-                progress.setLabelText(f"Taktische Zeichen werden geladen … {text}")
-            QCoreApplication.processEvents()
-
-        try:
-            self.dock = QDockWidget("THW Toolbox", self.iface.mainWindow())
-            self.dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
-            self.svg_dock_widget = SvgDock(
-                self.plugin_dir,
-                self._on_svg_drag_start,
-                self._open_config_dialog,
-                layer_provider=lambda: self.layer,
-                navigate_callback=self._navigate_to_feature,
-                progress_callback=on_load_progress,
-            )
-            self.dock.setWidget(self.svg_dock_widget)
-            self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock)
-        finally:
-            progress.close()
+        self.dock.setWidget(self.svg_dock_widget)
+        self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock)
 
     def _navigate_to_feature(self, fid):
         """Zentriert die Karte auf das Feature — ohne Auswahl oder Drag-Modus."""
@@ -627,9 +601,6 @@ class THWToolboxPlugin:
             self.move_tool.moving_feature = None
             self.move_tool.set_move_mode(False)
         self.canvas.setCursor(Qt.CursorShape.ArrowCursor)
-
-    def _on_svg_drag_start(self, svg_path):
-        self.current_svg = svg_path
 
     def _init_renderer(self, layer):
         """Wendet Renderer + Labeling auf den Layer an."""
@@ -689,8 +660,12 @@ class THWToolboxPlugin:
         if self.planning:
             self.planning.clear_marker_selection()
 
-    def _place_feature(self, svg_path, point):
-        """SVG-Drop-Callback: Feature platzieren und im Dock auswählen."""
+    def _place_feature(self, svg_path, point, select=True):
+        """SVG-Drop-Callback: Feature platzieren und im Dock auswählen; gibt das neue Feature zurück.
+
+        ``select=False`` (Shift+Klick im Werkzeug „Zeichen setzen“): nur setzen, das
+        aktive Kartenwerkzeug bleibt, damit gleich das nächste Zeichen folgen kann.
+        """
         if not self._check_map_available():
             self._show_error_alert(
                 "Keine Karte vorhanden",
@@ -701,19 +676,21 @@ class THWToolboxPlugin:
                 "2. Ziehen Sie eine Karte (z.B. OpenStreetMap) in das Projekt\n"
                 "3. Versuchen Sie erneut, ein Symbol zu platzieren",
             )
-            return
+            return None
         if not self.feature_ops:
-            return
+            return None
 
         # Drop-Punkt liegt im Karten-CRS, der Layer kann ein anderes haben
         if self.layer:
             point = self.canvas.mapSettings().mapToLayerCoordinates(self.layer, point)
         new_feature = self.feature_ops.place_feature(svg_path, point)
         if not new_feature:
-            return
+            return None
 
         if hasattr(self, "svg_dock_widget"):
             self.svg_dock_widget.refresh_marker_list()
+        if not select:
+            return new_feature
 
         # Nach dem Ablegen soll das Zeichen direkt greifbar sein, auch wenn
         # zwischendurch ein anderes Kartenwerkzeug (z.B. Zelt platzieren) aktiv war.
@@ -730,6 +707,42 @@ class THWToolboxPlugin:
             self.move_tool.set_move_mode(True)
             self.move_tool.select_feature(new_feature.id())
         self.schedule_details_update()
+        return new_feature
+
+    def _place_at_map_center(self, svg_path):
+        """Doppelklick in der Symbolpalette: Zeichen in die Kartenmitte setzen – danach gleich verschiebbar."""
+        self._place_feature(svg_path, self.canvas.extent().center())
+
+    def pick_marker_at(self, map_point, global_pos):
+        """Rechtsklick auf die Karte: Zeichen im Picker wählen, es landet an ``map_point`` (Karten-CRS).
+
+        Ein Kreuz markiert die Stelle, solange der Picker offen ist. Ist die Toolbox noch aus
+        (nur die Objektplanung offen), wird sie erst nach der Auswahl eingeschaltet.
+        """
+        target = QgsVertexMarker(self.canvas)
+        target.setCenter(map_point)
+        target.setIconType(QgsVertexMarker.IconType.ICON_CROSS)
+        target.setIconSize(16)
+        target.setPenWidth(2)
+        target.setColor(QColor("#0d99ff"))
+        try:
+            svg_path = SymbolPickerPopup.pick(symbol_catalog(self.plugin_dir), global_pos, self.canvas)
+        finally:
+            self.canvas.scene().removeItem(target)
+        if svg_path:
+            self.place_marker(svg_path, map_point)
+
+    def place_marker(self, svg_path, map_point, select=True) -> bool:
+        """Zeichen an ``map_point`` (Karten-CRS) setzen – Rechtsklick-Picker, Hotbar, Tasten 1–9.
+
+        Ist die Toolbox noch aus (nur die Objektplanung offen), wird sie dafür eingeschaltet.
+        ``select``: danach zurück zur Auswahl mit dem neuen Zeichen, sonst bleibt das Werkzeug.
+        """
+        if not self.layer or not (self.action and self.action.isChecked()):
+            self.activate()
+        if not self.layer:
+            return False
+        return self._place_feature(svg_path, map_point, select=select) is not None
 
     # ------------------------------------------------------------------
     # Public callbacks (called from FeatureDock with legacy method names)
@@ -738,10 +751,8 @@ class THWToolboxPlugin:
     def delete_feature(self, fid):
         if not self.feature_ops or not self.feature_ops.delete(fid):
             return
-        # Dock-Tree und Layer-Panel nach Delete refreshen
+        # Marker-Liste und Layer-Panel nach Delete refreshen
         if hasattr(self, "svg_dock_widget"):
-            self.svg_dock_widget.treeWidget.clear()
-            self.svg_dock_widget.populate_root_folders()
             self.svg_dock_widget.refresh_marker_list()
         if hasattr(self.iface, "layerTreeView") and self.layer:
             self.iface.layerTreeView().refreshLayerSymbology(self.layer.id())
@@ -983,7 +994,7 @@ class THWToolboxPlugin:
         self.schedule_details_update()
 
     def refresh_marker_views(self, fids):
-        """Symbolpalette („Verwendet“) und Details nach Änderungen an `fids` aktualisieren."""
+        """Symbolpalette („Auf der Karte“) und Details nach Änderungen an `fids` aktualisieren."""
         if hasattr(self, "svg_dock_widget"):
             self.svg_dock_widget.refresh_marker_list()
         dock = self.details

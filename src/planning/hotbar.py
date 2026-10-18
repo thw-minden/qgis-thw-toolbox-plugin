@@ -3,12 +3,14 @@
 Gilt für taktische Zeichen und Objektplanung gemeinsam – der Cursor wählt beides aus.
 """
 
+import math
 import os
 from dataclasses import dataclass
 
-from qgis.PyQt.QtCore import QEvent, QObject, QSize, Qt
-from qgis.PyQt.QtGui import QColor, QIcon
+from qgis.PyQt.QtCore import QEvent, QMimeData, QObject, QPoint, QRect, QSize, Qt, pyqtSignal
+from qgis.PyQt.QtGui import QColor, QDrag, QIcon, QPainter
 from qgis.PyQt.QtWidgets import (
+    QApplication,
     QFrame,
     QGraphicsDropShadowEffect,
     QGridLayout,
@@ -22,6 +24,7 @@ from qgis.PyQt.QtWidgets import (
     QWidgetAction,
 )
 
+from ..ui.symbol_picker import POPUP_TOOL_MODE, SymbolPickerPopup, symbol_catalog, symbol_prefs
 from .layers import (
     ROLE_ARROWS,
     ROLE_DISTRIBUTORS,
@@ -34,7 +37,10 @@ from .layers import (
 
 _ICON_PX = 22
 _BUTTON_PX = 36
+_MARKER_ICON_PX = 28
 _MARGIN_BOTTOM_PX = 16
+# Mindestabstand der Hotbar zum linken/rechten Kartenrand
+_MARGIN_SIDE_PX = 16
 _GRID_PRESETS = ((1, 2), (2, 2), (2, 3), (3, 3), (2, 5), (4, 4))
 
 _STYLE = """
@@ -61,6 +67,13 @@ QFrame#ObjektplanungHotbar QToolButton#chevron:hover { color: #ffffff; backgroun
 QFrame#ObjektplanungHotbar QToolButton#grid { padding: 0px 6px; font-weight: bold; }
 QFrame#ObjektplanungHotbar QToolButton#grid[armed="true"] { background: #0d99ff; }
 QFrame#ObjektplanungHotbar QFrame#sep { background: #3a3a3a; }
+QFrame#ObjektplanungHotbar QToolButton#marker {
+    background: #eef2f6;
+    border: 2px solid transparent;
+    border-radius: 8px;
+}
+QFrame#ObjektplanungHotbar QToolButton#marker:hover { background: #ffffff; }
+QFrame#ObjektplanungHotbar QToolButton#marker:checked { background: #ffffff; border-color: #0d99ff; }
 """
 
 
@@ -73,12 +86,89 @@ class _ToolEntry:
     menu: QMenu | None
 
 
+def _event_pos(event) -> QPoint:
+    return event.position().toPoint() if hasattr(event, "position") else event.pos()
+
+
+class _MarkerButton(QToolButton):
+    """Ein taktisches Zeichen in der Hotbar: Klick nimmt es in die Hand, Ziehen legt es auf die Karte.
+
+    Die Ziffer oben links ist die Taste, mit der es sich auch ohne Maus greifen lässt.
+    """
+
+    # Zeichen wurde per Drag & Drop abgelegt
+    dropped = pyqtSignal(str)
+
+    def __init__(self, slot: int, path: str, icon: QIcon, parent=None):
+        super().__init__(parent)
+        self.slot = slot
+        self.path = path
+        self._press_pos: QPoint | None = None
+        self.setObjectName("marker")
+        self.setIcon(icon)
+        self.setIconSize(QSize(_MARKER_ICON_PX, _MARKER_ICON_PX))
+        self.setFixedSize(_BUTTON_PX, _BUTTON_PX)
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = _event_pos(event)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._press_pos is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            if (_event_pos(event) - self._press_pos).manhattanLength() >= QApplication.startDragDistance():
+                # Ziehen statt Klick: der Button bleibt oben, ``clicked`` kommt nicht
+                self._press_pos = None
+                self.setDown(False)
+                self._drag()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._press_pos = None
+        super().mouseReleaseEvent(event)
+
+    def _drag(self):
+        mime = QMimeData()
+        mime.setText(self.path)
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.setPixmap(self.icon().pixmap(48, 48))
+        drag.setHotSpot(QPoint(24, 24))
+        if drag.exec(Qt.DropAction.CopyAction) == Qt.DropAction.CopyAction:
+            self.dropped.emit(self.path)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        # Tasten-Badge unten rechts, dunkel hinterlegt – lesbar auf jedem Zeichen
+        badge = QRect(self.width() - 14, self.height() - 14, 12, 12)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(30, 30, 30, 215))
+        painter.drawRoundedRect(badge, 3, 3)
+        font = painter.font()
+        font.setPixelSize(9)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor("#ffffff"))
+        painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, str(self.slot))
+        painter.end()
+
+
 class PlanningHotbar(QFrame):
     """Werkzeuge mit einem Klick; Typ-Auswahl über das kleine ▾ daneben.
 
     Liegt als Kind-Widget über der Karte und hält sich bei Größenänderung
     unten mittig. Auswahl-Aktionen (Duplizieren, Drehen, Löschen) erscheinen
     nur, wenn etwas ausgewählt ist – wie die Kontext-Leiste in Figma.
+
+    Gleich nach der Auswahl liegen die taktischen Zeichen: die Favoriten aus
+    dem Zeichen-Picker (ohne Favoriten die zuletzt verwendeten) auf den
+    Tasten 1–9, dahinter „Alle Zeichen …“. Ist die Karte zu schmal, fallen
+    hintere Zeichen weg – ihre Tasten gelten weiter.
     """
 
     def __init__(self, controller, plugin_dir: str, canvas):
@@ -87,8 +177,11 @@ class PlanningHotbar(QFrame):
         self.setStyleSheet(_STYLE)
         self.controller = controller
         self.canvas = canvas
+        self._plugin_dir = plugin_dir
         self._icon_dir = os.path.join(plugin_dir, "icons", "planning")
         self._tools: list[_ToolEntry] = []
+        self._marker_buttons: list[_MarkerButton] = []
+        self._prefs = symbol_prefs(plugin_dir)
 
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(24)
@@ -102,6 +195,10 @@ class PlanningHotbar(QFrame):
         catalog = controller.catalog
 
         self._add_tool("select", "select.svg", "Auswählen und bearbeiten – taktische Zeichen und Objekte", "")
+        self._separator()
+        # Taktische Zeichen: die Buttons der Favoriten setzt refresh_markers() davor
+        self._all_symbols = self._button("symbols.svg", "", self._open_symbol_picker)
+        self._all_symbols.setCheckable(True)
         self._separator()
         self._add_tool("tent", "tent.svg", "Zelt platzieren", "", [(t.id, t.name) for t in catalog.zelte])
         self._add_tool("vehicle", "vehicle.svg", "Fahrzeug platzieren", "", [(v.id, v.name) for v in catalog.fahrzeuge])
@@ -139,8 +236,9 @@ class PlanningHotbar(QFrame):
         self._selection_widgets = (self._selection_sep, self._duplicate, self._rotate, self._delete)
 
         controller.state_changed.connect(self.sync_tool_buttons)
+        self._prefs.changed.connect(self.refresh_markers)
         canvas.installEventFilter(self)
-        self.sync_tool_buttons()
+        self.refresh_markers()
         self.refresh_selection()
 
     # ------------------------------------------------------------------
@@ -260,7 +358,24 @@ class PlanningHotbar(QFrame):
             self._reposition()
         return False
 
+    def _fit_markers(self):
+        """So viele Zeichen-Buttons zeigen, wie auf die Karte passen – hintere fallen zuerst weg."""
+        buttons = self._marker_buttons
+        if not buttons:
+            return
+        step = _BUTTON_PX + self._layout.spacing()
+        self._layout.invalidate()
+        hidden = sum(1 for button in buttons if button.isHidden())
+        full = self._layout.sizeHint().width() + hidden * step
+        excess = full - (self.canvas.width() - 2 * _MARGIN_SIDE_PX)
+        drop = min(len(buttons), max(0, math.ceil(excess / step)))
+        for i, button in enumerate(buttons):
+            wanted = i < len(buttons) - drop
+            if button.isHidden() == wanted:
+                button.setVisible(wanted)
+
     def _reposition(self):
+        self._fit_markers()
         self.adjustSize()
         x = max(0, (self.canvas.width() - self.width()) // 2)
         y = max(0, self.canvas.height() - self.height() - _MARGIN_BOTTOM_PX)
@@ -280,6 +395,10 @@ class PlanningHotbar(QFrame):
             self.controller.state_changed.disconnect(self.sync_tool_buttons)
         except (TypeError, RuntimeError):
             pass
+        try:
+            self._prefs.changed.disconnect(self.refresh_markers)
+        except (TypeError, RuntimeError):
+            pass
         self.hide()
         self.setParent(None)
         self.deleteLater()
@@ -293,6 +412,52 @@ class PlanningHotbar(QFrame):
             self.controller.activate_tool(kind)
         else:
             self.controller.back_to_select()
+
+    def refresh_markers(self):
+        """Zeichen-Buttons nach Favoriten bzw. Verlauf neu aufbauen (bei jeder Änderung im Zeichen-Picker)."""
+        for button in self._marker_buttons:
+            self._layout.removeWidget(button)
+            button.hide()
+            button.deleteLater()
+        self._marker_buttons = []
+        symbols, favorites = self.controller.marker_slots()
+        catalog = symbol_catalog(self._plugin_dir)
+        source = "Favorit" if favorites else "Zuletzt verwendet"
+        base = self._layout.indexOf(self._all_symbols)
+        for i, symbol in enumerate(symbols):
+            button = _MarkerButton(i + 1, symbol.path, catalog.icon(symbol.path), self)
+            button.setToolTip(
+                f"{symbol.label}\n{source} · Taste {i + 1}\nKlick: auf die Karte setzen · Ziehen: direkt ablegen"
+            )
+            button.clicked.connect(lambda checked, p=symbol.path: self._on_marker(checked, p))
+            button.dropped.connect(self._prefs.add_recent)
+            self._layout.insertWidget(base + i, button)
+            self._marker_buttons.append(button)
+        tip = "Alle taktischen Zeichen: wählen, dann auf die Karte klicken"
+        if not favorites:
+            tip += "\nMit dem Stern im Zeichen-Picker gemerkte Favoriten liegen hier auf den Tasten 1–9"
+        self._all_symbols.setToolTip(tip)
+        self.sync_tool_buttons()
+
+    def _on_marker(self, checked: bool, path: str):
+        if checked:
+            self.controller.activate_tool("marker", path)
+        else:
+            self.controller.back_to_select()
+
+    def _open_symbol_picker(self):
+        """„Alle Zeichen …“: Picker über dem Button; das gewählte Zeichen setzt der nächste Klick auf die Karte."""
+        path = SymbolPickerPopup.pick(
+            symbol_catalog(self._plugin_dir),
+            self._all_symbols.mapToGlobal(QPoint(0, 0)),
+            self.canvas,
+            "Taktisches Zeichen setzen",
+            POPUP_TOOL_MODE,
+            above=True,
+        )
+        if path:
+            self.controller.activate_tool("marker", path)
+        self.sync_tool_buttons()
 
     def _on_vertices(self, checked: bool):
         if checked:
@@ -315,7 +480,7 @@ class PlanningHotbar(QFrame):
         }.get(kind)
 
     def sync_tool_buttons(self):
-        active, _type = self.controller.active_tool_kind()
+        active, active_type = self.controller.active_tool_kind()
         for entry in self._tools:
             entry.button.blockSignals(True)
             entry.button.setChecked(entry.kind == active)
@@ -329,6 +494,17 @@ class PlanningHotbar(QFrame):
                         name = item.text()
             tip = f"{entry.title}: {name}" if name else entry.title
             entry.button.setToolTip(f"{tip} ({entry.shortcut})" if entry.shortcut else tip)
+        # Zeichen in der Hand: sein Button – oder „Alle Zeichen …“, wenn es dort gewählt wurde
+        holding = active_type if active == "marker" else None
+        in_bar = False
+        for button in self._marker_buttons:
+            button.blockSignals(True)
+            button.setChecked(button.path == holding)
+            button.blockSignals(False)
+            in_bar = in_bar or button.path == holding
+        self._all_symbols.blockSignals(True)
+        self._all_symbols.setChecked(holding is not None and not in_bar)
+        self._all_symbols.blockSignals(False)
         rows, cols = self.controller.grid_rows, self.controller.grid_cols
         self._vertices.blockSignals(True)
         self._vertices.setChecked(active == "edit")
