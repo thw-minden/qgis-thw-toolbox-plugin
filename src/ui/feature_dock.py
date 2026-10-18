@@ -2,13 +2,14 @@ import os
 import time
 
 from qgis.core import QgsCoordinateTransform, QgsProject
-from qgis.gui import QgsMapToolIdentify
+from qgis.gui import QgsMapToolIdentify, QgsScaleWidget
 from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtGui import QIcon, QPixmap
 from qgis.PyQt.QtWidgets import (
     QApplication,
     QCheckBox,
     QDockWidget,
+    QFormLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -24,9 +25,14 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from ..layer.background import background_of
+from ..layer.labeling import label_size_pt
+from ..layer.renderer import scale_limits
 from ..logging_utils import get_logger
 from ..paths import plugin_root
 from ..util.coordinates import WGS84, to_mgrs
+from .background_popup import BackgroundButton
+from .font_size_box import FontSizeBox
 from .origin_point_widget import OriginPointWidget
 from .theme import muted_color, muted_style
 
@@ -41,6 +47,12 @@ def _load_svg_pixmap(path: str, size: int = 180) -> QPixmap | None:
     if pixmap.isNull():
         pixmap = QPixmap(path)
     return pixmap if not pixmap.isNull() else None
+
+
+def _scale_or_none(widget: QgsScaleWidget) -> float | None:
+    """Maßstabszahl des Felds; leer (bzw. ungültig) = keine Grenze."""
+    scale = widget.scale()
+    return None if widget.isNull() or not scale > 0 else scale
 
 
 class FeatureDock(QDockWidget):
@@ -114,6 +126,15 @@ class FeatureDock(QDockWidget):
         label_layout.addWidget(self.cb_enable_label)
         self.main_layout.addLayout(label_layout)
 
+        font_size_layout = QHBoxLayout()
+        font_size_layout.addWidget(QLabel("Schriftgröße:"))
+        self.font_size_box = FontSizeBox()
+        self.font_size_box.size_chosen.connect(self.on_font_size_chosen)
+        font_size_layout.addWidget(self.font_size_box)
+        font_size_layout.addWidget(QLabel("pt"))
+        font_size_layout.addStretch()
+        self.main_layout.addLayout(font_size_layout)
+
         # Größen-SpinBox und Schieberegler
         size_layout = QHBoxLayout()
         self.size_label = QLabel("Größe:")
@@ -148,6 +169,23 @@ class FeatureDock(QDockWidget):
         self.scale_checkbox = QCheckBox("Mit Karte skalieren")
         self.main_layout.addWidget(self.scale_checkbox)
 
+        # Grenzen fürs Mitskalieren: darüber hinaus behält das Zeichen seine Größe
+        limits_layout = QFormLayout()
+        limits_layout.setContentsMargins(20, 0, 0, 0)
+        self.max_scale_widget = self._scale_limit_widget(
+            "Beim Reinzoomen über diesen Maßstab hinaus wird das Zeichen nicht mehr größer.\n"
+            "Leer = wächst immer mit. Der Knopf daneben übernimmt den aktuellen Maßstab."
+        )
+        limits_layout.addRow("Wächst bis:", self.max_scale_widget)
+        self.min_scale_widget = self._scale_limit_widget(
+            "Beim Rauszoomen über diesen Maßstab hinaus wird das Zeichen nicht mehr kleiner.\n"
+            "Leer = schrumpft immer mit. Der Knopf daneben übernimmt den aktuellen Maßstab."
+        )
+        limits_layout.addRow("Schrumpft bis:", self.min_scale_widget)
+        self.scale_limits_widget = QWidget()
+        self.scale_limits_widget.setLayout(limits_layout)
+        self.main_layout.addWidget(self.scale_limits_widget)
+
         # Rotations-Schieberegler
         rotation_layout = QHBoxLayout()
         self.rotation_label = QLabel("Rotation:")
@@ -178,9 +216,14 @@ class FeatureDock(QDockWidget):
         origin_layout.addStretch()
         self.main_layout.addLayout(origin_layout)
 
-        # Weißer Hintergrund-Checkbox
-        self.white_background_checkbox = QCheckBox("Weißer Hintergrund")
-        self.main_layout.addWidget(self.white_background_checkbox)
+        # Hintergrund: Vorschau-Schaltfläche, Form/Farbe/Rand/Größe im Popup
+        background_layout = QHBoxLayout()
+        background_layout.addWidget(QLabel("Hintergrund:"))
+        self.background_button = BackgroundButton()
+        self.background_button.changed.connect(self.on_background_changed)
+        background_layout.addWidget(self.background_button)
+        background_layout.addStretch()
+        self.main_layout.addLayout(background_layout)
 
         # Buttons in horizontalem Layout
         self.button_layout = QHBoxLayout()
@@ -200,6 +243,15 @@ class FeatureDock(QDockWidget):
         # Erst sichtbar, wenn Toolbox oder Objektplanung offen sind
         self.hide()
         self.show_placeholder()
+
+    def _scale_limit_widget(self, tooltip: str) -> QgsScaleWidget:
+        widget = QgsScaleWidget()
+        widget.setAllowNull(True)
+        widget.setNull()
+        widget.setShowCurrentScaleButton(True)
+        widget.setToolTip(tooltip)
+        widget.scaleChanged.connect(self.on_scale_limits_changed)
+        return widget
 
     @staticmethod
     def _build_empty_page() -> QWidget:
@@ -349,6 +401,7 @@ class FeatureDock(QDockWidget):
         self.scale_checkbox.blockSignals(True)
         self.scale_checkbox.setChecked(not scale_with_map)
         self.scale_checkbox.blockSignals(False)
+        self._show_scale_limits(feat, layer_manager.canvas)
 
         # Label-Werte setzen
         try:
@@ -359,13 +412,10 @@ class FeatureDock(QDockWidget):
             show_label = False
         self.label_textfield.setText(label_text)
         self.cb_enable_label.setChecked(show_label)
+        self.font_size_box.set_sizes([label_size_pt(feat, layer_manager.settings)])
 
-        # Weißer Hintergrund-Wert setzen
-        try:
-            white_background = feat.attribute("white_background") or False
-        except Exception:
-            white_background = False
-        self.white_background_checkbox.setChecked(white_background)
+        # Hintergrund anzeigen (ohne ihn zurückzuschreiben)
+        self.background_button.set_background(background_of(feat))
 
         # Rotationswert setzen
         try:
@@ -413,9 +463,6 @@ class FeatureDock(QDockWidget):
         self.cb_enable_label.stateChanged.disconnect() if self.cb_enable_label.receivers(
             self.cb_enable_label.stateChanged
         ) > 0 else None
-        self.white_background_checkbox.stateChanged.disconnect() if self.white_background_checkbox.receivers(
-            self.white_background_checkbox.stateChanged
-        ) > 0 else None
         self.rotation_slider.valueChanged.disconnect() if self.rotation_slider.receivers(
             self.rotation_slider.valueChanged
         ) > 0 else None
@@ -434,7 +481,6 @@ class FeatureDock(QDockWidget):
         self.scale_checkbox.stateChanged.connect(self.on_scale_toggle)
         self.label_textfield.textChanged.connect(self.on_label_changed)
         self.cb_enable_label.stateChanged.connect(self.on_show_label_toggle)
-        self.white_background_checkbox.stateChanged.connect(self.on_white_background_toggle)
         self.rotation_slider.valueChanged.connect(self.on_rotation_change)
         self.rotation_slider.sliderReleased.connect(self.on_rotation_slider_released)
         self.origin_widget.origin_changed.connect(self.on_origin_changed)
@@ -512,6 +558,32 @@ class FeatureDock(QDockWidget):
         # Größe wurde auf die neue Einheit (Meter ↔ Millimeter) umgerechnet
         if new_size is not None:
             self._set_size_widgets(new_size)
+        self.scale_limits_widget.setVisible(self.scale_checkbox.isChecked())
+
+    def _show_scale_limits(self, feat, canvas):
+        """Grenzen fürs Mitskalieren anzeigen – nur bei „Mit Karte skalieren“ von Belang."""
+        limits = scale_limits(feat)
+        for widget, scale in ((self.max_scale_widget, limits.maxScale), (self.min_scale_widget, limits.minScale)):
+            widget.setMapCanvas(canvas)
+            widget.blockSignals(True)
+            if scale > 0:
+                widget.setScale(scale)
+            else:
+                widget.setNull()
+            widget.blockSignals(False)
+        self.scale_limits_widget.setVisible(self.scale_checkbox.isChecked())
+
+    def on_scale_limits_changed(self, *_args):
+        if not getattr(self, "feat", None):
+            return
+        self.layer_manager.set_scale_limits(
+            self.feat.id(), _scale_or_none(self.max_scale_widget), _scale_or_none(self.min_scale_widget)
+        )
+
+    def on_font_size_chosen(self, size_pt: float):
+        if not getattr(self, "feat", None):
+            return
+        self.layer_manager.set_label_size(self.feat.id(), size_pt)
 
     def _set_size_widgets(self, size):
         """SpinBox und Schieberegler auf `size` setzen, ohne das Feature zu ändern."""
@@ -554,13 +626,11 @@ class FeatureDock(QDockWidget):
         show_label = state == Qt.CheckState.Checked
         self.layer_manager.toggle_label_visibility(self.feat.id(), show_label)
 
-    def on_white_background_toggle(self, state):
-        """Schaltet den weißen Hintergrund ein/aus"""
-        if not hasattr(self, "feat") or not self.feat:
+    def on_background_changed(self, background):
+        """Hintergrund aus dem Popup übernehmen."""
+        if not getattr(self, "feat", None):
             return
-
-        white_background = state == Qt.CheckState.Checked
-        self.layer_manager.toggle_white_background(self.feat.id(), white_background)
+        self.layer_manager.set_background(self.feat.id(), background)
 
     def on_rotation_change(self, value):
         """Wird aufgerufen, wenn der Rotationsschieberegler geändert wird"""

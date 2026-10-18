@@ -37,6 +37,14 @@ LAYER_FIELDS: list[tuple[str, object]] = [
     ("rotation", _T_DOUBLE),
     ("origin_x", _T_INT),
     ("origin_y", _T_INT),
+    # Hintergrund als JSON (layer.background); white_background bleibt für ältere Plugin-Versionen
+    ("background", _T_STRING),
+    # Schriftgröße der Beschriftung in pt (leer = aus den Einstellungen)
+    ("label_size", _T_DOUBLE),
+    # Mit der Karte skalierte Zeichen wachsen nur bis max_scale bzw. schrumpfen nur bis min_scale
+    # (Maßstabszahlen, leer = unbegrenzt; siehe layer.renderer.scale_limits)
+    ("max_scale", _T_DOUBLE),
+    ("min_scale", _T_DOUBLE),
 ]
 
 

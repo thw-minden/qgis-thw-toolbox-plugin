@@ -15,18 +15,22 @@ from qgis.core import (
     QgsSettings,
     QgsVectorLayer,
 )
-from qgis.PyQt.QtCore import QObject, Qt, pyqtSignal
+from qgis.PyQt.QtCore import QObject, Qt, QTimer, pyqtSignal
+from qgis.PyQt.QtWidgets import QApplication
 
+from ..layer.labeling import label_size_pt
 from ..logging_utils import get_logger
 from .capacity_dialog import CapacityDialog
 from .catalog import FootprintType, fmt_m, load_catalog
 from .dock import PlanningDock
 from .drop_filter import PlanningDropFilter
-from .geometry import MetricFrame, align_snap, grid_centers, tent_polygon
+from .geometry import MetricFrame, align_snap, grid_centers, rotated_frame, tent_polygon
 from .hotbar import PlanningHotbar
 from .layers import (
     ALL_ROLES,
     FOOTPRINT_ROLES,
+    LABEL_FIELD,
+    LABEL_SIZE_FIELD,
     POINT_ROLES,
     ROLE_ARROWS,
     ROLE_CABLES,
@@ -37,7 +41,12 @@ from .layers import (
     ROLE_TENTS,
     ROLE_VEHICLES,
     ROLE_ZONES,
+    SIGN_FIELD,
+    SIGN_ROLES,
     PlanningLayers,
+    label_size,
+    label_visible,
+    sign_visible,
 )
 from .tools import AreaTool, ArrowTool, CableTool, FootprintTool, PointTool, SelectTool, VertexTool, ZoneTool
 
@@ -55,6 +64,8 @@ _CONNECT_TOL_M = 0.5
 # Grober Leistungsfaktor: so viel kW liefert ein Stromerzeuger je kVA
 _POWER_FACTOR = 0.8
 _MAX_GRID = 20
+# Zelte/Fahrzeuge, deren Drehung weniger als das abweicht, bekommen einen gemeinsam gedrehten Rahmen (Grad)
+_SAME_ROTATION_DEG = 0.5
 
 TOOL_SELECT = "select"
 TOOL_TENT = "tent"
@@ -138,6 +149,27 @@ class PlanningController(QObject):
     def _on_selection_changed(self):
         if self.plugin is not None:
             self.plugin.schedule_details_update()
+        # Erst nach der Auswahl umschalten: das Signal kommt mitten aus select() bzw. einer Mausgeste
+        QTimer.singleShot(0, self.edit_single_zone)
+
+    def edit_single_zone(self):
+        """Ein einzeln ausgewähltes Gebiet geht direkt in die Punktbearbeitung (wie ein Pfad in Figma).
+
+        Drehen und Skalieren gibt es für Gebiete nicht, verschieben lässt es sich weiterhin
+        durch Ziehen im Gebiet. Während einer Mausgeste wartet das bis zum Loslassen.
+        """
+        kind = self.active_tool_kind()[0]
+        if kind not in (TOOL_SELECT, TOOL_EDIT) or QApplication.mouseButtons() != Qt.MouseButton.NoButton:
+            return
+        shape = self.editable_shape()
+        if kind == TOOL_EDIT:
+            tool = self._tools.get(TOOL_EDIT)
+            if tool is not None and shape == (tool.role, tool.fid):
+                return
+            # Die Auswahl hat gewechselt (Details-Liste, Duplizieren …): Punktbearbeitung des alten Objekts beenden
+            self.back_to_select()
+        if shape is not None and shape[0] == ROLE_ZONES:
+            self.edit_vertices(*shape)
 
     def unload(self):
         if self.dock:
@@ -774,21 +806,42 @@ class PlanningController(QObject):
                 f" · {fmt_m(round(float(f.attribute('rotation') or 0)))}°"
             )
             return geoms, corners, badge
-        box = QgsRectangle(geoms[0].boundingBox())
-        for g in geoms[1:]:
-            box.combineExtentWith(g.boundingBox())
-        corners = [
-            QgsPointXY(box.xMinimum(), box.yMaximum()),
-            QgsPointXY(box.xMaximum(), box.yMaximum()),
-            QgsPointXY(box.xMaximum(), box.yMinimum()),
-            QgsPointXY(box.xMinimum(), box.yMinimum()),
-        ]
+        rotation = self.common_rotation(selected)
+        if rotation is not None:
+            # Gleich gedrehte Zelte/Fahrzeuge: Rahmen dreht mit (wie in Figma)
+            corners = rotated_frame(geoms, canvas_crs, rotation)
+        else:
+            box = QgsRectangle(geoms[0].boundingBox())
+            for g in geoms[1:]:
+                box.combineExtentWith(g.boundingBox())
+            corners = [
+                QgsPointXY(box.xMinimum(), box.yMaximum()),
+                QgsPointXY(box.xMaximum(), box.yMaximum()),
+                QgsPointXY(box.xMaximum(), box.yMinimum()),
+                QgsPointXY(box.xMinimum(), box.yMinimum()),
+            ]
         if len(selected) == 1 and selected[0][0] != ROLE_MARKERS:
             role, f = selected[0]
             badge = f.attribute("bezeichnung") or f.attribute("typ") or ""
         else:
             badge = f"{len(selected)} Objekte"
         return geoms, corners, badge
+
+    def common_rotation(self, selected=None) -> float | None:
+        """Gemeinsame Drehung, wenn die Auswahl nur aus gleich gedrehten Zelten/Fahrzeugen besteht.
+
+        Rechtecke, die um Vielfache von 90° versetzt liegen, zählen als gleich gedreht –
+        ihre Kanten zeigen in dieselben Richtungen. Sonst None.
+        """
+        selected = self.selection() if selected is None else selected
+        if not selected or any(role not in FOOTPRINT_ROLES for role, _f in selected):
+            return None
+        rotations = [float(f.attribute("rotation") or 0) for _role, f in selected]
+        for rotation in rotations[1:]:
+            diff = (rotation - rotations[0]) % 90.0
+            if min(diff, 90.0 - diff) > _SAME_ROTATION_DEG:
+                return None
+        return rotations[0]
 
     def rotate_selection(self, step: float):
         """Zelte und Fahrzeuge der Auswahl jeweils um die eigene Mitte drehen."""
@@ -812,6 +865,56 @@ class PlanningController(QObject):
         for role, fids in self.selection_ids().items():
             if role != ROLE_MARKERS:
                 self.layers.change_features(role, {}, {fid: {"bezeichnung": text} for fid in fids})
+
+    def selection_labels_visible(self) -> list[bool]:
+        """Je Objekt bzw. Zeichen der Auswahl: wird seine Beschriftung auf der Karte gezeigt?"""
+        return [label_visible(role, f) for role, f in self.selection()]
+
+    def set_selection_labels_visible(self, visible: bool):
+        """Beschriftung der Auswahl ein- oder ausblenden – auch die Zeichen einer Mehrfachauswahl."""
+        for role, fids in self.selection_ids().items():
+            if role == ROLE_MARKERS:
+                for fid in fids:
+                    self.plugin.toggle_label_visibility(fid, visible)
+                # Zeichen liegen nicht in den Objektplanungs-Layern: die Details eigens auffrischen
+                self.layers.changed.emit()
+            else:
+                self.layers.change_features(role, {}, {fid: {LABEL_FIELD: visible} for fid in fids})
+
+    def toggle_selection_labels(self):
+        """Rechtsklick-Menü: sind alle Beschriftungen an, aus – sonst alle an."""
+        self.set_selection_labels_visible(not all(self.selection_labels_visible()))
+
+    def selection_label_sizes(self) -> list[float]:
+        """Je Objekt bzw. Zeichen der Auswahl: Schriftgröße seiner Beschriftung in pt."""
+        return [
+            label_size_pt(f, self.plugin.settings) if role == ROLE_MARKERS else label_size(f)
+            for role, f in self.selection()
+        ]
+
+    def set_selection_label_size(self, size_pt: float):
+        """Schriftgröße der Beschriftung für die ganze Auswahl setzen – Objekte wie Zeichen."""
+        for role, fids in self.selection_ids().items():
+            if role == ROLE_MARKERS:
+                for fid in fids:
+                    self.plugin.set_label_size(fid, size_pt)
+                self.layers.changed.emit()
+            else:
+                self.layers.change_features(role, {}, {fid: {LABEL_SIZE_FIELD: size_pt} for fid in fids})
+
+    def selection_signs_visible(self) -> list[bool]:
+        """Je Fahrzeug, Stromerzeuger bzw. Leuchte der Auswahl: zeigt es sein taktisches Zeichen?"""
+        return [sign_visible(f) for role, f in self.selection() if role in SIGN_ROLES]
+
+    def set_selection_signs_visible(self, visible: bool):
+        """Taktisches Zeichen der ausgewählten Fahrzeuge, Stromerzeuger und Leuchten ein- oder ausblenden."""
+        for role, fids in self.selection_ids().items():
+            if role in SIGN_ROLES:
+                self.layers.change_features(role, {}, {fid: {SIGN_FIELD: visible} for fid in fids})
+
+    def toggle_selection_signs(self):
+        """Rechtsklick-Menü: sind alle Zeichen an, aus – sonst alle an."""
+        self.set_selection_signs_visible(not all(self.selection_signs_visible()))
 
     def duplicate_selection(self, offset: bool = True) -> int:
         """Auswahl kopieren, um ihre Breite + Mindestabstand versetzt; die Kopien werden ausgewählt.

@@ -10,6 +10,7 @@ from collections import Counter
 from qgis.core import QgsCoordinateTransform, QgsProject
 from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtWidgets import (
+    QCheckBox,
     QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
@@ -22,6 +23,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from ..ui.font_size_box import FontSizeBox
 from ..ui.theme import muted_style
 from ..util.coordinates import WGS84, to_mgrs
 from .catalog import fmt_m
@@ -37,6 +39,9 @@ from .layers import (
     ROLE_TENTS,
     ROLE_VEHICLES,
     ROLE_ZONES,
+    SIGN_ROLES,
+    label_visible,
+    sign_visible,
 )
 
 ROLE_TITLES = {
@@ -160,6 +165,26 @@ def _utmref(feature, crs) -> str:
         return "–"
 
 
+def _show_states(box: QCheckBox, states: list[bool]):
+    """An, aus oder – bei gemischter Auswahl – teils."""
+    mixed = len(set(states)) > 1
+    box.blockSignals(True)
+    box.setTristate(mixed)
+    if mixed:
+        box.setCheckState(Qt.CheckState.PartiallyChecked)
+    else:
+        box.setChecked(all(states))
+    box.blockSignals(False)
+
+
+def _clicked_state(box: QCheckBox) -> bool:
+    """Neuer Zustand nach einem Klick; aus „teils“ führt er zu „an“ (für alle)."""
+    visible = box.checkState() != Qt.CheckState.Unchecked
+    box.setTristate(False)
+    box.setChecked(visible)
+    return visible
+
+
 class SelectionDetails(QWidget):
     """Objektseite der Details: Angaben, Bezeichnung und Aktionen zur Auswahl.
 
@@ -189,6 +214,24 @@ class SelectionDetails(QWidget):
         self._label_edit = QLineEdit()
         self._label_edit.editingFinished.connect(self._on_label_edited)
         form.addRow("Bezeichnung:", self._label_edit)
+        self._labels_shown = QCheckBox("Beschriftung auf der Karte")
+        self._labels_shown.setToolTip("Bezeichnung bzw. Typ dieses Objekts auf der Karte zeigen (je Objekt schaltbar)")
+        self._labels_shown.clicked.connect(self._on_labels_shown_clicked)
+        form.addRow("", self._labels_shown)
+        self._font_size = FontSizeBox()
+        self._font_size.size_chosen.connect(controller.set_selection_label_size)
+        font_size_row = QHBoxLayout()
+        font_size_row.addWidget(self._font_size)
+        font_size_row.addWidget(QLabel("pt"))
+        font_size_row.addStretch()
+        form.addRow("Schriftgröße:", font_size_row)
+        self._signs_shown = QCheckBox("Taktisches Zeichen")
+        self._signs_shown.setToolTip(
+            "Taktisches Zeichen dieses Fahrzeugs, Stromerzeugers bzw. dieser Leuchte zeigen (je Objekt schaltbar)"
+        )
+        self._signs_shown.clicked.connect(self._on_signs_shown_clicked)
+        # Ohne Beschriftung legt QFormLayout kein Label an – zum Ausblenden reicht die Checkbox
+        form.addRow("", self._signs_shown)
         self._rotation = QDoubleSpinBox()
         self._rotation.setRange(0.0, 359.0)
         self._rotation.setDecimals(0)
@@ -261,6 +304,13 @@ class SelectionDetails(QWidget):
             self._subtitle.setText(", ".join(f"{n}× {name}" if n > 1 else name for name, n in counts.most_common()))
 
         self._show_label(planning)
+        _show_states(self._labels_shown, [label_visible(role, f) for role, f in items])
+        self._font_size.set_sizes(self.controller.selection_label_sizes())
+        # Nur Fahrzeuge, Stromerzeuger und Leuchten tragen ein taktisches Zeichen
+        signs = [sign_visible(f) for role, f in items if role in SIGN_ROLES]
+        self._signs_shown.setVisible(bool(signs))
+        if signs:
+            _show_states(self._signs_shown, signs)
         self._rotation.setVisible(footprint)
         self._rotation_label.setVisible(footprint)
         if footprint:
@@ -301,6 +351,12 @@ class SelectionDetails(QWidget):
             self._label_edit.setPlaceholderText("Nur für Objekte der Objektplanung")
         else:
             self._label_edit.setPlaceholderText(_LABEL_HINT if uniform else "unterschiedlich – Eingabe gilt für alle")
+
+    def _on_labels_shown_clicked(self):
+        self.controller.set_selection_labels_visible(_clicked_state(self._labels_shown))
+
+    def _on_signs_shown_clicked(self):
+        self.controller.set_selection_signs_visible(_clicked_state(self._signs_shown))
 
     def _fill_list(self, items):
         self._list.clear()

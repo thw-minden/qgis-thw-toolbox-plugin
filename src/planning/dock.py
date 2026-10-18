@@ -53,10 +53,11 @@ _HINTS = {
     "select": "Klick wählt aus – auch taktische Zeichen · Shift+Klick ergänzt · Rahmen aufziehen wählt mehrere "
     "(Karte verschieben: mittlere Maustaste oder Leertaste) · Ziehen verschiebt "
     "(Alt+Ziehen kopiert) · an den Ecken ziehen dreht (Shift: 15°) · Pfeiltasten schieben 0,5 m (Shift: 5 m) · "
-    "Entf löscht · D dupliziert · Doppelklick / Enter: Bezeichnung · Doppelklick auf Gebiet / Pfeil: "
-    "Punkte bearbeiten · Rechtsklick: Menü",
+    "Entf löscht · D dupliziert · Doppelklick / Enter: Bezeichnung · ein Gebiet auswählen bzw. Doppelklick "
+    "auf einen Pfeil: Punkte bearbeiten · Rechtsklick: Menü",
     "edit": "Eckpunkte (□) ziehen verschiebt · kleine Punkte (○) auf den Kanten ziehen fügt einen Eckpunkt ein · "
-    "Rechtsklick / Entf löscht einen Eckpunkt · Klick daneben / Enter / Esc zurück zur Auswahl",
+    "Rechtsklick / Entf löscht einen Eckpunkt (ohne angefassten Punkt: das Ganze) · im Gebiet ziehen verschiebt "
+    "es · Klick daneben wählt dort aus · Enter / Esc beendet",
 }
 _WARN_BRUSH = QBrush(QColor(198, 40, 40))
 # Mausweg, ab dem ein Druck auf eine Schaltfläche als Ziehen auf die Karte gilt (Pixel)

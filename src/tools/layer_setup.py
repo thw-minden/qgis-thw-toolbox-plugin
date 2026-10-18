@@ -946,6 +946,19 @@ def create_map_layer(map_layer: MapLayer) -> QgsMapLayer:
 GROUP_NAME_BASEMAPS = "Hintergrundkarten"
 
 
+def _add_keeping_crs(project: QgsProject, layer) -> None:
+    """Layer zum Projekt hinzufügen, ohne dass sich das Projekt-Koordinatensystem ändert.
+
+    In einem leeren Projekt übernimmt QGIS sonst das System des ersten Layers –
+    bei OSM EPSG:3857 statt der eingestellten UTM-Zone.
+    """
+    crs = project.crs()
+    project.addMapLayer(layer, False)
+    if crs.isValid() and project.crs() != crs:
+        logger.debug("Projekt-CRS nach Hinzufügen von %s zurückgesetzt auf %s", layer.name(), crs.authid())
+        project.setCrs(crs)
+
+
 def add_basemap_to_project(bm: MapLayer, visible: bool = False):
     """Adds the basemap as a layer to the current project.
     Only the layer passed with visible=True will be visible."""
@@ -957,7 +970,7 @@ def add_basemap_to_project(bm: MapLayer, visible: bool = False):
         logger.debug("Basemap layer could not be created: %s", bm.name)
         return
 
-    project.addMapLayer(layer, False)
+    _add_keeping_crs(project, layer)
 
     bm_group = root.findGroup(GROUP_NAME_BASEMAPS)
     if bm_group is None:
@@ -990,7 +1003,7 @@ def add_layer_to_project(map_layer: MapLayer, visible: bool = False):
         logger.debug("Additional layer could not be created: %s", map_layer.name)
         return
 
-    project.addMapLayer(layer, False)
+    _add_keeping_crs(project, layer)
 
     add_layer_group = root.findGroup(GROUP_NAME_ADD_LAYERS)
     if add_layer_group is None:

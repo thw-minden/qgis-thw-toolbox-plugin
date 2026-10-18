@@ -129,14 +129,15 @@ class ClassicSetupDialog(QDialog):
         self._zoom_btn = QPushButton("Auf Deutschland zoomen")
         self._zoom_btn.clicked.connect(zoom_to_germany)
 
+        # Reihenfolge zum Abarbeiten: erst OSM laden, dann Koordinatensystem, dann auf Deutschland zoomen
         row = 0
-        grid.addWidget(self._title_label("Koordinatensystem"), row, 0)
-        grid.addWidget(self._crs_label, row, 1)
-        grid.addWidget(self._crs_fix_btn, row, 2)
-        row += 1
         grid.addWidget(self._title_label("Basiskarte im Projekt"), row, 0)
         grid.addWidget(self._basemap_label, row, 1)
         grid.addWidget(self._basemap_fix_btn, row, 2)
+        row += 1
+        grid.addWidget(self._title_label("Koordinatensystem"), row, 0)
+        grid.addWidget(self._crs_label, row, 1)
+        grid.addWidget(self._crs_fix_btn, row, 2)
         row += 1
         grid.addWidget(self._title_label("Kartenausschnitt"), row, 0)
         grid.addWidget(self._zoom_label, row, 1)

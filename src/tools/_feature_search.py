@@ -10,7 +10,7 @@ from qgis.core import (
     QgsVectorLayer,
 )
 
-from ..layer.renderer import size_unit
+from ..layer.renderer import scale_limits, size_unit
 
 # Default symbol size when a feature has no `size` attribute.
 _FALLBACK_SIZE = 30.0
@@ -30,7 +30,8 @@ def _attr(feature: QgsFeature, names: list[str], name: str, default):
 def _symbol_size_px(feature: QgsFeature, names: list[str], context: QgsRenderContext) -> float:
     """On-screen symbol size in pixels — mirrors the size unit logic in layer/renderer.py."""
     size = float(_attr(feature, names, "size", _FALLBACK_SIZE) or _FALLBACK_SIZE)
-    return context.convertToPainterUnits(size, size_unit(_attr(feature, names, "scale_with_map", False)))
+    unit = size_unit(_attr(feature, names, "scale_with_map", False))
+    return context.convertToPainterUnits(size, unit, scale_limits(feature))
 
 
 def _hit_distance(dx: float, dy: float, feature: QgsFeature, names: list[str], size_px: float) -> float | None:

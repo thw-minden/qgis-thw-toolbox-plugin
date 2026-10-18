@@ -27,9 +27,11 @@ from qgis.core import (
     QgsUnitTypes,
     QgsVectorLayer,
 )
+from qgis.PyQt.QtCore import QPointF
 from qgis.PyQt.QtWidgets import QAction
 
-from ..layer.renderer import _BG_SCALE, category_value
+from ..layer.background import DEFAULT_SCALE
+from ..layer.renderer import category_value, svg_symbol_layer
 from ..planning.layers import ROLE_PROPERTY
 
 # Layer-Eigenschaft: 1/0 überstimmt die Regel aus `_default_in_legend`
@@ -184,12 +186,19 @@ def _unify_markers(model, node_layer, size_mm: float, map_item) -> None:
 
 def _legend_symbol(symbol, size_mm: float):
     sym = symbol.clone()
+    svg = svg_symbol_layer(sym)
+    svg_size = svg.size() if svg is not None else 0.0
     for symbol_layer in sym.symbolLayers():
-        scale = 1.0 if symbol_layer.layerType() == "SvgMarker" else _BG_SCALE
+        if symbol_layer.layerType() == "SvgMarker":
+            scale = 1.0
+        else:
+            # Hintergrund im selben Verhältnis zum Zeichen wie auf der Karte
+            scale = symbol_layer.size() / svg_size if svg_size > 0 else DEFAULT_SCALE
         symbol_layer.setSize(size_mm * scale)
         symbol_layer.setSizeUnit(QgsUnitTypes.RenderUnit.RenderMillimeters)
         symbol_layer.setAngle(0)
         # Ursprungspunkt (z. B. Fußpunkt) würde das Zeichen aus dem Legendenfeld schieben
         symbol_layer.setHorizontalAnchorPoint(QgsMarkerSymbolLayer.HorizontalAnchorPoint.HCenter)
         symbol_layer.setVerticalAnchorPoint(QgsMarkerSymbolLayer.VerticalAnchorPoint.VCenter)
+        symbol_layer.setOffset(QPointF())
     return sym

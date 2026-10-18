@@ -90,6 +90,35 @@ def tent_polygon(center: QgsPointXY, length: float, width: float, rotation: floa
     return QgsGeometry.fromPolygonXY([ring])
 
 
+def rotated_frame(geoms: list[QgsGeometry], crs: QgsCoordinateReferenceSystem, rotation: float) -> list[QgsPointXY]:
+    """Umschließender Rahmen um ``geoms`` (in ``crs``), um ``rotation`` Grad im Uhrzeigersinn gedreht.
+
+    Ecken in ``crs``, oben links zuerst und im Uhrzeigersinn – wie beim Rahmen eines einzelnen Zelts.
+    """
+    center = geoms[0].centroid().asPoint()
+    frame = MetricFrame(crs, center)
+    pivot = frame.point_to_m(center)
+    box = None
+    for geom in geoms:
+        g = frame.geom_to_m(geom)
+        g.rotate(-rotation, pivot)
+        if box is None:
+            box = QgsRectangle(g.boundingBox())
+        else:
+            box.combineExtentWith(g.boundingBox())
+    corners = []
+    for x, y in (
+        (box.xMinimum(), box.yMaximum()),
+        (box.xMaximum(), box.yMaximum()),
+        (box.xMaximum(), box.yMinimum()),
+        (box.xMinimum(), box.yMinimum()),
+    ):
+        p = QgsGeometry.fromPointXY(QgsPointXY(x, y))
+        p.rotate(rotation, pivot)
+        corners.append(frame.point_from_m(p.asPoint()))
+    return corners
+
+
 def circle_polygon(center: QgsPointXY, radius: float, segments: int = 72) -> QgsGeometry:
     ring = [
         QgsPointXY(

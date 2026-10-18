@@ -720,8 +720,9 @@ class THWToolboxPlugin:
             return None
         return self.feature_ops.set_scales_with_map(fid, scales_with_map)
 
-    def toggle_white_background(self, fid, value):
-        self.feature_ops and self.feature_ops.toggle_white_background(fid, value)
+    def set_background(self, fid, background):
+        """Hintergrund eines Zeichens setzen (``layer.background.Background``)."""
+        self.feature_ops and self.feature_ops.set_background(fid, background)
 
     def rotate_feature(self, fid, degrees):
         self.feature_ops and self.feature_ops.rotate(fid, degrees)
@@ -731,6 +732,14 @@ class THWToolboxPlugin:
 
     def toggle_label_visibility(self, fid, value):
         self.feature_ops and self.feature_ops.toggle_label(fid, value)
+
+    def set_label_size(self, fid, size_pt):
+        """Schriftgröße der Beschriftung eines Zeichens in pt."""
+        self.feature_ops and self.feature_ops.set_label_size(fid, size_pt)
+
+    def set_scale_limits(self, fid, max_scale, min_scale):
+        """Maßstäbe, bis zu denen ein mit der Karte skaliertes Zeichen wächst bzw. schrumpft (None = immer)."""
+        self.feature_ops and self.feature_ops.set_scale_limits(fid, max_scale, min_scale)
 
     def update_origin(self, fid, origin_x, origin_y):
         self.feature_ops and self.feature_ops.update_origin(fid, origin_x, origin_y)

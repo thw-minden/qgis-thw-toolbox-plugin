@@ -13,7 +13,7 @@ from qgis.core import (
     QgsRectangle,
 )
 from qgis.gui import QgsMapTool, QgsRubberBand, QgsVertexMarker
-from qgis.PyQt.QtCore import QPoint, QPointF, Qt
+from qgis.PyQt.QtCore import QPoint, QPointF, Qt, QTimer
 from qgis.PyQt.QtGui import QColor, QCursor, QPolygonF
 from qgis.PyQt.QtWidgets import QMenu, QToolTip
 
@@ -670,7 +670,6 @@ class VertexTool(_PlanningTool):
         self._active: int | None = None  # zuletzt angefasster Eckpunkt (Entf löscht ihn)
         self._drag: int | None = None
         self._moved = False
-        self._exit_on_release = False
 
     # -- Lebenszyklus --------------------------------------------------------
 
@@ -794,8 +793,10 @@ class VertexTool(_PlanningTool):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         hit = self._hit(QPoint(event.pos()))
-        self._exit_on_release = hit is None
         if hit is None:
+            # Kein Punkt getroffen: das Auswahlwerkzeug übernimmt den Klick – anderes Objekt
+            # wählen, abwählen oder im Gebiet ziehen, um es als Ganzes zu verschieben
+            self._hand_over(event)
             return
         kind, index = hit
         if kind == "mid":
@@ -828,6 +829,9 @@ class VertexTool(_PlanningTool):
             hit = self._hit(QPoint(event.pos()))
             if hit is not None and hit[0] == "corner":
                 self._remove(hit[1])
+            else:
+                # Daneben: das Rechtsklick-Menü der Auswahl (Duplizieren, Löschen …)
+                self._hand_over(event, release=True)
             return
         if event.button() != Qt.MouseButton.LeftButton:
             return
@@ -837,14 +841,38 @@ class VertexTool(_PlanningTool):
             if self._moved:
                 self._commit()
             self._redraw()
-        elif self._exit_on_release:
-            self.controller.back_to_select()
+
+    def _hand_over(self, event, release: bool = False):
+        """Zurück zum Auswahlwerkzeug und ihm das Mausereignis weiterreichen."""
+        self.controller.back_to_select()
+        tool = self.canvas.mapTool()
+        if tool is self or tool is None:
+            return
+        if release:
+            tool.canvasReleaseEvent(event)
+        else:
+            tool.canvasPressEvent(event)
+
+    def cancel(self):
+        """Esc / Enter beendet die Bearbeitung. Ein Gebiet wird dabei abgewählt – ausgewählt ist es immer in Bearbeitung."""
+        self.controller.back_to_select()
+        if self.polygon:
+            self.controller.clear_selection()
 
     def keyPressEvent(self, event):
         key = event.key()
+        ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
-            if self._active is not None and self._drag is None:
-                self._remove(self._active)
+            if self._drag is None:
+                # Ohne angefassten Punkt löscht Entf das ganze Gebiet bzw. den Pfeil
+                if self._active is not None:
+                    self._remove(self._active)
+                else:
+                    self.controller.delete_selection()
+            event.accept()
+            return
+        if key == Qt.Key.Key_D and not ctrl and self._drag is None:
+            self.controller.duplicate_selection()
             event.accept()
             return
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -932,8 +960,11 @@ class SelectTool(_PlanningTool):
         self.overlay.selected = geoms
         self.overlay.frame = frame
         self.overlay.badge = badge
-        # Mit Zeichen in der Auswahl wird nur verschoben – ohne Eckpunkte kein Drehen
-        self.overlay.show_handles = ROLE_MARKERS not in self.controller.selection_ids()
+        # Mit Zeichen in der Auswahl wird nur verschoben – ohne Eckpunkte kein Drehen.
+        # Ein einzelnes Gebiet wird über seine Punkte bearbeitet, nicht gedreht.
+        ids = self.controller.selection_ids()
+        single_zone = list(ids) == [ROLE_ZONES] and len(ids[ROLE_ZONES]) == 1
+        self.overlay.show_handles = ROLE_MARKERS not in ids and not single_zone
         self.overlay.ghosts = []
         self.overlay.guides = []
         self.overlay.refresh()
@@ -1058,14 +1089,13 @@ class SelectTool(_PlanningTool):
         canvas_crs = self.canvas.mapSettings().destinationCrs()
         self._frame = MetricFrame(canvas_crs, self._press_map)
         self._items = []
-        self._base_rotation = None
         selected = self.controller.selection()
         for role, feat in selected:
             if feat.hasGeometry():
                 layer = self.controller.layer(role)
                 self._items.append((role, feat.id(), self._frame.geom_to_m_from(feat.geometry(), layer.crs())))
-        if len(selected) == 1 and selected[0][0] in FOOTPRINT_ROLES:
-            self._base_rotation = float(selected[0][1].attribute("rotation") or 0)
+        # Einzelnes oder gleich gedrehte Zelte/Fahrzeuge: Shift rastet absolut, Ausrichten nach deren Drehung
+        self._base_rotation = self.controller.common_rotation(selected)
         _geoms, corners, _badge = self.controller.selection_overlay()
         self._frame_m = [self._frame.point_to_m(c) for c in corners] if corners else []
         if self._frame_m:
@@ -1287,9 +1317,12 @@ class SelectTool(_PlanningTool):
             return
         if event.button() == Qt.MouseButton.RightButton:
             self._context_menu(QPoint(event.pos()), QgsPointXY(event.mapPoint()))
+            QTimer.singleShot(0, self.controller.edit_single_zone)
             return
         if event.button() != Qt.MouseButton.LeftButton:
             return
+        # Nach dem Loslassen: ein einzeln ausgewähltes Gebiet geht (wieder) in die Punktbearbeitung
+        QTimer.singleShot(0, self.controller.edit_single_zone)
         gesture, started = self._gesture, self._started
         if started and gesture == "move" and self._result:
             self.controller.transform_selection(self._result)
@@ -1339,6 +1372,17 @@ class SelectTool(_PlanningTool):
         if self.controller.editable_shape() is not None:
             menu.addAction("Punkte bearbeiten\tDoppelklick", self.controller.edit_vertices)
         menu.addAction("Bezeichnung bearbeiten …\tEnter", self.controller.focus_label)
+        labels_shown = all(self.controller.selection_labels_visible())
+        menu.addAction(
+            "Beschriftung ausblenden" if labels_shown else "Beschriftung einblenden",
+            self.controller.toggle_selection_labels,
+        )
+        signs = self.controller.selection_signs_visible()
+        if signs:
+            menu.addAction(
+                "Taktisches Zeichen ausblenden" if all(signs) else "Taktisches Zeichen einblenden",
+                self.controller.toggle_selection_signs,
+            )
         menu.addAction("Duplizieren\tD", self.controller.duplicate_selection)
         menu.addAction("Drehen 90°", lambda: self.controller.rotate_selection(90))
         menu.addAction("Drehen 15°\tR", lambda: self.controller.rotate_selection(15))

@@ -128,9 +128,7 @@ class PlanningHotbar(QFrame):
 
         # Kontext-Aktionen für die Auswahl
         self._selection_sep = self._separator()
-        self._vertices = self._button(
-            "vertices.svg", "Punkte bearbeiten: Gebiet / Pfeil umformen und ergänzen (Doppelklick)"
-        )
+        self._vertices = self._button("vertices.svg", "Punkte bearbeiten: Pfeil umformen und ergänzen (Doppelklick)")
         self._vertices.setCheckable(True)
         self._vertices.clicked.connect(self._on_vertices)
         self._duplicate = self._button("duplicate.svg", "Duplizieren (D, Alt+Ziehen)", controller.duplicate_selection)
@@ -359,6 +357,8 @@ class PlanningHotbar(QFrame):
         has_selection = any(self.controller.selection_ids().values())
         for widget in self._selection_widgets:
             widget.setVisible(has_selection)
-        self._vertices.setVisible(self.controller.editable_shape() is not None)
+        # Ein Gebiet ist ausgewählt immer in der Punktbearbeitung – der Schalter gilt nur noch für Pfeile
+        shape = self.controller.editable_shape()
+        self._vertices.setVisible(shape is not None and shape[0] == ROLE_ARROWS)
         if self.isVisible():
             self._reposition()

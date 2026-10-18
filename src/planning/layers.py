@@ -19,6 +19,7 @@ from qgis.core import (
     QgsProject,
     QgsProperty,
     QgsRendererCategory,
+    QgsSimpleMarkerSymbolLayer,
     QgsSingleSymbolRenderer,
     QgsSvgMarkerSymbolLayer,
     QgsSymbolLayer,
@@ -31,7 +32,7 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QObject, Qt, pyqtSignal
 from qgis.PyQt.QtGui import QColor
 
-from ..layer.fields import _T_DOUBLE, _T_STRING
+from ..layer.fields import _T_BOOL, _T_DOUBLE, _T_STRING
 from ..logging_utils import get_logger
 from .catalog import Catalog
 
@@ -54,6 +55,26 @@ ROLE_ZONES = "gebiete"
 ROLE_ARROWS = "pfeile"
 # Kein Objektplanungs-Layer: unter dieser Rolle führt die Auswahl die taktischen Zeichen (Marker-Layer) mit
 ROLE_MARKERS = "zeichen"
+
+# Beschriftung je Objekt ein/aus (leer = an); alle Objektplanungs-Layer haben das Feld
+LABEL_FIELD = "beschriftung"
+_LABEL_SHOW_EXPR = f'coalesce("{LABEL_FIELD}", true)'
+_SHOW = getattr(QgsPalLayerSettings, "Property", QgsPalLayerSettings).Show
+# QgsPropertyCollection erwartet den Schlüssel als int (unter PyQt6 ist das Enum keiner)
+_SHOW_PROPERTY = _SHOW if isinstance(_SHOW, int) else _SHOW.value
+# Schriftgröße der Beschriftung je Objekt in pt (leer = Standard)
+LABEL_SIZE_FIELD = "schriftgroesse"
+LABEL_SIZE_DEFAULT_PT = 8.0
+_LABEL_SIZE_EXPR = f'coalesce("{LABEL_SIZE_FIELD}", {LABEL_SIZE_DEFAULT_PT})'
+_SIZE = getattr(QgsPalLayerSettings, "Property", QgsPalLayerSettings).Size
+_SIZE_PROPERTY = _SIZE if isinstance(_SIZE, int) else _SIZE.value
+
+# Taktisches Zeichen je Objekt ein/aus (leer = an); nur die Layer, deren Objekte eins tragen, haben das Feld
+SIGN_FIELD = "zeichen"
+SIGN_ROLES = (ROLE_VEHICLES, ROLE_GENERATORS, ROLE_LIGHTS)
+_SIGN_ON_EXPR = f'coalesce("{SIGN_FIELD}", true)'
+_LAYER_ENABLED = QgsSymbolLayer.Property.LayerEnabled
+_LAYER_ENABLED_KEY = _LAYER_ENABLED if isinstance(_LAYER_ENABLED, int) else _LAYER_ENABLED.value
 
 # Zelte und Fahrzeuge: Rechteck-Grundflächen mit identischem Schema
 _FOOTPRINT_FIELDS = [
@@ -136,7 +157,42 @@ def build_fields(role: str) -> QgsFields:
     fields = QgsFields()
     for name, typ in _LAYER_SPECS[role]["fields"]:
         fields.append(QgsField(name, typ))
+    fields.append(QgsField(LABEL_FIELD, _T_BOOL))
+    fields.append(QgsField(LABEL_SIZE_FIELD, _T_DOUBLE))
+    if role in SIGN_ROLES:
+        fields.append(QgsField(SIGN_FIELD, _T_BOOL))
     return fields
+
+
+def _flag(value, default: bool) -> bool:
+    """Ja/Nein-Attribut; NULL (None bzw. QVariant-NULL unter QGIS 3) ergibt ``default``."""
+    if value is None or (hasattr(value, "isNull") and value.isNull()):
+        return default
+    return bool(value)
+
+
+def label_visible(role: str, feature) -> bool:
+    """Wird die Beschriftung des Objekts bzw. taktischen Zeichens auf der Karte gezeigt?"""
+    field = "show_label" if role == ROLE_MARKERS else LABEL_FIELD
+    if feature.fields().indexFromName(field) < 0:
+        return role != ROLE_MARKERS
+    return _flag(feature.attribute(field), default=role != ROLE_MARKERS)
+
+
+def label_size(feature) -> float:
+    """Schriftgröße der Beschriftung eines Objekts in pt."""
+    idx = feature.fields().indexFromName(LABEL_SIZE_FIELD)
+    value = feature.attribute(idx) if idx >= 0 else None
+    if value is None or (hasattr(value, "isNull") and value.isNull()) or float(value) <= 0:
+        return LABEL_SIZE_DEFAULT_PT
+    return float(value)
+
+
+def sign_visible(feature) -> bool:
+    """Zeigt das Objekt (Fahrzeug, Stromerzeuger, Leuchte) sein taktisches Zeichen?"""
+    if feature.fields().indexFromName(SIGN_FIELD) < 0:
+        return True
+    return _flag(feature.attribute(SIGN_FIELD), default=True)
 
 
 class PlanningLayers(QObject):
@@ -217,6 +273,8 @@ class PlanningLayers(QObject):
             role = lyr.customProperty(ROLE_PROPERTY) or lyr.customProperty(_LEGACY_ROLE_PROPERTY)
             if role in _LAYER_SPECS and self.layer(role) is None and isinstance(lyr, QgsVectorLayer):
                 lyr.setCustomProperty(ROLE_PROPERTY, role)
+                _ensure_label_switch(lyr)
+                self._ensure_sign_switch(lyr, role)
                 self._layers[role] = lyr
                 self._connect(lyr)
 
@@ -262,6 +320,8 @@ class PlanningLayers(QObject):
     def _register(self, lyr: QgsVectorLayer, role: str) -> None:
         lyr.setCustomProperty(ROLE_PROPERTY, role)
         self.apply_style(lyr, role)
+        _ensure_label_switch(lyr)
+        self._ensure_sign_switch(lyr, role)
 
         proj = QgsProject.instance()
         proj.addMapLayer(lyr, False)
@@ -424,20 +484,14 @@ class PlanningLayers(QObject):
     # ------------------------------------------------------------------
 
     def apply_style(self, lyr: QgsVectorLayer, role: str) -> None:
-        if role == ROLE_GENERATORS:
-            sign = self._sign_expr(self.catalog.stromerzeuger, "Einrichtungen/Elektroversorgung.svg")
-            lyr.setRenderer(QgsSingleSymbolRenderer(_generator_symbol(sign)))
-            _set_labels(lyr, 'coalesce(nullif("bezeichnung", \'\'), "typ")')
-        elif role == ROLE_LIGHTS:
-            sign = self._sign_expr(self.catalog.beleuchtung, "Maßnahmen/Beleuchten.svg")
-            lyr.setRenderer(QgsSingleSymbolRenderer(_light_symbol(sign)))
+        if role in (ROLE_GENERATORS, ROLE_LIGHTS):
+            lyr.setRenderer(QgsSingleSymbolRenderer(self._sign_symbol(role)))
             _set_labels(lyr, 'coalesce(nullif("bezeichnung", \'\'), "typ")')
         elif role == ROLE_TENTS:
             lyr.setRenderer(QgsSingleSymbolRenderer(_tent_symbol()))
             _set_labels(lyr, 'coalesce(nullif("bezeichnung", \'\'), "typ")', polygon=True)
         elif role == ROLE_VEHICLES:
-            sign = self._sign_expr(self.catalog.fahrzeuge, "THW_Fahrzeuge/Kraftfahrzeug.svg")
-            lyr.setRenderer(QgsSingleSymbolRenderer(_vehicle_symbol(sign)))
+            lyr.setRenderer(QgsSingleSymbolRenderer(self._sign_symbol(role)))
             # Der Typ steckt im taktischen Zeichen – beschriftet wird nur eine eigene Bezeichnung, unter dem Zeichen
             _set_labels(lyr, "nullif(\"bezeichnung\", '')", polygon=True, y_offset_mm=-4.0)
         elif role == ROLE_CABLES:
@@ -473,6 +527,25 @@ class PlanningLayers(QObject):
             lyr.setRenderer(renderer)
             _set_labels(lyr, "nullif(\"bezeichnung\", '')", line=True, min_scale=50000)
         lyr.triggerRepaint()
+
+    def _sign_symbol(self, role: str):
+        """Symbol der Objekte mit taktischem Zeichen (Fahrzeuge, Stromerzeuger, Leuchten)."""
+        if role == ROLE_GENERATORS:
+            sign = self._sign_expr(self.catalog.stromerzeuger, "Einrichtungen/Elektroversorgung.svg")
+            return _generator_symbol(sign)
+        if role == ROLE_LIGHTS:
+            return _light_symbol(self._sign_expr(self.catalog.beleuchtung, "Maßnahmen/Beleuchten.svg"))
+        return _vehicle_symbol(self._sign_expr(self.catalog.fahrzeuge, "THW_Fahrzeuge/Kraftfahrzeug.svg"))
+
+    def _ensure_sign_switch(self, lyr: QgsVectorLayer, role: str) -> None:
+        """Ältere Layer nachrüsten: Feld ``zeichen`` ergänzen und das taktische Zeichen daran knüpfen."""
+        if role not in SIGN_ROLES or not _ensure_field(lyr, SIGN_FIELD):
+            return
+        renderer = lyr.renderer()
+        if isinstance(renderer, QgsSingleSymbolRenderer) and not _has_sign_switch(renderer.symbol()):
+            # Darstellung aus einer Version ohne Schalter – neu aufbauen, die Beschriftung bleibt
+            lyr.setRenderer(QgsSingleSymbolRenderer(self._sign_symbol(role)))
+            lyr.triggerRepaint()
 
     def _sign_expr(self, types, default: str) -> str:
         """Ausdruck: Pfad des taktischen Zeichens je ``typ_id`` (aus dem Katalog)."""
@@ -577,6 +650,7 @@ def _vehicle_symbol(sign_expr: str) -> QgsFillSymbol:
     sign = QgsGeometryGeneratorSymbolLayer.create({"geometryModifier": "centroid($geometry)", "SymbolType": "Marker"})
     if sign is not None:
         sign.setSymbolType(Qgis.SymbolType.Marker)
+        _switch_with_sign(sign)
         marker = QgsMarkerSymbol()
         marker.changeSymbolLayer(0, _svg_layer(sign_expr, 3.0, Qgis.RenderUnit.MetersInMapUnits))
         marker.symbolLayer(0).setDataDefinedProperty(
@@ -592,6 +666,33 @@ def _svg_layer(path_expr: str, size: float, unit) -> QgsSvgMarkerSymbolLayer:
     layer.setSizeUnit(unit)
     layer.setDataDefinedProperty(QgsSymbolLayer.Property.Name, QgsProperty.fromExpression(path_expr))
     return layer
+
+
+def _switch_with_sign(layer: QgsSymbolLayer, shown: bool = True) -> None:
+    """Symbolebene nur zeichnen, solange das Zeichen des Objekts an ist (bzw. bei ``shown=False`` aus)."""
+    expression = _SIGN_ON_EXPR if shown else f"NOT {_SIGN_ON_EXPR}"
+    layer.setDataDefinedProperty(_LAYER_ENABLED, QgsProperty.fromExpression(expression))
+
+
+def _has_sign_switch(symbol) -> bool:
+    return any(layer.dataDefinedProperties().isActive(_LAYER_ENABLED_KEY) for layer in symbol.symbolLayers())
+
+
+def _sign_symbol_layers(symbol: QgsMarkerSymbol, sign_expr: str, size_mm: float, color: str) -> None:
+    """Zeichen auf rundem Grund (schon erste Ebene von ``symbol``) plus Ersatzpunkt, wenn es aus ist.
+
+    Ohne Zeichen bliebe vom Objekt sonst nur die Beschriftung – der Punkt hält es auf der Karte auffindbar.
+    """
+    _switch_with_sign(symbol.symbolLayer(0))
+    svg = _svg_layer(sign_expr, size_mm, Qgis.RenderUnit.Millimeters)
+    _switch_with_sign(svg)
+    symbol.appendSymbolLayer(svg)
+    dot = QgsSimpleMarkerSymbolLayer.create(
+        {"name": "circle", "color": color, "outline_color": "255,255,255,255", "outline_width": "0.4", "size": "3.5"}
+    )
+    if dot is not None:
+        _switch_with_sign(dot, shown=False)
+        symbol.appendSymbolLayer(dot)
 
 
 def _cable_symbol(color: str) -> QgsLineSymbol:
@@ -683,7 +784,7 @@ def _generator_symbol(sign_expr: str) -> QgsMarkerSymbol:
             "size": "9",
         }
     )
-    symbol.appendSymbolLayer(_svg_layer(sign_expr, 9.0, Qgis.RenderUnit.Millimeters))
+    _sign_symbol_layers(symbol, sign_expr, 9.0, "198,40,40,255")
     return symbol
 
 
@@ -697,7 +798,7 @@ def _light_symbol(sign_expr: str) -> QgsMarkerSymbol:
             "size": "8",
         }
     )
-    symbol.appendSymbolLayer(_svg_layer(sign_expr, 8.0, Qgis.RenderUnit.Millimeters))
+    _sign_symbol_layers(symbol, sign_expr, 8.0, "249,168,37,255")
     # Ausgeleuchteter Bereich als Kreis mit dem Radius in Metern
     generator = QgsGeometryGeneratorSymbolLayer.create(
         {"geometryModifier": _metric_buffer_expr('coalesce("radius", 0)', 24), "SymbolType": "Fill"}
@@ -766,5 +867,43 @@ def _set_labels(
     settings.maximumScale = 1
     settings.minimumScale = min_scale
 
+    _set_label_switch(settings)
     lyr.setLabeling(QgsVectorLayerSimpleLabeling(settings))
     lyr.setLabelsEnabled(True)
+
+
+def _set_label_switch(settings: QgsPalLayerSettings) -> None:
+    """Beschriftung nur zeigen, solange ``beschriftung`` des Objekts nicht aus ist; Größe aus ``schriftgroesse``."""
+    properties = settings.dataDefinedProperties()
+    properties.setProperty(_SHOW_PROPERTY, QgsProperty.fromExpression(_LABEL_SHOW_EXPR))
+    properties.setProperty(_SIZE_PROPERTY, QgsProperty.fromExpression(_LABEL_SIZE_EXPR))
+    settings.setDataDefinedProperties(properties)
+
+
+def _ensure_field(lyr: QgsVectorLayer, name: str, typ=_T_BOOL) -> bool:
+    """Feld ergänzen, falls es fehlt; False, wenn das nicht ging."""
+    if lyr.fields().indexFromName(name) >= 0:
+        return True
+    if not lyr.dataProvider().addAttributes([QgsField(name, typ)]):
+        logger.warning("Feld %s konnte in %s nicht angelegt werden", name, lyr.name())
+        return False
+    lyr.updateFields()
+    return True
+
+
+def _ensure_label_switch(lyr: QgsVectorLayer) -> None:
+    """Ältere Layer nachrüsten: Felder ``beschriftung`` und ``schriftgroesse`` ergänzen, Beschriftung daran knüpfen.
+
+    Der übrige Beschriftungsstil (auch eigene Änderungen im Projekt) bleibt erhalten.
+    """
+    if not (_ensure_field(lyr, LABEL_FIELD) and _ensure_field(lyr, LABEL_SIZE_FIELD, _T_DOUBLE)):
+        return
+    labeling = lyr.labeling()
+    if not isinstance(labeling, QgsVectorLayerSimpleLabeling):
+        return
+    settings = labeling.settings()
+    properties = settings.dataDefinedProperties()
+    if properties.isActive(_SHOW_PROPERTY) and properties.isActive(_SIZE_PROPERTY):
+        return
+    _set_label_switch(settings)
+    lyr.setLabeling(QgsVectorLayerSimpleLabeling(settings))

@@ -13,6 +13,7 @@ from qgis.core import (
     QgsVectorLayer,
 )
 
+from .background import Background
 from .fields import field_types_dict
 
 # Default size used when adaptive sizing has no zoom info
@@ -102,8 +103,18 @@ class FeatureOperations:
         self._last_size_style = (size, fixed)
         return size
 
-    def toggle_white_background(self, fid, value) -> None:
-        self._update_attribute(fid, "white_background", value, dirty="renderer")
+    def set_background(self, fid, background: Background) -> None:
+        layer = self.layer
+        if not layer:
+            return
+        # Ältere Layer haben das Feld „background“ noch nicht
+        self._ensure_schema(layer)
+        # white_background halten ältere Plugin-Versionen aktuell (die zeigen dann einen weißen Kreis)
+        self._update_attributes(
+            fid,
+            {"background": background.to_json(), "white_background": background.visible},
+            dirty="renderer",
+        )
 
     def rotate(self, fid, degrees) -> None:
         self._update_attribute(fid, "rotation", degrees, dirty="renderer")
@@ -113,6 +124,22 @@ class FeatureOperations:
 
     def toggle_label(self, fid, value) -> None:
         self._update_attribute(fid, "show_label", value, dirty="labeling")
+
+    def set_label_size(self, fid, size_pt: float) -> None:
+        """Schriftgröße der Beschriftung in pt."""
+        layer = self.layer
+        if not layer:
+            return
+        self._ensure_schema(layer)
+        self._update_attribute(fid, "label_size", size_pt, dirty="labeling")
+
+    def set_scale_limits(self, fid, max_scale: float | None, min_scale: float | None) -> None:
+        """Maßstabszahlen, bis zu denen ein mit der Karte skaliertes Zeichen wächst bzw. schrumpft (None = immer)."""
+        layer = self.layer
+        if not layer:
+            return
+        self._ensure_schema(layer)
+        self._update_attributes(fid, {"max_scale": max_scale, "min_scale": min_scale}, dirty="renderer")
 
     def update_origin(self, fid, origin_x, origin_y) -> None:
         """Set both origin_x and origin_y in one edit transaction."""
