@@ -50,6 +50,7 @@ from .setup_common import (
     set_setup_mode,
     set_status,
 )
+from .theme import muted_style
 
 logger = get_logger(__name__)
 
@@ -192,7 +193,7 @@ class ClassicSetupDialog(QDialog):
             "'Nur Verbindung' legt lediglich die Verbindung an."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: gray;")
+        hint.setStyleSheet(muted_style())
         vbox.addWidget(hint)
 
         self._map_rows: dict[str, dict] = {}
@@ -245,7 +246,7 @@ class ClassicSetupDialog(QDialog):
         layout.addWidget(status, 0, 1)
 
         desc = QLabel(map_layer.description)
-        desc.setStyleSheet("color: gray;")
+        desc.setStyleSheet(muted_style())
         desc.setWordWrap(True)
         layout.addWidget(desc, 1, 0, 1, 2)
 
@@ -314,7 +315,7 @@ class ClassicSetupDialog(QDialog):
             "Der Assistent führt Schritt für Schritt durch Koordinatensystem, Hintergrundkarte und Zusatzlagen."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: gray;")
+        hint.setStyleSheet(muted_style())
         vbox.addWidget(hint)
 
         row = QHBoxLayout()

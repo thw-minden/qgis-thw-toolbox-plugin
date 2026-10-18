@@ -18,6 +18,7 @@ from qgis.utils import iface
 from ..logging_utils import get_logger
 from ..tools import style_library
 from ..tools.layer_setup import get_project_crs, set_project_crs
+from .theme import muted_style
 
 logger = get_logger(__name__)
 
@@ -170,7 +171,7 @@ class StyleLibraryGroup(QGroupBox):
 
         hint = QLabel("Macht die Taktischen Zeichen projektübergreifend im Symbol-Auswahldialog verfügbar.")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: gray;")
+        hint.setStyleSheet(muted_style())
         vbox.addWidget(hint)
 
         row = QHBoxLayout()

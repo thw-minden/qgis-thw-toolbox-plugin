@@ -56,6 +56,7 @@ from .setup_common import (
     get_setup_mode,
     set_setup_mode,
 )
+from .theme import muted_style
 
 logger = get_logger(__name__)
 
@@ -358,7 +359,7 @@ class BaseMapPage(QWizardPage):
 
         # Generate the column content
         description_text = QLabel(basemap_layer.description)
-        description_text.setStyleSheet("color: gray;")
+        description_text.setStyleSheet(muted_style())
         description_text.setWordWrap(True)
 
         first_column = ClickableCellWidget()
@@ -591,7 +592,7 @@ class AddLayerPage(QWizardPage):
 
         # Generate the column content
         description_text = QLabel(map_layer.description)
-        description_text.setStyleSheet("color: gray;")
+        description_text.setStyleSheet(muted_style())
         description_text.setWordWrap(True)
 
         first_column = ClickableCellWidget()

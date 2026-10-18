@@ -1,6 +1,5 @@
 """Dock der Objektplanung: Zelte, Fahrzeuge, Strom, Beleuchtung, Gebiete und Pfeile, Auswahl, Bilanz."""
 
-from collections import Counter
 from dataclasses import dataclass
 
 from qgis.PyQt.QtCore import Qt
@@ -13,7 +12,6 @@ from qgis.PyQt.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QPushButton,
     QScrollArea,
     QTreeWidget,
@@ -22,11 +20,11 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from ..ui.theme import muted_style
 from .catalog import fmt_m
 from .drop_filter import object_mime
 from .layers import (
     ROLE_ARROWS,
-    ROLE_DISTRIBUTORS,
     ROLE_GENERATORS,
     ROLE_LIGHTS,
     ROLE_TENTS,
@@ -59,15 +57,6 @@ _HINTS = {
     "Punkte bearbeiten · Rechtsklick: Menü",
     "edit": "Eckpunkte (□) ziehen verschiebt · kleine Punkte (○) auf den Kanten ziehen fügt einen Eckpunkt ein · "
     "Rechtsklick / Entf löscht einen Eckpunkt · Klick daneben / Enter / Esc zurück zur Auswahl",
-}
-_ROLE_TITLES = {
-    ROLE_TENTS: "Zelt",
-    ROLE_VEHICLES: "Fahrzeug",
-    ROLE_DISTRIBUTORS: "Verteiler",
-    ROLE_GENERATORS: "Stromerzeuger",
-    ROLE_LIGHTS: "Leuchte",
-    ROLE_ZONES: "Gebiet",
-    ROLE_ARROWS: "Pfeil",
 }
 _WARN_BRUSH = QBrush(QColor(198, 40, 40))
 # Mausweg, ab dem ein Druck auf eine Schaltfläche als Ziehen auf die Karte gilt (Pixel)
@@ -126,7 +115,7 @@ def _spin(minimum: float, maximum: float, step: float, suffix: str, decimals: in
 def _muted(text: str) -> QLabel:
     label = QLabel(text)
     label.setWordWrap(True)
-    label.setStyleSheet("color: palette(mid);")
+    label.setStyleSheet(muted_style())
     return label
 
 
@@ -273,7 +262,7 @@ class PlanningDock(QDockWidget):
         layout = QVBoxLayout(box)
         layout.addLayout(self._point_row(ROLE_ZONES, "zone", "Gebiet zeichnen", drag=False))
         layout.addLayout(self._point_row(ROLE_ARROWS, "arrow", "Pfeil zeichnen", drag=False))
-        layout.addWidget(_muted("Der Typ bestimmt die Farbe; der Name kommt aus der Bezeichnung unter „Auswahl“."))
+        layout.addWidget(_muted("Der Typ bestimmt die Farbe; der Name kommt aus der Bezeichnung in den Details."))
         return box
 
     def _point_row(self, role: str, kind: str, text: str, drag: bool = True) -> QHBoxLayout:
@@ -293,27 +282,12 @@ class PlanningDock(QDockWidget):
         box = QGroupBox("Auswahl")
         layout = QVBoxLayout(box)
         layout.addWidget(self._tool_button("Auswählen / Verschieben", "select"))
-        self._selection_label = _muted("Nichts ausgewählt")
-        layout.addWidget(self._selection_label)
-        form = QFormLayout()
-        self._label_edit = QLineEdit()
-        self._label_edit.setPlaceholderText("z.B. Zelt 1, Küche, NEA Nord")
-        self._label_edit.editingFinished.connect(self._on_label_edited)
-        form.addRow("Bezeichnung:", self._label_edit)
-        layout.addLayout(form)
-        row = QHBoxLayout()
-        self._sel_buttons = []
-        for text, slot in (
-            ("Duplizieren", self.controller.duplicate_selection),
-            ("Drehen 15°", lambda: self.controller.rotate_selection(15)),
-            ("Löschen", self.controller.delete_selection),
-        ):
-            button = QPushButton(text)
-            button.clicked.connect(lambda _checked=False, f=slot: f())
-            row.addWidget(button)
-            self._sel_buttons.append(button)
-        layout.addLayout(row)
-        layout.addWidget(_muted("Auswahl mit den QGIS-Auswahlwerkzeugen funktioniert auch (Gruppe „Objektplanung“)."))
+        layout.addWidget(
+            _muted(
+                "Bezeichnung, Angaben und Aktionen zur Auswahl stehen im Tab „Details“. "
+                "Auswahl mit den QGIS-Auswahlwerkzeugen funktioniert auch (Gruppe „Objektplanung“)."
+            )
+        )
         return box
 
     def _build_summary(self) -> QGroupBox:
@@ -375,50 +349,6 @@ class PlanningDock(QDockWidget):
                 combo.setCurrentIndex(index)
                 combo.blockSignals(False)
         self.sync_tool_buttons()
-
-    # ------------------------------------------------------------------
-    # Auswahl
-    # ------------------------------------------------------------------
-
-    def refresh_selection(self):
-        selected = self.controller.planning_selection()
-        # Taktische Zeichen einer gemischten Auswahl: zählen mit, haben aber keine Bezeichnung hier
-        markers = len(self.controller.marker_sel)
-        for button in self._sel_buttons:
-            button.setEnabled(bool(selected) or markers > 0)
-        self._label_edit.setEnabled(bool(selected))
-        if not selected and not markers:
-            self._selection_label.setText("Nichts ausgewählt")
-            self._label_edit.clear()
-            return
-        counts = Counter(f.attribute("typ") or _ROLE_TITLES.get(role, role) for role, f in selected)
-        if markers:
-            counts["Taktisches Zeichen"] = markers
-        parts = [f"{n}× {name}" if n > 1 else name for name, n in counts.most_common()]
-        self._selection_label.setText(f"{len(selected) + markers} ausgewählt: " + ", ".join(parts))
-        if not selected:
-            self._label_edit.clear()
-            return
-        labels = {f.attribute("bezeichnung") or "" for _role, f in selected}
-        uniform = len(labels) == 1
-        self._label_edit.blockSignals(True)
-        self._label_edit.setText(next(iter(labels)) if uniform else "")
-        self._label_edit.setPlaceholderText(
-            "z.B. Zelt 1, Küche, NEA Nord" if uniform else "unterschiedlich – Eingabe gilt für alle"
-        )
-        self._label_edit.blockSignals(False)
-
-    def focus_label(self):
-        self.show()
-        self.raise_()
-        self._label_edit.setFocus()
-        self._label_edit.selectAll()
-
-    def _on_label_edited(self):
-        if not self._label_edit.isModified():
-            return
-        self._label_edit.setModified(False)
-        self.controller.set_selection_label(self._label_edit.text().strip())
 
     # ------------------------------------------------------------------
     # Werkzeuge

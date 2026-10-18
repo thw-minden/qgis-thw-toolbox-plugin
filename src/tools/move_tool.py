@@ -145,7 +145,7 @@ class MoveTool(QgsMapTool):
         return QgsGeometry.fromPolygonXY([ring + [ring[0]]])
 
     def _feature_dock(self):
-        return getattr(getattr(self.layer_manager, "ident_tool", None), "feature_dock", None)
+        return getattr(self.layer_manager, "details", None)
 
     def set_move_mode(self, enabled):
         self.is_move_mode = enabled

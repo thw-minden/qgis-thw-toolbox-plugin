@@ -37,12 +37,14 @@ from .layout.tile_export import add_designer_action
 from .logging_utils import get_logger
 from .paths import plugin_root
 from .planning.controller import PlanningController
+from .planning.details import SelectionDetails
 from .settings import THWToolboxSettings
 from .tools import style_library
 from .tools.canvas_drop_filter import CanvasDropFilter
 from .tools.identify_tool import IdentifyTool
 from .tools.move_tool import MoveTool
 from .ui.config_dialog import ConfigDialog
+from .ui.feature_dock import FeatureDock
 from .ui.marker_table_dialog import MarkerTableDialog
 from .ui.nominatim_search_dialog import NominatimSearchDialog
 from .ui.photo_target_dialog import PhotoTargetDialog
@@ -56,6 +58,11 @@ from .util.coordinates import WGS84
 from .util.temp_files import cleanup_temp_files
 
 logger = get_logger(__name__)
+
+
+def _is_front_tab(dock) -> bool:
+    """Dock offen und nicht als Tab hinter einem anderen (Qt schiebt verdeckte Tabs aus dem Sichtbereich)."""
+    return not dock.isHidden() and not dock.visibleRegion().isEmpty()
 
 
 class THWToolboxPlugin:
@@ -79,7 +86,13 @@ class THWToolboxPlugin:
         # Nutzer mit der Deaktivierungs-Warnung zu konfrontieren.
         self._project_clearing = False
         self.planning = None
-        self._docks_tabified = False
+        # Details zur Auswahl (Zeichen, Objekte, Mehrfachauswahl) – für Toolbox und Objektplanung gemeinsam
+        self.details = None
+        self._details_timer = None
+        # Tab, der vor dem automatischen Aufdecken der Details vorn lag – kommt beim Abwählen zurück
+        self._details_front_before = None
+        # Docks, die schon einmal als Tab eingereiht wurden – danach bleiben sie, wo der Nutzer sie hinzieht
+        self._tabified_docks = set()
 
         self.settings = THWToolboxSettings()
 
@@ -250,6 +263,13 @@ class THWToolboxPlugin:
         if self.action and self.action.isChecked():
             self.deactivate()
 
+        if self._details_timer is not None:
+            self._details_timer.stop()
+        if self.details:
+            self.iface.removeDockWidget(self.details)
+            self.details.deleteLater()
+            self.details = None
+
         # Vor den Aktionen: das Schließen des Objektplanungs-Docks meldet sich sonst an eine entfernte Aktion
         if self.planning:
             self.planning.unload()
@@ -384,14 +404,9 @@ class THWToolboxPlugin:
             self.canvas.viewport().installEventFilter(df)
             self.canvas.setAcceptDrops(True)
             logger.debug("CanvasDropFilter installiert")
-        # IdentifyTool
+        # IdentifyTool (die Details öffnet set_toolbox_active unten)
         if not self.ident_tool:
             self.ident_tool = IdentifyTool(self.canvas, self)
-        else:
-            # IdentifyTool existiert bereits, zeige das Feature-Dock an
-            if hasattr(self.ident_tool, "feature_dock"):
-                self.ident_tool.feature_dock.show()
-                self.ident_tool.feature_dock.raise_()
         # MoveTool — wird nicht selbst zum Kartenwerkzeug: Das gemeinsame
         # Auswahlwerkzeug (Hotbar, planning.tools.SelectTool) reicht Klicks auf
         # taktische Zeichen hierher weiter, damit Zeichen und Objektplanung
@@ -431,14 +446,12 @@ class THWToolboxPlugin:
                 pass
         if self.planning:
             self.planning.set_toolbox_active(False)
+        # Ein eben noch gewähltes Zeichen verschwindet aus den Details (bleiben offen, wenn die Objektplanung offen ist)
+        self.schedule_details_update()
 
-        # Dock verstecken
+        # Dock verstecken (die Details schließt set_toolbox_active, wenn die Objektplanung zu ist)
         if self.dock:
             self.dock.hide()
-
-        # Feature-Dock verstecken
-        if self.ident_tool and hasattr(self.ident_tool, "feature_dock"):
-            self.ident_tool.feature_dock.hide()
 
         if self.marker_table:
             self.marker_table.hide()
@@ -491,7 +504,7 @@ class THWToolboxPlugin:
             logger.debug("Marker-Layer wird entfernt, deaktiviere Plugin")
             # Aktion kann auch unchecked sein, wenn nur ein anderes Kartenwerkzeug gewählt wurde
             was_active = (self.action is not None and self.action.isChecked()) or (
-                self.dock is not None and self.dock.isVisible()
+                self.dock is not None and not self.dock.isHidden()
             )
             if was_active:
                 self.deactivate()
@@ -670,14 +683,16 @@ class THWToolboxPlugin:
         if self.planning:
             self.planning.back_to_select()
             self.planning.clear_selection()
+            # Die Symbolpalette bleibt vorn, damit gleich das nächste Zeichen gezogen werden kann
+            self.planning.quiet_selection = True
 
-        # Feature im Dock auswählen + Move-Modus aktivieren
-        if self.ident_tool and hasattr(self.ident_tool, "feature_dock"):
-            self.ident_tool.feature_dock.show_feature(new_feature, self)
+        # Feature in den Details anzeigen + Move-Modus aktivieren
+        if self.details is not None:
+            self.details.show_feature(new_feature, self)
         if self.move_tool:
             self.move_tool.set_move_mode(True)
             self.move_tool.select_feature(new_feature.id())
-            self.raise_marker_docks()
+        self.schedule_details_update()
 
     # ------------------------------------------------------------------
     # Public callbacks (called from FeatureDock with legacy method names)
@@ -744,7 +759,7 @@ class THWToolboxPlugin:
         return self.layer.getFeature(fid)
 
     def open_position_dialog(self, fid):
-        """Popup nach Klick auf die Koordinaten in Marker Details: Position als „Breite Länge“ oder UTMREF."""
+        """Popup nach Klick auf die Koordinaten in den Details: Position als „Breite Länge“ oder UTMREF."""
         if not self.layer:
             return
         feat = self.layer.getFeature(fid)
@@ -825,40 +840,111 @@ class THWToolboxPlugin:
         layer.triggerRepaint()
         self.refresh_marker_views(list(geometries))
 
-    def _marker_details(self):
-        return getattr(self.ident_tool, "feature_dock", None)
+    # ------------------------------------------------------------------
+    # Details zur Auswahl
+    # ------------------------------------------------------------------
 
-    def raise_marker_docks(self):
-        """Symbolpalette und Marker Details nach vorn holen (liegen sie als Tab hinter der Objektplanung)."""
-        for dock in (self.dock, self._marker_details()):
-            if dock is not None and not dock.isHidden():
-                dock.raise_()
+    def details_dock(self) -> FeatureDock:
+        """Details-Dock, beim ersten Aufruf angelegt (versteckt; ``set_details_open`` zeigt es)."""
+        if self.details is None:
+            self.details = FeatureDock(self.iface.mainWindow())
+            self.details.set_objects_page(SelectionDetails(self._planning_controller()))
+            self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.details)
+            self.details.hide()
+        return self.details
+
+    def set_details_open(self, is_open: bool):
+        """Die Details gehören zum Auswahlwerkzeug: offen, solange Toolbox oder Objektplanung offen sind."""
+        if is_open:
+            self.details_dock().show()
+            self._arrange_docks()
+            self.schedule_details_update()
+        elif self.details is not None:
+            self._details_front_before = None
+            self.details.hide()
+
+    def schedule_details_update(self):
+        """Details nach einer Auswahl aktualisieren – gesammelt, denn jeder Layer meldet seine Auswahl einzeln."""
+        if self._details_timer is None:
+            self._details_timer = QTimer()
+            self._details_timer.setSingleShot(True)
+            self._details_timer.setInterval(0)
+            self._details_timer.timeout.connect(self._update_details)
+        self._details_timer.start()
+
+    def _update_details(self):
+        """Passende Seite zeigen; bei einer Auswahl füllen die Details die rechte Seitenleiste."""
+        details, controller = self.details, self.planning
+        if details is None or controller is None:
+            return
+        # Nach dem Ablegen aus Symbolpalette oder Objektplanung bleibt deren Tab vorn
+        quiet, controller.quiet_selection = controller.quiet_selection, False
+        single = controller.single_marker()
+        if controller.selection_ids():
+            details.show_objects()
+        elif single is not None:
+            if not details.showing_marker(single):
+                feat = self.layer.getFeature(single) if self.layer else None
+                if feat is None or not feat.isValid():
+                    details.show_placeholder()
+                    return
+                details.show_feature(feat, self)
+        else:
+            details.show_placeholder()
+            self._restore_front_dock()
+            return
+        if not quiet:
+            self._reveal_details()
+
+    def _reveal_details(self):
+        details = self.details
+        if details.isHidden():
+            details.show()
+            self._arrange_docks()
+        if self._details_front_before is None and not _is_front_tab(details):
+            tabs = self.iface.mainWindow().tabifiedDockWidgets(details)
+            self._details_front_before = next((dock for dock in tabs if _is_front_tab(dock)), None)
+        details.raise_()
+
+    def _restore_front_dock(self):
+        """Nach dem Abwählen den Tab zurückholen, den die Details verdeckt haben."""
+        before, self._details_front_before = self._details_front_before, None
+        if before is None or self.details is None or not _is_front_tab(self.details):
+            return
+        try:
+            if not before.isHidden():
+                before.raise_()
+        except RuntimeError:
+            # Dock wurde inzwischen gelöscht (z. B. Plugin neu geladen)
+            pass
+
+    def focus_details_label(self):
+        """Doppelklick / Enter auf ein Objekt: Bezeichnung in den Details bearbeiten."""
+        self._update_details()
+        if self.details is not None and self.details.objects_page is not None:
+            self.details.objects_page.focus_label()
 
     def show_marker(self, fid):
-        """Marker in Marker Details anzeigen (Auswahl über das gemeinsame Auswahlwerkzeug)."""
-        details = self._marker_details()
+        """Marker in den Details anzeigen (Auswahl über das gemeinsame Auswahlwerkzeug)."""
+        details = self.details
         feat = self.layer.getFeature(fid) if self.layer else None
         if details is not None and feat is not None and feat.isValid():
             details.show_feature(feat, self)
-        self.raise_marker_docks()
+        self.schedule_details_update()
 
     def show_marker_placeholder(self):
-        details = self._marker_details()
-        if details is not None:
-            details.show_placeholder()
+        """Das einzelne Zeichen ist abgewählt oder gelöscht."""
+        self.schedule_details_update()
 
     def refresh_marker_views(self, fids):
-        """Symbolpalette („Verwendet“) und Marker Details nach Änderungen an `fids` aktualisieren."""
+        """Symbolpalette („Verwendet“) und Details nach Änderungen an `fids` aktualisieren."""
         if hasattr(self, "svg_dock_widget"):
             self.svg_dock_widget.refresh_marker_list()
-        dock = getattr(self.ident_tool, "feature_dock", None)
-        shown = getattr(dock, "feat", None)
-        # Nur eingreifen, wenn Marker Details gerade genau einen dieser Marker zeigt
-        if dock is None or shown is None or not dock.isVisible() or not dock.placeholder_label.isHidden():
+        dock = self.details
+        # Nur eingreifen, wenn die Details gerade genau einen dieser Marker zeigen
+        if dock is None or not dock.showing_marker() or dock.feat.id() not in fids:
             return
-        if shown.id() not in fids:
-            return
-        feat = self.layer.getFeature(shown.id()) if self.layer else None
+        feat = self.layer.getFeature(dock.feat.id()) if self.layer else None
         if feat is not None and feat.isValid():
             dock.show_feature(feat, self)
         else:
@@ -935,18 +1021,27 @@ class THWToolboxPlugin:
             self._arrange_docks(front=controller.dock)
 
     def _arrange_docks(self, front=None):
-        """Symbolpalette und Objektplanung einmalig als Tabs übereinanderlegen, ``front`` liegt vorn.
+        """Symbolpalette, Details und Objektplanung als Tabs übereinanderlegen, ``front`` liegt vorn.
 
-        Ein Klick auf ein Zeichen bzw. ein Planungsobjekt holt dann den passenden Tab nach vorn.
+        Jedes Dock wird nur einmal eingereiht. Eine Auswahl auf der Karte holt
+        dann die Details nach vorn, das Abwählen den vorigen Tab zurück.
         """
         planning_dock = self.planning.dock if self.planning else None
-        if self._docks_tabified or not self.dock or not planning_dock:
-            return
-        if self.dock.isHidden() or planning_dock.isHidden() or self.dock.isFloating() or planning_dock.isFloating():
-            return
-        self._docks_tabified = True
-        self.iface.mainWindow().tabifyDockWidget(self.dock, planning_dock)
-        (front or planning_dock).raise_()
+        docks = [
+            dock
+            for dock in (self.dock, self.details, planning_dock)
+            if dock is not None and not dock.isHidden() and not dock.isFloating()
+        ]
+        for dock in docks:
+            if dock in self._tabified_docks:
+                continue
+            # Neue Tabs kommen ans Ende der Gruppe – die Reihenfolge oben ergibt die Tab-Reihenfolge
+            anchor = next((d for d in docks if d in self._tabified_docks), None)
+            if anchor is not None:
+                self.iface.mainWindow().tabifyDockWidget(anchor, dock)
+            self._tabified_docks.add(dock)
+        if front is not None and not front.isHidden():
+            front.raise_()
 
     def _add_mgrs_grid_layer(self):
         extent = self.canvas.extent()

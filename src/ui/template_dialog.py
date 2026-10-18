@@ -41,6 +41,7 @@ from ..layout.print_template import (
     set_logo_confirmed,
     user_template_path,
 )
+from .theme import muted_style
 
 _LAST_DIR_KEY = "THWToolbox/print/template_import_dir"
 
@@ -68,7 +69,7 @@ class TemplateDialog(QDialog):
             "Die Vorlage wird als neues Layout im Projekt angelegt."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: gray;")
+        hint.setStyleSheet(muted_style())
         layout.addWidget(hint)
 
         info = PrintInfo.load()
@@ -136,7 +137,7 @@ class TemplateDialog(QDialog):
             "Hintergrundkarten stehen unter „Quellen“. Später im Designer: Layout → Legende aktualisieren."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: gray;")
+        hint.setStyleSheet(muted_style())
         vbox.addWidget(hint)
 
         self._legend_list = QListWidget()

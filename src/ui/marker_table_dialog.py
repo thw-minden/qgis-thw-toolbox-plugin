@@ -83,7 +83,7 @@ class MarkerTableDialog(QDialog):
     Jede Zeile ist ein Marker; Änderungen an Zeichen, Beschriftung und Position
     werden sofort übernommen. In der letzten Zeile (*) legt man neue Marker an:
     sobald Zeichen und Position gültig sind, entsteht der Marker. Änderungen auf
-    der Karte (Verschieben, Marker Details) erscheinen automatisch in der Tabelle.
+    der Karte (Verschieben, Details) erscheinen automatisch in der Tabelle.
     """
 
     def __init__(self, plugin, navigate_callback, parent=None):
@@ -199,7 +199,7 @@ class MarkerTableDialog(QDialog):
         return layer
 
     def _on_layer_committed(self):
-        # Änderung von außerhalb (Karte, Marker Details) → gesammelt neu laden
+        # Änderung von außerhalb (Karte, Details) → gesammelt neu laden
         if self._applying or self._refresh_scheduled:
             return
         self._refresh_scheduled = True

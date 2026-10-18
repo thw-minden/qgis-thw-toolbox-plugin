@@ -16,7 +16,6 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QMenu,
     QPushButton,
-    QSizePolicy,
     QSpinBox,
     QToolButton,
     QWidget,
@@ -62,14 +61,6 @@ QFrame#ObjektplanungHotbar QToolButton#chevron:hover { color: #ffffff; backgroun
 QFrame#ObjektplanungHotbar QToolButton#grid { padding: 0px 6px; font-weight: bold; }
 QFrame#ObjektplanungHotbar QToolButton#grid[armed="true"] { background: #0d99ff; }
 QFrame#ObjektplanungHotbar QFrame#sep { background: #3a3a3a; }
-QFrame#ObjektplanungHotbar QLabel#count {
-    color: #ffffff;
-    background: #0d99ff;
-    border-radius: 9px;
-    padding: 2px 9px;
-    margin-right: 4px;
-    font-weight: bold;
-}
 """
 
 
@@ -137,10 +128,6 @@ class PlanningHotbar(QFrame):
 
         # Kontext-Aktionen für die Auswahl
         self._selection_sep = self._separator()
-        self._count = QLabel(self)
-        self._count.setObjectName("count")
-        self._count.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self._layout.addWidget(self._count)
         self._vertices = self._button(
             "vertices.svg", "Punkte bearbeiten: Gebiet / Pfeil umformen und ergänzen (Doppelklick)"
         )
@@ -151,7 +138,7 @@ class PlanningHotbar(QFrame):
             "rotate.svg", "Um 15° drehen (R, Shift+R zurück)", lambda: controller.rotate_selection(15)
         )
         self._delete = self._button("delete.svg", "Löschen (Entf)", controller.delete_selection)
-        self._selection_widgets = (self._selection_sep, self._count, self._duplicate, self._rotate, self._delete)
+        self._selection_widgets = (self._selection_sep, self._duplicate, self._rotate, self._delete)
 
         controller.state_changed.connect(self.sync_tool_buttons)
         canvas.installEventFilter(self)
@@ -369,9 +356,7 @@ class PlanningHotbar(QFrame):
             self._reposition()
 
     def refresh_selection(self):
-        count = sum(len(ids) for ids in self.controller.selection_ids().values())
-        has_selection = count > 0
-        self._count.setText(f"{count} ausgewählt")
+        has_selection = any(self.controller.selection_ids().values())
         for widget in self._selection_widgets:
             widget.setVisible(has_selection)
         self._vertices.setVisible(self.controller.editable_shape() is not None)

@@ -89,6 +89,8 @@ class PlanningController(QObject):
         self._toolbox_active = False
         # Taktische Zeichen in einer Mehrfach-/gemischten Auswahl (ein einzelnes Zeichen führt das MoveTool)
         self.marker_sel: set[int] = set()
+        # Nächste Auswahl ohne Tabwechsel zu den Details (nach dem Ablegen aus einem Dock)
+        self.quiet_selection = False
         self.catalog = load_catalog(plugin_dir)
         self.catalog.zelte.append(FootprintType("eigen", "Eigenes Zelt", 5.0, 5.0, 1.0))
         self.catalog.fahrzeuge.append(
@@ -131,6 +133,11 @@ class PlanningController(QObject):
         self.canvas.viewport().installEventFilter(self._drop_filter)
         self.canvas.mapToolSet.connect(self._on_map_tool_set)
         QgsProject.instance().projectSaved.connect(self.layers.on_project_saved)
+        self.layers.selection_changed.connect(self._on_selection_changed)
+
+    def _on_selection_changed(self):
+        if self.plugin is not None:
+            self.plugin.schedule_details_update()
 
     def unload(self):
         if self.dock:
@@ -172,7 +179,6 @@ class PlanningController(QObject):
             self.dock = PlanningDock(self, self.iface.mainWindow())
             self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock)
             self.layers.changed.connect(self.dock.refresh_summary)
-            self.layers.selection_changed.connect(self.dock.refresh_selection)
             self.dock.visibilityChanged.connect(self._on_dock_visibility)
         if self.dock is None:
             return
@@ -182,7 +188,6 @@ class PlanningController(QObject):
             # Vorhandene Objektplanung im Projekt übernehmen, ohne neue Layer anzulegen
             self.layers._adopt_project_layers()
             self.dock.refresh_summary()
-            self.dock.refresh_selection()
         self._update_canvas_ui(ensure_tool=visible)
 
     def dock_open(self) -> bool:
@@ -201,13 +206,16 @@ class PlanningController(QObject):
         self._update_canvas_ui(ensure_tool=active)
 
     def _update_canvas_ui(self, ensure_tool: bool = False):
-        """Hotbar zeigen, solange Toolbox oder Objektplanung offen sind.
+        """Hotbar und Details zeigen, solange Toolbox oder Objektplanung offen sind.
 
         ``ensure_tool``: beim Öffnen die Auswahl (Cursor) aktivieren, falls gerade
         ein fremdes QGIS-Werkzeug aktiv ist. Beim bloßen Tab-Wechsel der Docks nicht.
         """
         wanted = self._toolbox_active or self.dock_open()
         was_active, self._canvas_active = self._canvas_active, wanted
+        # Nur beim Öffnen bzw. Schließen: ein vom Nutzer geschlossenes Details-Dock bleibt beim Tabwechsel zu
+        if wanted != was_active and self.plugin is not None:
+            self.plugin.set_details_open(wanted)
         if not wanted:
             if self.hotbar and not self.hotbar.isHidden():
                 self.hotbar.setVisible(False)
@@ -243,15 +251,9 @@ class PlanningController(QObject):
             self.hotbar.sync_tool_buttons()
 
     def focus_label(self):
-        """Doppelklick auf ein Objekt: Bezeichnung im Dock bearbeiten."""
-        if not self.dock_open():
-            self.toggle_dock(True)
-        self.dock.focus_label()
-
-    def _raise_planning_dock(self):
-        """Rechts die Objektplanung nach vorn holen (liegt sie als Tab hinter den taktischen Zeichen)."""
-        if self.dock_open():
-            self.dock.raise_()
+        """Doppelklick auf ein Objekt: Bezeichnung in den Details bearbeiten."""
+        if self.plugin is not None:
+            self.plugin.focus_details_label()
 
     # ------------------------------------------------------------------
     # Taktische Zeichen (Marker-Layer der Toolbox)
@@ -283,9 +285,7 @@ class PlanningController(QObject):
         return tool.outline(feature) if tool is not None else QgsGeometry()
 
     def marker_clicked(self):
-        """Ein Zeichen wurde angeklickt: rechts die taktischen Zeichen nach vorn holen."""
-        if self.plugin is not None:
-            self.plugin.raise_marker_docks()
+        """Ein Zeichen wurde angeklickt: rechts kommen seine Details nach vorn."""
         self.layers.selection_changed.emit()
 
     def _drop_single_marker(self):
@@ -324,8 +324,6 @@ class PlanningController(QObject):
         else:
             self._drop_single_marker()
             self.marker_sel = set(fids)
-            if others and not fids:
-                self._raise_planning_dock()
         self.layers.selection_changed.emit()
 
     # ------------------------------------------------------------------
@@ -1009,8 +1007,10 @@ class PlanningController(QObject):
             if type_id:
                 self.point_ids[role] = type_id
             ok = self.place_point(role, point)
-        # Wie beim Ablegen eines taktischen Zeichens: das neue Objekt ist direkt greifbar
+        # Wie beim Ablegen eines taktischen Zeichens: das neue Objekt ist direkt greifbar,
+        # die Objektplanung bleibt vorn, damit gleich das nächste gezogen werden kann
         self.back_to_select()
+        self.quiet_selection = True
         self.select([(role, fid) for fid in set(layer.allFeatureIds()) - before])
         self.state_changed.emit()
         return ok

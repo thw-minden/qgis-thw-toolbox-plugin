@@ -26,6 +26,8 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
 )
 
+from .theme import muted_style
+
 _NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 _USER_AGENT = "QGIS-THW-Toolbox-Plugin/1.0 (https://github.com/thw-minden/qgis-thw-toolbox-plugin)"
 _REQUEST_TIMEOUT = 10
@@ -209,7 +211,7 @@ class NominatimSearchDialog(QDialog):
         layout.addLayout(search_row)
 
         self._status = QLabel("")
-        self._status.setStyleSheet("color: gray;")
+        self._status.setStyleSheet(muted_style())
         layout.addWidget(self._status)
 
         self._results = QListWidget()

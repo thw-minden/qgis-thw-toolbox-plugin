@@ -2,6 +2,7 @@ from qgis.core import QgsPointXY
 from qgis.PyQt.QtWidgets import QDialog, QDialogButtonBox, QLabel, QLineEdit, QVBoxLayout
 
 from ..util.coordinates import parse_position, to_mgrs
+from .theme import muted_style
 
 
 class PositionDialog(QDialog):
@@ -32,7 +33,7 @@ class PositionDialog(QDialog):
                 pass
 
         hint = QLabel("Das Zeichen wird mit seinem Ankerpunkt auf die Koordinate gesetzt.")
-        hint.setStyleSheet("QLabel { color: #666; }")
+        hint.setStyleSheet(muted_style())
         layout.addWidget(hint)
 
         self.error_label = QLabel("")

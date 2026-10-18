@@ -1312,7 +1312,7 @@ class SelectTool(_PlanningTool):
             # Wie in Figma: Doppelklick geht in die Form hinein, ihre Punkte werden bearbeitbar
             self._end_gesture()
             self.controller.edit_vertices(hit[0], hit[1].id())
-        # Zeichen haben ihre eigene Beschriftung in den Marker-Details
+        # Zeichen haben ihre eigene Beschriftung in den Details
         elif hit[0] != ROLE_MARKERS:
             self.controller.focus_label()
 

@@ -9,14 +9,17 @@ from qgis.PyQt.QtWidgets import (
     QApplication,
     QCheckBox,
     QDockWidget,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSlider,
     QSpacerItem,
     QSpinBox,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -25,6 +28,7 @@ from ..logging_utils import get_logger
 from ..paths import plugin_root
 from ..util.coordinates import WGS84, to_mgrs
 from .origin_point_widget import OriginPointWidget
+from .theme import muted_color, muted_style
 
 logger = get_logger(__name__)
 
@@ -40,28 +44,39 @@ def _load_svg_pixmap(path: str, size: int = 180) -> QPixmap | None:
 
 
 class FeatureDock(QDockWidget):
-    def __init__(self, parent=None):
-        super().__init__("Marker Details", parent)
-        self.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
+    """Details zur Auswahl – für taktische Zeichen und Objektplanung gemeinsam.
 
-        # Hauptwidget für den Inhalt
+    Drei Seiten: Hinweis (nichts ausgewählt), Einstellungen eines einzelnen
+    taktischen Zeichens und die Objektseite der Objektplanung (``set_objects_page``)
+    für Objekte und Mehrfachauswahl.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__("Details", parent)
+        self.setObjectName("THWToolboxDetails")
+        self.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
+        self.feat = None
+        self.objects_page = None
+
+        self.stack = QStackedWidget()
+        self.setWidget(self.stack)
+        self._empty_page = self._build_empty_page()
+        self.stack.addWidget(self._empty_page)
+
+        # Seite „Zeichen“: Einstellungen eines einzelnen taktischen Zeichens
         self.content_widget = QWidget()
-        self.setWidget(self.content_widget)
         self.main_layout = QVBoxLayout(self.content_widget)
+        self._marker_page = QScrollArea()
+        self._marker_page.setWidgetResizable(True)
+        self._marker_page.setFrameShape(QFrame.Shape.NoFrame)
+        self._marker_page.setWidget(self.content_widget)
+        self.stack.addWidget(self._marker_page)
 
         # SVG-Anzeige (Preview des ausgewählten Markers)
         self.svg_label = QLabel()
         self.svg_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.svg_label.setMinimumHeight(200)
-        self.svg_label.setStyleSheet("QLabel { border: 2px dashed #ccc; background-color: #f9f9f9; }")
         self.main_layout.addWidget(self.svg_label)
-
-        # Platzhalter-Text für leeren Zustand
-        self.placeholder_label = QLabel()
-        self.placeholder_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        self.placeholder_label.setWordWrap(True)
-        self.placeholder_label.setStyleSheet("QLabel { color: #666; padding: 20px; }")
-        self.main_layout.addWidget(self.placeholder_label)
 
         # Position des Ankerpunkts (UTMREF + Breite/Länge) mit Kopier-Button
         self.position_widget = QWidget()
@@ -182,13 +197,51 @@ class FeatureDock(QDockWidget):
         # Tracker für letzte Preview-Datei
         self.last_preview_path = None
 
-        # Initial verstecken und Platzhalter anzeigen
+        # Erst sichtbar, wenn Toolbox oder Objektplanung offen sind
         self.hide()
         self.show_placeholder()
 
-    def show_placeholder(self):
-        """Zeigt Platzhalter-Text mit Anweisungen an"""
-        # Lösche letzte Preview-Datei, falls vorhanden
+    @staticmethod
+    def _build_empty_page() -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        title = QLabel("Nichts ausgewählt")
+        font = title.font()
+        font.setBold(True)
+        title.setFont(font)
+        layout.addWidget(title)
+        hint = QLabel(
+            "• Klicken Sie auf ein taktisches Zeichen oder ein Objekt der Objektplanung<br>"
+            "• Shift+Klick oder Rahmen aufziehen wählt mehrere aus<br>"
+            "• Oder ziehen Sie ein Symbol aus der Symbolpalette auf die Karte"
+        )
+        hint.setTextFormat(Qt.TextFormat.RichText)
+        hint.setWordWrap(True)
+        hint.setStyleSheet(muted_style())
+        layout.addWidget(hint)
+        layout.addStretch()
+        return page
+
+    def set_objects_page(self, page: QWidget):
+        """Seite für Objekte der Objektplanung und Mehrfachauswahl (``planning.details.SelectionDetails``)."""
+        self.objects_page = page
+        self.stack.addWidget(page)
+
+    def show_objects(self):
+        if self.objects_page is None:
+            return
+        self._remove_preview_file()
+        self.feat = None
+        self.objects_page.refresh()
+        self.stack.setCurrentWidget(self.objects_page)
+
+    def showing_marker(self, fid=None) -> bool:
+        """Zeigt das Dock gerade die Einstellungen eines Zeichens (``fid``: genau dieses)?"""
+        if self.feat is None or self.stack.currentWidget() is not self._marker_page:
+            return False
+        return fid is None or self.feat.id() == fid
+
+    def _remove_preview_file(self):
         try:
             if getattr(self, "last_preview_path", None) and os.path.exists(self.last_preview_path):
                 os.remove(self.last_preview_path)
@@ -196,37 +249,12 @@ class FeatureDock(QDockWidget):
         except Exception as e:
             logger.debug("Konnte Preview-Datei %s nicht löschen: %s", getattr(self, "last_preview_path", None), e)
 
+    def show_placeholder(self):
+        """Nichts ausgewählt: Hinweise anzeigen."""
+        self._remove_preview_file()
+        self.feat = None
         self.svg_label.clear()
-        self.svg_label.setText("Kein Marker ausgewählt")
-        self.svg_label.setStyleSheet("QLabel { border: 2px dashed #ccc; background-color: #f9f9f9; color: #999; }")
-
-        placeholder_text = """<b>Marker auswählen</b><br><br>
-        • Klicken Sie auf einen Marker auf der Karte<br>
-        • Oder ziehen Sie ein Symbol aus der Symbolpalette auf die Karte"""
-
-        self.placeholder_label.setText(placeholder_text)
-        self.placeholder_label.show()
-
-        # Koordinaten und Steuerelemente verstecken
-        self.position_widget.hide()
-        self.size_label.hide()
-        self.size_spinbox.hide()
-        self.size_slider_label.hide()
-        self.size_slider.hide()
-        self.scale_checkbox.hide()
-        self.rotation_label.hide()
-        self.rotation_slider.hide()
-        self.rotation_value_label.hide()
-        self.origin_label.hide()
-        self.origin_widget.hide()
-        self.label_textfield_label.hide()
-        self.label_textfield.hide()
-        self.cb_enable_label.hide()
-        self.white_background_checkbox.hide()
-        self.btn_delete.hide()
-
-        # Dock-Titel ohne Koordinaten
-        self.setWindowTitle("Marker Details")
+        self.stack.setCurrentWidget(self._empty_page)
 
     def _show_position(self, point, source_crs):
         """Zeigt die aktuelle Marker-Position als UTMREF und Breite/Länge an."""
@@ -265,7 +293,7 @@ class FeatureDock(QDockWidget):
             feat.attribute("size") or "N/A",
         )
 
-        self.placeholder_label.hide()
+        self.stack.setCurrentWidget(self._marker_page)
 
         try:
             pixmap = None
@@ -301,33 +329,12 @@ class FeatureDock(QDockWidget):
                 len(feat.attribute("svg_content") or ""),
             )
             self.svg_label.setText("SVG konnte nicht geladen werden")
-            self.svg_label.setStyleSheet("QLabel { border: 2px dashed #ccc; background-color: #f9f9f9; color: #999; }")
+            muted = muted_color()
+            self.svg_label.setStyleSheet(f"QLabel {{ border: 2px dashed {muted}; color: {muted}; }}")
 
         # Koordinaten anzeigen
         if feat.geometry():
             self._show_position(feat.geometry().asPoint(), layer_manager.layer.crs())
-
-            # Dock-Titel ohne Koordinaten (nur "Marker Details")
-            self.setWindowTitle("Marker Details")
-
-        # Alle Steuerelemente anzeigen
-        self.position_widget.show()
-        self.size_label.show()
-        self.size_spinbox.show()
-        self.size_slider_label.show()
-        self.size_slider.show()
-        self.scale_checkbox.show()
-        self.rotation_label.show()
-        self.rotation_slider.show()
-        self.rotation_value_label.show()
-        self.origin_label.show()
-        self.origin_widget.show()
-        # Label-Funktion vorerst ausgeblendet (Code bleibt für später erhalten)
-        self.label_textfield_label.show()
-        self.label_textfield.show()
-        self.cb_enable_label.show()
-        self.white_background_checkbox.show()
-        self.btn_delete.show()
 
         # SpinBox und Schieberegler auf aktuelle Größe setzen
         self._set_size_widgets(feat.attribute("size"))
@@ -435,13 +442,8 @@ class FeatureDock(QDockWidget):
         # Synchronisation zwischen SpinBox und Schieberegler
         self.size_spinbox.valueChanged.connect(self.on_spinbox_changed)
         self.size_slider.valueChanged.connect(self.on_slider_changed)
-
-        # raise_() nur beim Aufdecken: sonst würde jedes Drag-Update (alle 300ms)
-        # ein angedocktes Nachbar-Panel wegdrängen.
-        was_hidden = not self.isVisible()
-        self.show()
-        if was_hidden:
-            self.raise_()
+        # Zeigen und nach vorn holen entscheidet das Plugin anhand der Auswahl
+        # (sonst würde jedes Drag-Update alle 300 ms den Tab nach vorn holen)
 
     def _create_temp_svg_for_preview(self, svg_content):
         """Erstellt eine temporäre SVG-Datei für die Vorschau"""
@@ -480,9 +482,12 @@ class FeatureDock(QDockWidget):
             return None
 
     def on_delete(self):
-        self.layer_manager.delete_feature(self.feat.id())
-        self.show_placeholder()
-        self.show()
+        fid = self.feat.id()
+        tool = getattr(self.layer_manager, "move_tool", None)
+        if tool is not None and tool.selected_fid == fid:
+            tool.clear_selection()
+        self.layer_manager.delete_feature(fid)
+        self.layer_manager.show_marker_placeholder()
 
     def on_copy_coords(self):
         """Kopiert die UTMREF-Koordinate in die Zwischenablage"""
@@ -584,24 +589,16 @@ class FeatureDock(QDockWidget):
 
     def hideEvent(self, event):
         # Verschieben-Modus deaktivieren wenn Dock geschlossen wird
-        if hasattr(self, "layer_manager") and hasattr(self.layer_manager, "move_tool"):
-            self.layer_manager.move_tool.set_move_mode(False)
+        # Die Details schließen auch mit der Objektplanung – dann ohne MoveTool
+        move_tool = getattr(getattr(self, "layer_manager", None), "move_tool", None)
+        if move_tool is not None:
+            move_tool.set_move_mode(False)
             # Cursor zurücksetzen
             if hasattr(self.layer_manager, "canvas"):
                 self.layer_manager.canvas.setCursor(Qt.CursorShape.ArrowCursor)
 
-        # Zeige Platzhalter wenn Dock versteckt wird
+        # Zeige Platzhalter wenn Dock versteckt wird (löscht auch die Preview-Datei)
         self.show_placeholder()
-
-        # Versuche verbleibende Preview-Datei zu löschen
-        try:
-            if getattr(self, "last_preview_path", None) and os.path.exists(self.last_preview_path):
-                os.remove(self.last_preview_path)
-                self.last_preview_path = None
-        except Exception as e:
-            logger.debug(
-                "Konnte Preview-Datei beim Verstecken nicht löschen %s: %s", getattr(self, "last_preview_path", None), e
-            )
 
         super().hideEvent(event)
 

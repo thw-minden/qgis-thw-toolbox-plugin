@@ -52,6 +52,7 @@ from ..util.drone_photo import (
     read_photo_metadata,
 )
 from .symbol_picker import SymbolPickerDialog, symbol_catalog
+from .theme import muted_color, muted_style
 
 logger = get_logger(__name__)
 
@@ -362,7 +363,7 @@ class PhotoTargetDialog(QDialog):
         left_layout.addWidget(self.view)
         view_bar = QHBoxLayout()
         view_hint = QLabel("Klicken: Position des Zeichens im Foto · Ziehen: verschieben · Mausrad: zoomen")
-        view_hint.setStyleSheet("QLabel { color: #666; }")
+        view_hint.setStyleSheet(muted_style())
         view_bar.addWidget(view_hint, 1)
         self.center_button = self._button("Bildmitte", self._reset_pixel)
         self.center_button.setToolTip("Zielpunkt auf die Bildmitte setzen (dorthin misst der Laser)")
@@ -378,7 +379,7 @@ class PhotoTargetDialog(QDialog):
         file_row = QHBoxLayout()
         file_row.addWidget(self._button("Foto öffnen …", self._choose_photo))
         self.file_label = QLabel("Kein Foto geladen")
-        self.file_label.setStyleSheet("QLabel { color: #666; }")
+        self.file_label.setStyleSheet(muted_style())
         file_row.addWidget(self.file_label, 1)
         panel_layout.addLayout(file_row)
 
@@ -436,7 +437,7 @@ class PhotoTargetDialog(QDialog):
 
         self.terrain_hint = QLabel("")
         self.terrain_hint.setWordWrap(True)
-        self.terrain_hint.setStyleSheet("QLabel { color: #666; }")
+        self.terrain_hint.setStyleSheet(muted_style())
         terrain_layout.addWidget(self.terrain_hint)
         panel_layout.addWidget(terrain_box)
 
@@ -869,7 +870,7 @@ class PhotoTargetDialog(QDialog):
         elif has_target:
             self._set_status(
                 "Ergebnis auf der Karte prüfen: Die Genauigkeit hängt vor allem von Neigung, Kompass und Flughöhe ab.",
-                "#666",
+                muted_color(),
             )
         else:
             self._set_status("")
