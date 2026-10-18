@@ -219,8 +219,15 @@ def list_templates(plugin_dir: str) -> list[TemplateEntry]:
         entries.append(TemplateEntry(GROUP_OWN, os.path.splitext(os.path.basename(path))[0], path))
 
     def sort_key(entry: TemplateEntry):
-        paper = re.match(r"A(\d)\b", entry.name)
-        return (_GROUP_ORDER.index(entry.group), -int(paper.group(1)) if paper else 1, entry.name.casefold())
+        # Varianten ("Modern A4 quer") nach den Standardvorlagen, darin jeweils A4 zuerst
+        paper = re.search(r"\bA(\d)\b", entry.name)
+        variant = entry.name[: paper.start()] if paper else entry.name
+        return (
+            _GROUP_ORDER.index(entry.group),
+            variant.casefold(),
+            -int(paper.group(1)) if paper else 1,
+            entry.name.casefold(),
+        )
 
     return sorted(entries, key=sort_key)
 
