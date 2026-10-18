@@ -17,9 +17,11 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QToolButton,
     QVBoxLayout,
 )
 
@@ -43,6 +45,7 @@ from .tools import style_library
 from .tools.canvas_drop_filter import CanvasDropFilter
 from .tools.identify_tool import IdentifyTool
 from .tools.move_tool import MoveTool
+from .tools.own_position import OwnPositionLocator
 from .ui.config_dialog import ConfigDialog
 from .ui.feature_dock import FeatureDock
 from .ui.marker_table_dialog import MarkerTableDialog
@@ -81,6 +84,8 @@ class THWToolboxPlugin:
         self.dock = None
         self.marker_table = None
         self.photo_target = None
+        self.own_position = None
+        self._own_position_menu = None
         # True während QGIS das Projekt leert (Projekt schließen / anderes laden).
         # In dem Fall sollen wir die Layer-Entfernung still hinnehmen statt den
         # Nutzer mit der Deaktivierungs-Warnung zu konfrontieren.
@@ -204,6 +209,24 @@ class THWToolboxPlugin:
         self.iface.addToolBarIcon(self.search_action)
         self.iface.addPluginToMenu("THW Toolbox", self.search_action)
 
+        # Eigener Standort: GPS-Empfänger aus QGIS oder Standortdienst des Systems
+        position_icon = QIcon(os.path.join(self.plugin_dir, "icons", "own_position.svg"))
+        self.own_position_action = QAction(position_icon, "Auf eigenen Standort zoomen", self.iface.mainWindow())
+        self.own_position_action.triggered.connect(self._locate_own_position)
+        self.iface.addToolBarIcon(self.own_position_action)
+        self.iface.addPluginToMenu("THW Toolbox", self.own_position_action)
+        self.hide_own_position_action = QAction("Eigenen Standort ausblenden", self.iface.mainWindow())
+        self.hide_own_position_action.setEnabled(False)
+        self.hide_own_position_action.triggered.connect(self._hide_own_position)
+        self.iface.addPluginToMenu("THW Toolbox", self.hide_own_position_action)
+        # Ausblenden auch über den Pfeil am Toolbar-Button
+        button = self.iface.pluginToolBar().widgetForAction(self.own_position_action)
+        if isinstance(button, QToolButton):
+            self._own_position_menu = QMenu(self.iface.mainWindow())
+            self._own_position_menu.addAction(self.hide_own_position_action)
+            button.setMenu(self._own_position_menu)
+            button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+
         # Marker-Tabelle: mehrere Zeichen per Koordinate anlegen/bearbeiten
         table_icon = QIcon(os.path.join(self.plugin_dir, "icons", "marker_table.svg"))
         self.marker_table_action = QAction(table_icon, "Marker-Tabelle", self.iface.mainWindow())
@@ -304,6 +327,20 @@ class THWToolboxPlugin:
             self.marker_table.close()
             self.marker_table.deleteLater()
             self.marker_table = None
+        if self.own_position:
+            self.own_position.dispose()
+            self.own_position.deleteLater()
+            self.own_position = None
+        if getattr(self, "own_position_action", None):
+            self.iface.removeToolBarIcon(self.own_position_action)
+            self.iface.removePluginMenu("THW Toolbox", self.own_position_action)
+            self.own_position_action = None
+        if getattr(self, "hide_own_position_action", None):
+            self.iface.removePluginMenu("THW Toolbox", self.hide_own_position_action)
+            self.hide_own_position_action = None
+        if self._own_position_menu:
+            self._own_position_menu.deleteLater()
+            self._own_position_menu = None
         if getattr(self, "photo_target_action", None):
             self.iface.removeToolBarIcon(self.photo_target_action)
             self.iface.removePluginMenu("THW Toolbox", self.photo_target_action)
@@ -1003,6 +1040,20 @@ class THWToolboxPlugin:
 
     def _open_search_dialog(self):
         NominatimSearchDialog(self.canvas, self.iface.mainWindow()).exec()
+
+    def _locate_own_position(self):
+        if self.own_position is None:
+            self.own_position = OwnPositionLocator(self.iface, self.iface.mainWindow())
+            self.own_position.shown_changed.connect(self._on_own_position_shown)
+        self.own_position.locate()
+
+    def _hide_own_position(self):
+        if self.own_position:
+            self.own_position.hide()
+
+    def _on_own_position_shown(self, shown: bool):
+        if getattr(self, "hide_own_position_action", None):
+            self.hide_own_position_action.setEnabled(shown)
 
     def _add_designer_action(self, designer):
         self._designer_actions.append(add_designer_action(designer))

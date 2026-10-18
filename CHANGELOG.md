@@ -39,6 +39,7 @@
   - Bilanz (Zelte/Zeltfläche, Fahrzeuge, Leitungslänge, Verteiler, Stromerzeuger, Beleuchtung) inkl. **Last je Stromerzeuger** über verbundene Leitungen und Hinweis auf nicht angeschlossene Leuchten
   - Speicherung in `<projekt>_objektplanung.gpkg` neben der Projektdatei; Katalog mit Maßen und Leistungen in `data/objektplanung.json`
 - **Marker-Tabelle: Import aus CSV/Excel** (`.csv`, `.tsv`, `.xlsx`, `.ods`) mit Spalten-Zuordnung für Position (UTMREF, „Breite Länge“ oder getrennte Spalten), Beschriftung und Zeichen, Standard-Zeichen und Vorschau; unvollständige Zeilen bleiben als Entwurf in der Tabelle; „Vorlage speichern …“ legt eine Beispieltabelle zum Ausfüllen an
+- **Auf eigenen Standort zoomen** (Toolbar-Button neben der Adresssuche): zeigt die eigene Position als blauen Punkt mit Genauigkeitskreis und zoomt dorthin; der Punkt läuft danach mit. Quelle ist ein in QGIS verbundener GPS-Empfänger (Ansicht → Bedienfelder → GPS-Informationen), sonst der Standortdienst des Systems (unter Windows WLAN-/IP-Ortung bzw. eingebautes GPS). Die Meldung nennt die Position in UTMREF samt Genauigkeit (mit „Kopieren“); bei verweigertem Zugriff führt „Einstellungen öffnen“ zu den Windows-Standorteinstellungen. Ausblenden über den Pfeil am Button oder das Plugin-Menü
 
 ### Verbessert
 - **Zeichen-Auswahl** (Icon-Picker): Namen werden vollständig und mehrzeilig angezeigt statt abgekürzt, das Raster füllt die ganze Breite, das gewählte Zeichen steht mit Kategorie unter dem Raster, Pfeiltasten im Suchfeld bewegen die Auswahl
