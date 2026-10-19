@@ -1,5 +1,4 @@
 import glob
-import hashlib
 import os
 import shutil
 import time
@@ -10,17 +9,16 @@ logger = get_logger(__name__)
 
 # Alte GeoPackage-Snapshots im tmp/ älter als 24h löschen
 _GPKG_AGE_THRESHOLD_S = 24 * 60 * 60
-# SVG-/Preview-Cache-Dateien älter als 1h löschen
+# Reste des SVG-/Preview-Caches älter als 1h löschen. Frühere Versionen legten dort
+# Zeichen und Vorschauen als Dateien ab; heute stecken sie im Symbol bzw. im Speicher.
 _CACHE_AGE_THRESHOLD_S = 60 * 60
-# Wie viele SVG-Cache-Dateien wir maximal behalten (LRU-artig per ctime)
-_SVG_CACHE_KEEP = 50
 
 
 def cleanup_temp_files(plugin_dir: str) -> None:
     """Räume Plugin-Temp-Verzeichnisse auf (idempotent, fail-safe pro Pfad).
 
-    Wird beim Plugin-Activate aufgerufen, damit alte Snapshots und
-    SVG-Cache-Dateien nicht ewig im Plugin-Verzeichnis liegen bleiben.
+    Wird beim Plugin-Activate und -Unload aufgerufen, damit alte Snapshots und
+    Cache-Reste früherer Versionen nicht ewig im Plugin-Verzeichnis liegen bleiben.
     Einzelne Fehler (z.B. Datei noch von QGIS gelockt) werden geschluckt
     und als DEBUG-Print ausgegeben — der Cleanup ist Best-Effort.
     """
@@ -46,7 +44,7 @@ def cleanup_temp_files(plugin_dir: str) -> None:
             except Exception as e:
                 logger.debug("Konnte temporäre GeoPackage-Datei nicht verarbeiten %s: %s", temp_file, e)
 
-        # 2) SVG-/Preview-Cache-Dateien
+        # 2) Reste des SVG-/Preview-Caches früherer Versionen
         cache_dirs = [
             os.path.join(plugin_dir, "temp_files", "svg_cache"),
             os.path.join(plugin_dir, "temp_files", "preview_cache"),
@@ -95,43 +93,3 @@ def cleanup_temp_files(plugin_dir: str) -> None:
 
     except Exception:
         logger.exception("Fehler beim Aufräumen temporärer Dateien")
-
-
-def create_temp_svg_from_content(plugin_dir: str, svg_content: str, feature_id) -> str | None:
-    """Materialisiere einen SVG-Blob als Datei im svg_cache und gib den Pfad zurück.
-
-    Wird vom Renderer benutzt, wenn ein Feature seinen SVG-Inhalt inline
-    gespeichert hat (z.B. nach Portable-Import ohne Original-svgs/-Ordner).
-    QgsSvgMarkerSymbolLayer braucht einen Datei-Pfad, also schreiben wir
-    den Inhalt in einen Cache und geben den Pfad zurück.
-
-    Behält maximal 50 Dateien (älteste per ctime werden gelöscht).
-    Bei Fehler: gibt None zurück; Caller-Code hat einen Fallback auf den
-    gespeicherten svg_path.
-    """
-    cache_dir = os.path.join(plugin_dir, "temp_files", "svg_cache")
-    os.makedirs(cache_dir, exist_ok=True)
-
-    # Inhalts-Hash im Namen: QGIS cached SVGs pro Pfad — nach einem Zeichen-Wechsel
-    # würde sonst noch eine Weile das alte Bild gezeichnet.
-    digest = hashlib.md5(svg_content.encode("utf-8")).hexdigest()[:10]
-    temp_path = os.path.join(cache_dir, f"feature_{feature_id}_{digest}.svg")
-
-    try:
-        with open(temp_path, "w", encoding="utf-8") as f:
-            f.write(svg_content)
-
-        # LRU-Cleanup
-        cached = [name for name in os.listdir(cache_dir) if name.startswith("feature_")]
-        if len(cached) > _SVG_CACHE_KEEP:
-            cached.sort(key=lambda x: os.path.getctime(os.path.join(cache_dir, x)))
-            for old in cached[:-_SVG_CACHE_KEEP]:
-                try:
-                    os.remove(os.path.join(cache_dir, old))
-                except Exception as e:
-                    logger.debug("Konnte alte Cache-Datei %s nicht löschen: %s", old, e)
-
-        return temp_path
-    except Exception as e:
-        logger.warning("Fehler beim Erstellen der temporären SVG-Datei (feature %s): %s", feature_id, e)
-        return None

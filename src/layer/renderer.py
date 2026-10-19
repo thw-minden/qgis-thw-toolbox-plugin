@@ -1,4 +1,6 @@
+import base64
 import os
+from functools import lru_cache
 
 from qgis.core import (
     QgsCategorizedSymbolRenderer,
@@ -15,8 +17,14 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QPointF, Qt
 from qgis.PyQt.QtGui import QColor
 
-from ..util.temp_files import create_temp_svg_from_content
+from ..logging_utils import get_logger
+from ..util.svg_minify import minify_svg
 from .background import DEFAULT_SCALE, Background, background_of
+
+logger = get_logger(__name__)
+
+# Pfad-Präfix, mit dem QGIS ein SVG direkt aus dem Symbol liest (QgsSvgCache), statt aus einer Datei
+SVG_BASE64_PREFIX = "base64:"
 
 # 0=left/top, 1=center, 2=right/bottom — matches OriginPointWidget convention
 _H_ANCHOR = {
@@ -84,8 +92,10 @@ def apply_renderer(layer: QgsVectorLayer, plugin_dir: str) -> None:
     that combines an optional background shape (layer.background) + SVG
     marker, sized and rotated per feature attributes.
 
-    SVG resolution priority: inline `svg_content` → absolute `svg_path` →
-    relative path joined with `plugin_dir`.
+    The SVG travels inside the symbol as a ``base64:`` path (see
+    `embedded_svg_path`), so the saved project renders without this plugin
+    and without temp files. Source priority: inline `svg_content` → catalog
+    file `svgs/<svg_path>` → the stored path as a last resort.
 
     Falls back to a default marker if the layer has no features.
     """
@@ -167,6 +177,54 @@ def svg_symbol_layer(symbol: QgsMarkerSymbol) -> QgsSvgMarkerSymbolLayer | None:
     return None
 
 
+def embedded_svg_path(svg_text: str) -> str:
+    """``base64:``-Pfad für `QgsSvgMarkerSymbolLayer`: das (minimierte) SVG steckt im Symbol selbst.
+
+    Frühere Versionen schrieben `svg_content` in Temp-Dateien, deren Zahl gedeckelt war;
+    ab dem 51. Zeichen zeigten gelöschte Dateien das Fragezeichen von QGIS.
+    """
+    return SVG_BASE64_PREFIX + base64.b64encode(minify_svg(svg_text).encode("utf-8")).decode("ascii")
+
+
+def is_embedded_svg_path(path: str) -> bool:
+    return bool(path) and path.startswith(SVG_BASE64_PREFIX)
+
+
+def has_file_svg_paths(layer) -> bool:
+    """Zeigt eine Kategorie des Layers noch auf eine SVG-Datei statt auf eingebettete Daten?
+
+    Projekte älterer Versionen referenzieren Temp-Dateien des Plugins oder den Katalog.
+    """
+    renderer = layer.renderer() if isinstance(layer, QgsVectorLayer) else None
+    if not isinstance(renderer, QgsCategorizedSymbolRenderer):
+        return False
+    for category in renderer.categories():
+        svg = svg_symbol_layer(category.symbol())
+        if svg is not None and not is_embedded_svg_path(svg.path()):
+            return True
+    return False
+
+
+def catalog_svg(plugin_dir: str, svg_path) -> str:
+    """Minimierter Inhalt der Katalogdatei zu `svg_path` (relativ zum Plugin-Ordner oder absolut); "" wenn sie fehlt."""
+    if not svg_path:
+        return ""
+    path = str(svg_path)
+    if not os.path.isabs(path):
+        path = os.path.join(plugin_dir, path)
+    return _read_catalog_svg(os.path.normpath(path))
+
+
+@lru_cache(maxsize=1024)
+def _read_catalog_svg(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return minify_svg(handle.read())
+    except (OSError, ValueError) as e:
+        logger.debug("Katalog-SVG nicht lesbar %s: %s", path, e)
+        return ""
+
+
 def set_symbol_size_and_rotation(symbol: QgsMarkerSymbol, size: float, rotation: float) -> None:
     """Apply `size`/`rotation` the same way `_build_feature_symbol` does.
 
@@ -207,18 +265,18 @@ def _origin_or_default(feat, field_name: str, present: bool) -> int:
     return 1 if value is None else value
 
 
-def _resolve_svg_layer(
-    plugin_dir: str, svg_path: str, svg_content: str, feat_id, size: float
-) -> QgsSvgMarkerSymbolLayer:
-    """Materialize an SVG marker layer, preferring inline content over file paths."""
-    if svg_content and svg_content.strip():
-        temp_svg = create_temp_svg_from_content(plugin_dir, svg_content, feat_id)
-        if temp_svg:
-            return QgsSvgMarkerSymbolLayer(temp_svg, size, 0)
-        # Fallback to stored path
-        return QgsSvgMarkerSymbolLayer(svg_path, size, 0)
+def _resolve_svg_layer(plugin_dir: str, svg_path: str, svg_content: str, size: float) -> QgsSvgMarkerSymbolLayer:
+    """SVG-Markerebene eines Zeichens mit dem SVG als ``base64:``-Pfad im Symbol.
 
-    if not os.path.isabs(svg_path):
+    Quelle ist `svg_content`, sonst die Katalogdatei zu `svg_path`; nur wenn beides
+    fehlt, bleibt der gespeicherte Pfad (QGIS zeichnet dann sein Fragezeichen).
+    """
+    svg_text = svg_content if svg_content and svg_content.strip() else catalog_svg(plugin_dir, svg_path)
+    if svg_text:
+        return QgsSvgMarkerSymbolLayer(embedded_svg_path(svg_text), size, 0)
+
+    svg_path = str(svg_path or "")
+    if svg_path and not os.path.isabs(svg_path):
         absolute_path = os.path.join(plugin_dir, svg_path)
         if os.path.exists(absolute_path):
             return QgsSvgMarkerSymbolLayer(absolute_path, size, 0)
@@ -246,7 +304,7 @@ def _build_feature_symbol(
         bg_layer = _background_layer(background, size, size_unit(scale_with_map))
         sym.changeSymbolLayer(0, bg_layer)
 
-    svg_layer = _resolve_svg_layer(plugin_dir, svg_path, svg_content, feat.id(), size)
+    svg_layer = _resolve_svg_layer(plugin_dir, svg_path, svg_content, size)
     svg_layer.setSizeUnit(size_unit(scale_with_map))
     svg_layer.setAngle(rotation)
     limits = scale_limits(feat)

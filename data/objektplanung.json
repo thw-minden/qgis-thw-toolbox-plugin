@@ -29,7 +29,8 @@
     {"id": "anh_nea", "name": "Anhänger NEA 50 kVA", "laenge": 4.5, "breite": 2.1, "zeichen": "THW_Fahrzeuge/Anhänger_NEA_50kVA_LiMa.svg"},
     {"id": "anh_lima", "name": "Anhänger Lichtmast", "laenge": 4.0, "breite": 1.8, "zeichen": "THW_Fahrzeuge/Anhänger_Lichtmast.svg"},
     {"id": "anh_plane", "name": "Anhänger Plane 2 t", "laenge": 5.0, "breite": 2.1, "zeichen": "THW_Fahrzeuge/Anhänger_2t.svg"},
-    {"id": "anh_tieflader", "name": "Anhänger Tieflader 12 t", "laenge": 9.5, "breite": 2.55, "zeichen": "THW_Fahrzeuge/Anhänger_Tieflader_18t.svg"}
+    {"id": "anh_tieflader", "name": "Anhänger Tieflader 12 t", "laenge": 9.5, "breite": 2.55, "zeichen": "THW_Fahrzeuge/Anhänger_Tieflader_18t.svg"},
+    {"id": "anh_wb", "name": "Anhänger Wechselbrücke 15 t", "laenge": 10.0, "breite": 2.55, "zeichen": "THW_Fahrzeuge/Anhänger_Wechselbrücke_15t.svg"}
   ],
   "leitungsroller": [
     {"id": "lr25", "name": "Leitungsroller 25 m", "laenge": 25.0, "farbe": "#ef6c00"},

@@ -185,13 +185,14 @@ class OwnPositionMarker(QgsMapCanvasItem):
 class OwnPositionLocator(QObject):
     """Ermittelt den eigenen Standort, zoomt dorthin und lässt den Punkt danach mitlaufen."""
 
-    # True, solange der Standort auf der Karte angezeigt wird
-    shown_changed = pyqtSignal(bool)
+    # True, solange der Standort gesucht oder auf der Karte angezeigt wird (Button gedrückt)
+    active_changed = pyqtSignal(bool)
 
     def __init__(self, iface, parent=None):
         super().__init__(parent)
         self._iface = iface
         self._canvas = iface.mapCanvas()
+        self._active = False
         self._marker: OwnPositionMarker | None = None
         self._source = None  # QGeoPositionInfoSource, erst beim ersten Klick angelegt
         self._tracking = False
@@ -232,12 +233,14 @@ class OwnPositionLocator(QObject):
                 Qgis.MessageLevel.Warning,
                 8,
             )
+            self._update_active()
             return
         self._push("Standort wird ermittelt …", Qgis.MessageLevel.Info)
         self._timeout.start()
+        self._update_active()
 
     def hide(self):
-        """Punkt entfernen und keine weiteren Positionen mehr abfragen."""
+        """Punkt entfernen und keine weiteren Positionen mehr abfragen (bricht auch eine laufende Suche ab)."""
         self._zoom_pending = False
         self._timeout.stop()
         self._clear_message()
@@ -247,7 +250,17 @@ class OwnPositionLocator(QObject):
         if self._marker is not None:
             self._marker.dispose()
             self._marker = None
-            self.shown_changed.emit(False)
+        self._update_active()
+
+    @property
+    def active(self) -> bool:
+        """Wird der Standort gerade gesucht oder angezeigt?"""
+        return self._marker is not None or self._zoom_pending
+
+    def _update_active(self):
+        if self.active != self._active:
+            self._active = self.active
+            self.active_changed.emit(self._active)
 
     def dispose(self):
         self.hide()
@@ -272,7 +285,6 @@ class OwnPositionLocator(QObject):
 
         if self._marker is None:
             self._marker = OwnPositionMarker(self._canvas)
-            self.shown_changed.emit(True)
         self._marker.set_position(fix.lonlat, fix.accuracy_m)
 
         if self._zoom_pending:
@@ -281,6 +293,7 @@ class OwnPositionLocator(QObject):
             if self._zoom_to(fix):
                 self._push_found(fix)
         self._start_tracking()
+        self._update_active()
 
     def _zoom_to(self, fix: _Fix) -> bool:
         radius = max(fix.accuracy_m or 0, _MIN_VIEW_RADIUS_M) * _VIEW_MARGIN
@@ -302,6 +315,7 @@ class OwnPositionLocator(QObject):
             return
         self._zoom_pending = False
         self._timeout.stop()
+        self._update_active()
 
         if self._gps_alive():
             self._push(

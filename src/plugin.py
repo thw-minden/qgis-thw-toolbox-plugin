@@ -18,11 +18,9 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QMenu,
     QMessageBox,
     QProgressDialog,
     QPushButton,
-    QToolButton,
     QVBoxLayout,
 )
 
@@ -30,11 +28,12 @@ from .export.dji_kml_export import DjiKmlExporter
 from .export.dji_mbtiles_export import DjiMbtilesExporter
 from .export.dji_mbtiles_export import _ZoomDialog as _MbtilesZoomDialog
 from .export.portable_export import PortableExporter
+from .layer.canvas_fit import zoom_if_tiny
 from .layer.feature_ops import FeatureOperations
 from .layer.labeling import apply_labeling
-from .layer.layer_manager import LayerManager
-from .layer.renderer import apply_renderer
-from .layout.legend import add_legend_action
+from .layer.layer_manager import LAYER_DISPLAY_NAME, LayerManager
+from .layer.renderer import apply_renderer, has_file_svg_paths
+from .layout.legend import add_legend_action, refresh_legends
 from .layout.mgrs_grid import build_mgrs_grid_layer
 from .layout.tile_export import add_designer_action
 from .logging_utils import get_logger
@@ -45,6 +44,7 @@ from .settings import THWToolboxSettings
 from .tools import style_library
 from .tools.canvas_drop_filter import CanvasDropFilter
 from .tools.identify_tool import IdentifyTool
+from .tools.layer_functions import move_dienststellen_next_to_project
 from .tools.move_tool import MoveTool
 from .tools.own_position import OwnPositionLocator
 from .ui.config_dialog import ConfigDialog
@@ -86,7 +86,6 @@ class THWToolboxPlugin:
         self.marker_table = None
         self.photo_target = None
         self.own_position = None
-        self._own_position_menu = None
         # True während QGIS das Projekt leert (Projekt schließen / anderes laden).
         # In dem Fall sollen wir die Layer-Entfernung still hinnehmen statt den
         # Nutzer mit der Deaktivierungs-Warnung zu konfrontieren.
@@ -97,6 +96,8 @@ class THWToolboxPlugin:
         self._details_timer = None
         # Tab, der vor dem automatischen Aufdecken der Details vorn lag – kommt beim Abwählen zurück
         self._details_front_before = None
+        # Zuletzt vorn liegender Tab von Symbolpalette bzw. Objektplanung – Ersatz, wenn nichts gemerkt ist
+        self._last_work_dock = None
         # Docks, die schon einmal als Tab eingereiht wurden – danach bleiben sie, wo der Nutzer sie hinzieht
         self._tabified_docks = set()
 
@@ -212,21 +213,15 @@ class THWToolboxPlugin:
 
         # Eigener Standort: GPS-Empfänger aus QGIS oder Standortdienst des Systems
         position_icon = QIcon(os.path.join(self.plugin_dir, "icons", "own_position.svg"))
-        self.own_position_action = QAction(position_icon, "Auf eigenen Standort zoomen", self.iface.mainWindow())
-        self.own_position_action.triggered.connect(self._locate_own_position)
+        self.own_position_action = QAction(position_icon, "Eigenen Standort anzeigen", self.iface.mainWindow())
+        # Umschalter: erster Klick zeigt den Standort und zoomt hin, der nächste entfernt ihn wieder
+        self.own_position_action.setCheckable(True)
+        self.own_position_action.setToolTip(
+            "Auf den eigenen Standort zoomen – erneut klicken entfernt den Standort wieder"
+        )
+        self.own_position_action.triggered.connect(self._toggle_own_position)
         self.iface.addToolBarIcon(self.own_position_action)
         self.iface.addPluginToMenu("THW Toolbox", self.own_position_action)
-        self.hide_own_position_action = QAction("Eigenen Standort ausblenden", self.iface.mainWindow())
-        self.hide_own_position_action.setEnabled(False)
-        self.hide_own_position_action.triggered.connect(self._hide_own_position)
-        self.iface.addPluginToMenu("THW Toolbox", self.hide_own_position_action)
-        # Ausblenden auch über den Pfeil am Toolbar-Button
-        button = self.iface.pluginToolBar().widgetForAction(self.own_position_action)
-        if isinstance(button, QToolButton):
-            self._own_position_menu = QMenu(self.iface.mainWindow())
-            self._own_position_menu.addAction(self.hide_own_position_action)
-            button.setMenu(self._own_position_menu)
-            button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
 
         # Marker-Tabelle: mehrere Zeichen per Koordinate anlegen/bearbeiten
         table_icon = QIcon(os.path.join(self.plugin_dir, "icons", "marker_table.svg"))
@@ -258,6 +253,8 @@ class THWToolboxPlugin:
 
         # Verbinde Projekt-Events für automatisches Speichern
         QgsProject.instance().writeProject.connect(self._on_project_save)
+        # Projekte älterer Versionen beim Öffnen auf eingebettete Zeichen umstellen
+        QgsProject.instance().readProject.connect(self._on_project_read)
         # Reagiere auf Layer-Entfernung, damit wir das Plugin sauber deaktivieren,
         # wenn der Marker-Layer aus dem Projekt gelöscht wird.
         QgsProject.instance().layersWillBeRemoved.connect(self._on_layers_will_be_removed)
@@ -290,6 +287,7 @@ class THWToolboxPlugin:
         if self._details_timer is not None:
             self._details_timer.stop()
         if self.details:
+            self.details.dispose()
             self.iface.removeDockWidget(self.details)
             self.details.deleteLater()
             self.details = None
@@ -336,12 +334,6 @@ class THWToolboxPlugin:
             self.iface.removeToolBarIcon(self.own_position_action)
             self.iface.removePluginMenu("THW Toolbox", self.own_position_action)
             self.own_position_action = None
-        if getattr(self, "hide_own_position_action", None):
-            self.iface.removePluginMenu("THW Toolbox", self.hide_own_position_action)
-            self.hide_own_position_action = None
-        if self._own_position_menu:
-            self._own_position_menu.deleteLater()
-            self._own_position_menu = None
         if getattr(self, "photo_target_action", None):
             self.iface.removeToolBarIcon(self.photo_target_action)
             self.iface.removePluginMenu("THW Toolbox", self.photo_target_action)
@@ -381,6 +373,10 @@ class THWToolboxPlugin:
 
         # Trenne Projekt-Events
         QgsProject.instance().writeProject.disconnect(self._on_project_save)
+        try:
+            QgsProject.instance().readProject.disconnect(self._on_project_read)
+        except (TypeError, RuntimeError):
+            pass
         try:
             QgsProject.instance().layersWillBeRemoved.disconnect(self._on_layers_will_be_removed)
         except (TypeError, RuntimeError):
@@ -630,8 +626,40 @@ class THWToolboxPlugin:
         if self.move_tool:
             self.move_tool.refresh_selection()
 
-    def _on_project_save(self):
-        """Speichert Settings und delegiert das Verschieben des Layers an den LayerManager."""
+    def _on_project_read(self, _doc=None):
+        """Projekt geöffnet: Zeichen älterer Projekte in das Symbol einbetten (einmalige Migration).
+
+        Frühere Versionen ließen die Symbole auf Temp-Dateien des Plugins zeigen (ab dem 51.
+        Zeichen gelöscht, QGIS zeigte sein Fragezeichen). Zeigt noch eine Kategorie auf eine
+        Datei, werden Renderer und Beschriftung neu aufgebaut, die Legenden der Layouts
+        aufgefrischt und das Projekt als geändert markiert; nach dem Speichern ist es
+        eigenständig. Läuft auch, wenn die Toolbox gerade nicht aktiv ist.
+        """
+        try:
+            project = QgsProject.instance()
+            layers = [layer for layer in project.mapLayersByName(LAYER_DISPLAY_NAME) if has_file_svg_paths(layer)]
+            if not layers:
+                return
+            self.settings.load_settings(project)
+            for layer in layers:
+                logger.info("THW Toolbox: Zeichen von „%s“ werden in das Projekt eingebettet", layer.name())
+                apply_renderer(layer, self.plugin_dir)
+                apply_labeling(layer, self.settings)
+            for layout in project.layoutManager().printLayouts():
+                refresh_legends(layout)
+            # QGIS setzt das Projekt direkt nach dem Lesen auf „unverändert“ zurück, also erst danach markieren
+            QTimer.singleShot(0, lambda: project.setDirty(True))
+        except Exception:
+            logger.exception("Einbetten der Zeichen beim Projektöffnen fehlgeschlagen")
+
+    def _on_project_save(self, doc=None):
+        """Projekt wird geschrieben: GeoPackages neben die Projektdatei ziehen, Settings speichern.
+
+        ``doc`` ist das Projekt-XML aus dem Signal ``writeProject``. Die Dienststellen ziehen auch bei
+        inaktiver Toolbox um – ihr Layer liegt unabhängig von ihr im Projekt. Das Marker-GeoPackage
+        verschiebt der LayerManager, den es nur bei aktiver Toolbox gibt.
+        """
+        move_dienststellen_next_to_project(doc)
         if not self.layer or not self.layer_manager:
             return
         self.settings.save_settings(QgsProject.instance())
@@ -665,6 +693,8 @@ class THWToolboxPlugin:
 
         ``select=False`` (Shift+Klick im Werkzeug „Zeichen setzen“): nur setzen, das
         aktive Kartenwerkzeug bleibt, damit gleich das nächste Zeichen folgen kann.
+        Das Zeichen wird höchstens halb so breit wie die Karte; ist es kaum zu sehen,
+        zoomt die Karte darauf (nicht bei ``select=False``, da soll die Karte stehen bleiben).
         """
         if not self._check_map_available():
             self._show_error_alert(
@@ -681,9 +711,10 @@ class THWToolboxPlugin:
             return None
 
         # Drop-Punkt liegt im Karten-CRS, der Layer kann ein anderes haben
+        map_point = point
         if self.layer:
             point = self.canvas.mapSettings().mapToLayerCoordinates(self.layer, point)
-        new_feature = self.feature_ops.place_feature(svg_path, point)
+        new_feature = self.feature_ops.place_feature(svg_path, point, fit_canvas=True)
         if not new_feature:
             return None
 
@@ -691,6 +722,9 @@ class THWToolboxPlugin:
             self.svg_dock_widget.refresh_marker_list()
         if not select:
             return new_feature
+
+        size = float(new_feature.attribute("size") or 0)
+        zoom_if_tiny(self.canvas, size, bool(new_feature.attribute("scale_with_map")), map_point)
 
         # Nach dem Ablegen soll das Zeichen direkt greifbar sein, auch wenn
         # zwischendurch ein anderes Kartenwerkzeug (z.B. Zelt platzieren) aktiv war.
@@ -947,8 +981,10 @@ class THWToolboxPlugin:
                     return
                 details.show_feature(feat, self)
         else:
+            # Gerade abgewählt (die Details zeigten noch etwas): Symbolpalette bzw. Objektplanung kommt zurück
+            deselected = not details.showing_placeholder()
             details.show_placeholder()
-            self._restore_front_dock()
+            self._restore_front_dock(fallback=deselected)
             return
         if not quiet:
             self._reveal_details()
@@ -963,17 +999,31 @@ class THWToolboxPlugin:
             self._details_front_before = next((dock for dock in tabs if _is_front_tab(dock)), None)
         details.raise_()
 
-    def _restore_front_dock(self):
-        """Nach dem Abwählen den Tab zurückholen, den die Details verdeckt haben."""
+    def _restore_front_dock(self, fallback: bool = False):
+        """Nach dem Abwählen den Tab zurückholen, den die Details verdeckt haben.
+
+        ``fallback``: Lagen die Details schon vorn (nichts gemerkt), kommt der zuletzt
+        benutzte Tab von Symbolpalette bzw. Objektplanung nach vorn.
+        """
         before, self._details_front_before = self._details_front_before, None
-        if before is None or self.details is None or not _is_front_tab(self.details):
+        if self.details is None or not _is_front_tab(self.details):
             return
-        try:
-            if not before.isHidden():
-                before.raise_()
-        except RuntimeError:
-            # Dock wurde inzwischen gelöscht (z. B. Plugin neu geladen)
-            pass
+        candidates = [before]
+        if fallback:
+            candidates += [self._last_work_dock, self.dock, self.planning.dock if self.planning else None]
+        tabs = self.iface.mainWindow().tabifiedDockWidgets(self.details)
+        for dock in candidates:
+            try:
+                if dock is not None and dock in tabs and not dock.isHidden():
+                    dock.raise_()
+                    return
+            except RuntimeError:
+                # Dock wurde inzwischen gelöscht (z. B. Plugin neu geladen)
+                continue
+
+    def _on_work_dock_visible(self, dock, visible: bool):
+        if visible:
+            self._last_work_dock = dock
 
     def focus_details_label(self):
         """Doppelklick / Enter auf ein Objekt: Bezeichnung in den Details bearbeiten."""
@@ -1052,19 +1102,21 @@ class THWToolboxPlugin:
     def _open_search_dialog(self):
         NominatimSearchDialog(self.canvas, self.iface.mainWindow()).exec()
 
-    def _locate_own_position(self):
+    def _toggle_own_position(self, checked: bool):
+        """Standort-Button: gedrückt → Standort suchen und anzeigen, erneut geklickt → wieder entfernen."""
         if self.own_position is None:
             self.own_position = OwnPositionLocator(self.iface, self.iface.mainWindow())
-            self.own_position.shown_changed.connect(self._on_own_position_shown)
-        self.own_position.locate()
-
-    def _hide_own_position(self):
-        if self.own_position:
+            self.own_position.active_changed.connect(self._on_own_position_active)
+        if checked:
+            self.own_position.locate()
+        else:
             self.own_position.hide()
+        # Schlägt die Suche sofort fehl, springt der Button gleich wieder heraus
+        self._on_own_position_active(self.own_position.active)
 
-    def _on_own_position_shown(self, shown: bool):
-        if getattr(self, "hide_own_position_action", None):
-            self.hide_own_position_action.setEnabled(shown)
+    def _on_own_position_active(self, active: bool):
+        if getattr(self, "own_position_action", None):
+            self.own_position_action.setChecked(active)
 
     def _add_designer_action(self, designer):
         self._designer_actions.append(add_designer_action(designer))
@@ -1111,6 +1163,9 @@ class THWToolboxPlugin:
             if anchor is not None:
                 self.iface.mainWindow().tabifyDockWidget(anchor, dock)
             self._tabified_docks.add(dock)
+            if dock is not self.details:
+                # Sichtbar werden heißt hier: Tab liegt vorn
+                dock.visibilityChanged.connect(lambda visible, d=dock: self._on_work_dock_visible(d, visible))
         if front is not None and not front.isHidden():
             front.raise_()
 

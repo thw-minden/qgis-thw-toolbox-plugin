@@ -16,6 +16,7 @@ from qgis.core import (
 
 from ..logging_utils import get_logger
 from .fields import build_qgs_fields
+from .renderer import catalog_svg
 
 logger = get_logger(__name__)
 
@@ -25,6 +26,13 @@ LAYER_DISPLAY_NAME = "THW Toolbox Marker"
 GPKG_LAYER_NAME = "taktische_zeichen"
 # Suffix appended to the project filename for the per-project GeoPackage
 GPKG_SUFFIX = "_taktischezeichen"
+
+
+def _is_blank(value) -> bool:
+    """NULL, None oder nur Leerraum?"""
+    if value is None or (hasattr(value, "isNull") and value.isNull()):
+        return True
+    return not str(value).strip()
 
 
 class LayerManager:
@@ -54,7 +62,7 @@ class LayerManager:
         self._error_alert = error_alert
         self._check_map_available = check_map_available
         self.layer: QgsVectorLayer | None = None
-        # True while we deliberately swap the layer (save / reprojection), so the
+        # True while we deliberately swap the layer (field migration / reprojection), so the
         # plugin does not mistake the removal for the user deleting the layer.
         self.replacing = False
 
@@ -79,6 +87,7 @@ class LayerManager:
         if existing_layers:
             self.layer = existing_layers[0]
             logger.debug("Verwende bestehenden Layer: %s", self.layer)
+            self._fill_missing_svg_content(self.layer)
             return self.layer
 
         crs = self.canvas.mapSettings().destinationCrs().authid()
@@ -99,11 +108,45 @@ class LayerManager:
             if lyr is None:
                 return None
 
+        self._fill_missing_svg_content(lyr)
         self.layer = lyr
         logger.debug("Neuer Layer gesetzt: %s", self.layer)
         proj.addMapLayer(lyr)
         logger.debug("Layer zum Projekt hinzugefügt")
         return self.layer
+
+    def _fill_missing_svg_content(self, layer: QgsVectorLayer) -> int:
+        """Leeres `svg_content` aus dem Katalog (``svgs/<svg_path>``, minimiert) nachfüllen.
+
+        Ältere Projekte speicherten nur den Pfad; mit dem Inhalt im GeoPackage rendert
+        das Projekt auch ohne den Plugin-Ordner. Gibt die Zahl der ergänzten Zeichen zurück.
+        """
+        try:
+            if layer.isEditable():
+                logger.debug("Layer in Bearbeitung, svg_content wird später nachgefüllt")
+                return 0
+            fields = layer.fields()
+            content_idx = fields.indexFromName("svg_content")
+            path_idx = fields.indexFromName("svg_path")
+            if content_idx < 0 or path_idx < 0:
+                return 0
+            updates = {}
+            for feat in layer.getFeatures():
+                if not _is_blank(feat.attribute(content_idx)):
+                    continue
+                svg_content = catalog_svg(self.plugin_dir, feat.attribute(path_idx))
+                if svg_content:
+                    updates[feat.id()] = {content_idx: svg_content}
+            if not updates:
+                return 0
+            if not layer.dataProvider().changeAttributeValues(updates):
+                logger.warning("svg_content konnte für %d Zeichen nicht nachgetragen werden", len(updates))
+                return 0
+            logger.info("svg_content für %d Zeichen aus dem Katalog ergänzt", len(updates))
+            return len(updates)
+        except Exception:
+            logger.exception("Fehler beim Nachfüllen von svg_content")
+            return 0
 
     def _gpkg_path_for_project(self, proj: QgsProject, pfile: str) -> str:
         """Return the GeoPackage path: next to the project file, or in tmp/."""
@@ -229,9 +272,11 @@ class LayerManager:
                 new_feat.setGeometry(feat.geometry())
                 new_feat.setAttribute("name", feat.attribute("name"))
                 new_feat.setAttribute("svg_path", feat.attribute("svg_path"))
-                new_feat.setAttribute(
-                    "svg_content", feat.attribute("svg_content") if "svg_content" in existing_fields else ""
-                )
+                svg_content = feat.attribute("svg_content") if "svg_content" in existing_fields else ""
+                if _is_blank(svg_content):
+                    # Ältere Zeilen kennen nur den Pfad: Inhalt aus dem Katalog, damit das Projekt eigenständig ist
+                    svg_content = catalog_svg(self.plugin_dir, feat.attribute("svg_path"))
+                new_feat.setAttribute("svg_content", svg_content)
                 new_feat.setAttribute("size", feat.attribute("size"))
                 new_feat.setAttribute(
                     "scale_with_map",
@@ -520,31 +565,31 @@ class LayerManager:
         finally:
             self.replacing = False
 
-    def on_project_save(self) -> QgsVectorLayer | None:
-        """Move the GeoPackage next to the project file. Returns the new layer (or None)."""
+    def on_project_save(self) -> None:
+        """Move the GeoPackage next to the project file; the layer object stays the same."""
         logger.debug("Projekt wird gespeichert, verschiebe Layer-Datei zum Projektpfad")
         if not self.layer:
-            return None
+            return
 
         if self.layer.providerType() != "ogr":
             logger.debug("Layer ist keine GeoPackage, nichts zu tun")
-            return None
+            return
 
         proj = QgsProject.instance()
         pfile = proj.fileName()
         if not pfile:
             logger.debug("Kein Projektpfad verfügbar")
-            return None
+            return
 
         current_source = self.layer.source().split("|")[0]
         if not os.path.exists(current_source):
             logger.debug("Aktuelle Layer-Datei existiert nicht: %s", current_source)
-            return None
+            return
 
         new_gpkg = os.path.splitext(pfile)[0] + GPKG_SUFFIX + ".gpkg"
         if os.path.abspath(current_source) == os.path.abspath(new_gpkg):
             logger.debug("Datei ist bereits am richtigen Ort")
-            return None
+            return
 
         try:
             target_dir = os.path.dirname(new_gpkg)
@@ -581,15 +626,15 @@ class LayerManager:
 
             logger.debug("Layer-Daten erfolgreich exportiert/kopiert")
 
-            # Swap project's layer reference
-            self._remove_for_swap(self.layer.id())
-            uri = f"{new_gpkg}|layername={GPKG_LAYER_NAME}"
-            new_layer = QgsVectorLayer(uri, LAYER_DISPLAY_NAME, "ogr")
-            if not new_layer.isValid():
-                raise Exception(f"Neuer Layer ist nicht gültig: {new_layer.error().message()}")
-
-            QgsProject.instance().addMapLayer(new_layer)
-            self.layer = new_layer
+            # Datenquelle umstellen statt den Layer zu tauschen: Layer-ID, Platz im Layerbaum,
+            # Darstellung und Verweise aus Drucklayouts (Legende, Kartenebenen) bleiben erhalten.
+            # Die FIDs übernimmt der Export von GeoPackage zu GeoPackage unverändert.
+            old_uri = self.layer.source()
+            self.layer.setDataSource(f"{new_gpkg}|layername={GPKG_LAYER_NAME}", LAYER_DISPLAY_NAME, "ogr")
+            if not self.layer.isValid():
+                message = self.layer.error().message()
+                self.layer.setDataSource(old_uri, LAYER_DISPLAY_NAME, "ogr")
+                raise Exception(f"Layer ist nach dem Verschieben nicht gültig: {message}")
 
             # Try to remove the old file (best effort — may still be locked)
             try:
@@ -600,7 +645,6 @@ class LayerManager:
                 logger.warning("Konnte alte Datei nicht löschen (wird beim nächsten Start bereinigt): %s", e)
 
             logger.debug("Layer erfolgreich zum Projektpfad verschoben")
-            return new_layer
 
         except Exception as e:
             logger.exception("Fehler beim Verschieben der Layer-Datei")
@@ -610,4 +654,3 @@ class LayerManager:
                 f"Von: {current_source}\nNach: {new_gpkg}\nFehler: {e}\n\n"
                 "Hinweis: Die Layer-Daten bleiben im ursprünglichen Verzeichnis erhalten.",
             )
-            return None

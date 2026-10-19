@@ -10,12 +10,13 @@ import html
 import math
 import os
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from qgis.core import QgsSettings
 from qgis.PyQt.QtCore import (
     QAbstractListModel,
     QEvent,
+    QEventLoop,
     QMimeData,
     QModelIndex,
     QObject,
@@ -27,7 +28,19 @@ from qgis.PyQt.QtCore import (
     Qt,
     pyqtSignal,
 )
-from qgis.PyQt.QtGui import QColor, QDrag, QFont, QGuiApplication, QIcon, QPainter, QPalette, QPen, QPixmap, QPolygonF
+from qgis.PyQt.QtGui import (
+    QColor,
+    QDrag,
+    QFont,
+    QFontMetrics,
+    QGuiApplication,
+    QIcon,
+    QPainter,
+    QPalette,
+    QPen,
+    QPixmap,
+    QPolygonF,
+)
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -41,24 +54,40 @@ from qgis.PyQt.QtWidgets import (
     QLineEdit,
     QListView,
     QMenu,
+    QSplitter,
     QStyle,
     QStyledItemDelegate,
     QToolButton,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 _PATH_ROLE = Qt.ItemDataRole.UserRole
 _FAVORITE_ROLE = Qt.ItemDataRole.UserRole + 1
+# Kategorie-Baum und -Auswahl: Schlüssel (Pfad im Baum) und Anzeigename mit Pfad
+_CATEGORY_ROLE = Qt.ItemDataRole.UserRole
+_TITLE_ROLE = Qt.ItemDataRole.UserRole + 2
 
 _GENERAL_GROUP = "Allgemein"
+_THW_GROUP = "THW"
 # Diese Organisationen stehen vorn, die übrigen folgen alphabetisch
-_GROUP_ORDER = ("THW", _GENERAL_GROUP)
-# Kategorie-Auswahl: ganze Organisation statt einzelner Kategorie
-_GROUP_DATA_PREFIX = "gruppe:"
+_GROUP_ORDER = (_THW_GROUP, _GENERAL_GROUP)
+# Kategorie-Baum wie in der früheren Symbolpalette; die übrigen Organisationen unter „Weitere Einheiten“
+_OTHER_UNITS = "Weitere Einheiten"
+_TREE_ORDER = (_GENERAL_GROUP, _THW_GROUP, _OTHER_UNITS)
+_TREE_EXPANDED = (_GENERAL_GROUP, _THW_GROUP)
+_TREE_SEPARATOR = " › "
+# Ordner, deren Zeichen nach dem Dateinamen auf eigene Zweige verteilt werden
+_SPLIT_BY_NAME = {"Schadenskonten": {"Schadenskonto": "Schadenskonten", "Schadensstelle": "Schadensstellen"}}
 
 _PREFS_PREFIX = "thw_toolbox/zeichen/"
 _STAR_COLOR = "#f5a623"
+# Rasterzelle: Rand oben/unten und Abstand zwischen Icon und Name (Pixel)
+_CELL_PAD_PX = 8
+_CELL_GAP_PX = 4
 
 TAB_FAVORITES = "favoriten"
 TAB_RECENT = "zuletzt"
@@ -94,6 +123,32 @@ def _group_rank(group: str):
     return (_GROUP_ORDER.index(group) if group in _GROUP_ORDER else len(_GROUP_ORDER), _natural_key(group))
 
 
+def _tree_path(rel_folder: str, file_name: str) -> tuple[str, ...]:
+    """Ort im Kategorie-Baum.
+
+    ``THW_Fahrzeuge`` → (THW, Fahrzeuge), ``Feuerwehr_Personen`` → (Weitere Einheiten,
+    Feuerwehr, Personen), ``Schadenskonten/gelb/Schadensstelle_3.svg`` → (Allgemein,
+    Schadensstellen, gelb).
+    """
+    if rel_folder == ".":
+        return (_GENERAL_GROUP, "Sonstiges")
+    parts = rel_folder.split(os.sep)
+    head, separator, tail = parts[0].partition("_")
+    if not separator:
+        split = _SPLIT_BY_NAME.get(head, {})
+        stem = re.sub(r"_\d+$", "", os.path.splitext(file_name)[0])
+        return (_GENERAL_GROUP, split.get(stem, head), *parts[1:])
+    kinds = (tail.replace("_", " "), *parts[1:])
+    return (_THW_GROUP, *kinds) if head == _THW_GROUP else (_OTHER_UNITS, head, *kinds)
+
+
+def _tree_title(tree: tuple[str, ...]) -> str:
+    """``Feuerwehr › Fahrzeuge`` – „Weitere Einheiten“ fällt weg, die Organisation sagt genug."""
+    if len(tree) > 1 and tree[0] == _OTHER_UNITS:
+        tree = tree[1:]
+    return _TREE_SEPARATOR.join(tree)
+
+
 @dataclass(frozen=True)
 class Symbol:
     name: str  # z. B. "GKW I"
@@ -101,10 +156,57 @@ class Symbol:
     path: str  # absoluter Pfad zur SVG
     group: str = _GENERAL_GROUP  # Organisation, z. B. "THW", "Feuerwehr", "Allgemein"
     kind: str = ""  # Art innerhalb der Organisation, z. B. "Fahrzeuge", "Schadenskonten gelb"
+    tree: tuple[str, ...] = ()  # Ort im Kategorie-Baum, z. B. ("Allgemein", "Schadensstellen", "gelb")
 
     @property
     def label(self) -> str:
         return f"{self.name} – {self.category}"
+
+    @property
+    def tree_key(self) -> str:
+        return "/".join(self.tree)
+
+    @property
+    def tree_title(self) -> str:
+        return _tree_title(self.tree) or self.category
+
+
+@dataclass
+class CategoryNode:
+    """Eintrag im Kategorie-Baum; ``key`` ist der Pfad, z. B. ``Weitere Einheiten/Feuerwehr``."""
+
+    key: str
+    name: str
+    title: str
+    count: int = 0
+    children: list["CategoryNode"] = field(default_factory=list)
+
+
+def _build_tree(symbols: list[Symbol]) -> list[CategoryNode]:
+    """Allgemein, THW, Weitere Einheiten (wie früher), darunter alles in natürlicher Sortierung."""
+    nodes: dict[str, CategoryNode] = {}
+    roots: list[CategoryNode] = []
+    for symbol in symbols:
+        for depth in range(1, len(symbol.tree) + 1):
+            path = symbol.tree[:depth]
+            key = "/".join(path)
+            node = nodes.get(key)
+            if node is None:
+                node = nodes[key] = CategoryNode(key, path[-1], _tree_title(path))
+                (nodes["/".join(path[:-1])].children if depth > 1 else roots).append(node)
+            node.count += 1
+
+    def sort(children: list[CategoryNode], top: bool):
+        def rank(node: CategoryNode):
+            order = _TREE_ORDER.index(node.name) if top and node.name in _TREE_ORDER else len(_TREE_ORDER)
+            return order, _natural_key(node.name)
+
+        children.sort(key=rank)
+        for child in children:
+            sort(child.children, False)
+
+    sort(roots, True)
+    return roots
 
 
 class SymbolCatalog:
@@ -124,15 +226,13 @@ class SymbolCatalog:
             for file in files:
                 if file.lower().endswith(".svg"):
                     name = os.path.splitext(file)[0].replace("_", " ")
-                    symbols.append(Symbol(name, category, os.path.join(folder, file), group, kind))
+                    path = os.path.join(folder, file)
+                    symbols.append(Symbol(name, category, path, group, kind, _tree_path(rel, file)))
         symbols.sort(key=lambda s: (_group_rank(s.group), _natural_key(s.kind), _natural_key(s.name)))
         self.symbols = symbols
         self.categories = list(dict.fromkeys(s.category for s in symbols))
-        # [(Organisation, [(Art, Kategorie), …]), …] für die Kategorie-Auswahl
-        groups: dict[str, dict[str, str]] = {}
-        for symbol in symbols:
-            groups.setdefault(symbol.group, {}).setdefault(symbol.kind, symbol.category)
-        self.groups = [(group, list(kinds.items())) for group, kinds in groups.items()]
+        # Kategorie-Baum für Symbolpalette, Auswahldialog und die Auswahlliste im Popup
+        self.tree = _build_tree(symbols)
         self._by_path = {self._key(s.path): s for s in symbols}
         # Suchform je Zeichen: Name, Wörter des Namens, Name + Kategorie + Organisation
         self._search_index = {}
@@ -388,11 +488,13 @@ def _paint_star(painter: QPainter, rect: QRectF, filled: bool, color: QColor):
     painter.restore()
 
 
-def _star_icon() -> QIcon:
+def star_icon(filled: bool = True, outline: QColor | None = None) -> QIcon:
+    """Stern wie im Raster: gefüllt = Favorit, sonst nur der Umriss in ``outline``."""
     pixmap = QPixmap(32, 32)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
-    _paint_star(painter, QRectF(2, 2, 28, 28), True, QColor(_STAR_COLOR))
+    color = QColor(_STAR_COLOR) if filled else (outline or QColor("#888888"))
+    _paint_star(painter, QRectF(2, 2, 28, 28), filled, color)
     painter.end()
     return QIcon(pixmap)
 
@@ -454,6 +556,13 @@ class _SymbolModel(QAbstractListModel):
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._symbols)
 
+    def flags(self, index):
+        # Ohne ItemIsDragEnabled startet die Liste keinen Drag – Zeichen ließen sich nicht auf die Karte ziehen
+        flags = super().flags(index)
+        if index.isValid():
+            flags |= Qt.ItemFlag.ItemIsDragEnabled
+        return flags
+
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         symbol = self.symbol(index.row()) if index.isValid() else None
         if symbol is None:
@@ -471,18 +580,73 @@ class _SymbolModel(QAbstractListModel):
         return None
 
 
+def _wrap_lines(metrics: QFontMetrics, text: str, width: int, max_lines: int) -> list[str]:
+    """Name auf höchstens ``max_lines`` Zeilen umbrechen; was dann noch übrig ist, endet mit „…“."""
+
+    def fits(candidate: str) -> bool:
+        # Dieselbe Messung wie beim Kürzen – horizontalAdvance rechnet an der Kante knapper
+        return metrics.elidedText(candidate, Qt.TextElideMode.ElideRight, width) == candidate
+
+    words = text.split()
+    lines = []
+    while words and len(lines) < max_lines:
+        line = words.pop(0)
+        while words and fits(f"{line} {words[0]}"):
+            line = f"{line} {words.pop(0)}"
+        if len(lines) == max_lines - 1 and words:
+            line = " ".join([line, *words])
+            words = []
+        lines.append(metrics.elidedText(line, Qt.TextElideMode.ElideRight, width))
+    return lines
+
+
 class _CellDelegate(QStyledItemDelegate):
     """Jedes Zeichen belegt die ganze Rasterzelle; oben rechts sitzt der Favoriten-Stern.
 
     Qt bemisst ein Icon-Element sonst an der Icon-Breite; der Name hätte dann nur
-    diese Breite zum Umbrechen und würde zu „1. …“ gekürzt.
+    diese Breite zum Umbrechen und würde zu „1. …“ gekürzt. Gezeichnet wird selbst:
+    Auswahl und Hover hinterlegen die ganze Zelle (Icon und Name), nicht nur den Text.
     """
 
     def sizeHint(self, option, index):
         return self.parent().gridSize() - QSize(8, 6)
 
     def paint(self, painter, option, index):
-        super().paint(painter, option, index)
+        grid = self.parent()
+        rect = option.rect
+        palette = option.palette
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if selected or hovered:
+            background = palette.color(QPalette.ColorRole.Highlight)
+            if not selected:
+                background.setAlpha(45)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(background)
+            painter.drawRoundedRect(QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5), 6, 6)
+
+        size = grid.iconSize()
+        icon_rect = QRect(rect.center().x() - size.width() // 2, rect.top() + _CELL_PAD_PX, size.width(), size.height())
+        icon = index.data(Qt.ItemDataRole.DecorationRole)
+        if isinstance(icon, QIcon):
+            icon.paint(painter, icon_rect, Qt.AlignmentFlag.AlignCenter)
+
+        painter.setFont(option.font)
+        role = QPalette.ColorRole.HighlightedText if selected else QPalette.ColorRole.Text
+        painter.setPen(palette.color(role))
+        metrics = QFontMetrics(option.font)
+        width = rect.width() - 8
+        top = icon_rect.bottom() + _CELL_GAP_PX
+        name = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        for line in _wrap_lines(metrics, name, width, grid.TEXT_LINES):
+            line_rect = QRect(rect.left() + 4, top, width, metrics.lineSpacing())
+            painter.drawText(line_rect, int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop), line)
+            top += metrics.lineSpacing()
+        painter.restore()
+
         favorite = bool(index.data(_FAVORITE_ROLE))
         if not favorite and not (option.state & QStyle.StateFlag.State_MouseOver):
             return
@@ -507,7 +671,8 @@ class _SymbolGrid(QListView):
     # Zeichen wurde per Drag & Drop abgelegt (Karte, Marker-Tabelle)
     dropped = pyqtSignal(str)
 
-    _TEXT_LINES = 3
+    # Name in höchstens zwei Zeilen, sonst gekürzt (voller Name im Tooltip und in der Info-Zeile)
+    TEXT_LINES = 2
     _STAR_PX = 16
     _STAR_GRAB_PX = 4
 
@@ -533,7 +698,9 @@ class _SymbolGrid(QListView):
         self.setDragDropMode(
             QAbstractItemView.DragDropMode.DragOnly if draggable else QAbstractItemView.DragDropMode.NoDragDrop
         )
-        self._cell_height = icon_size + self._TEXT_LINES * self.fontMetrics().lineSpacing() + 18
+        # Höhe der Zelle (sizeHint zieht 6 px ab) = Rand + Icon + Abstand + Name + Rand
+        text_height = self.TEXT_LINES * self.fontMetrics().lineSpacing()
+        self._cell_height = 2 * _CELL_PAD_PX + icon_size + _CELL_GAP_PX + text_height + 6
         self.setGridSize(QSize(cell_width, self._cell_height))
         self._star_press: int | None = None
 
@@ -692,6 +859,145 @@ class _SearchHistory(QWidget):
         self._place(self._clear, x)
 
 
+_CATEGORY_TOOLTIP = "Kategorie: gilt für Favoriten, Verlauf, alle Zeichen und die Suche"
+_ALL_CATEGORIES = "Alle Kategorien"
+
+
+class _CategoryTree(QTreeWidget):
+    """Kategorien als Baum links neben dem Raster – gegliedert wie die frühere Symbolpalette.
+
+    ``changed`` meldet eine andere Kategorie; ``key()`` ist ihr Pfad im Baum ("" = alle).
+    """
+
+    changed = pyqtSignal()
+
+    def __init__(self, nodes: list[CategoryNode], width: int, parent=None):
+        super().__init__(parent)
+        self._width = width
+        self.setHeaderHidden(True)
+        self.setIndentation(12)
+        self.setUniformRowHeights(True)
+        self.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.setToolTip(_CATEGORY_TOOLTIP)
+        self._items: dict[str, QTreeWidgetItem] = {}
+        bold = QFont(self.font())
+        bold.setBold(True)
+
+        everything = QTreeWidgetItem(self, [_ALL_CATEGORIES])
+        everything.setData(0, _CATEGORY_ROLE, "")
+        everything.setData(0, _TITLE_ROLE, "")
+        everything.setToolTip(0, f"Alle Zeichen ({sum(node.count for node in nodes)})")
+        self._items[""] = everything
+
+        def add(parent_item, node: CategoryNode) -> QTreeWidgetItem:
+            item = QTreeWidgetItem(parent_item, [node.name])
+            item.setData(0, _CATEGORY_ROLE, node.key)
+            item.setData(0, _TITLE_ROLE, node.title)
+            item.setToolTip(0, f"{node.title} ({node.count} Zeichen)")
+            self._items[node.key] = item
+            for child in node.children:
+                add(item, child)
+            return item
+
+        for node in nodes:
+            item = add(self, node)
+            item.setFont(0, bold)
+            item.setExpanded(node.name in _TREE_EXPANDED)
+        self.setCurrentItem(everything)
+        self.currentItemChanged.connect(lambda *_args: self.changed.emit())
+
+    def sizeHint(self):
+        return QSize(self._width, super().sizeHint().height())
+
+    def key(self) -> str:
+        item = self.currentItem()
+        return (item.data(0, _CATEGORY_ROLE) or "") if item else ""
+
+    def title(self) -> str:
+        item = self.currentItem()
+        return (item.data(0, _TITLE_ROLE) or "") if item else ""
+
+    def set_key(self, key: str):
+        """Kategorie wählen, ohne ``changed`` auszulösen; der Zweig klappt dafür auf."""
+        item = self._items.get(key or "") or self._items[""]
+        self.blockSignals(True)
+        parent = item.parent()
+        while parent is not None:
+            parent.setExpanded(True)
+            parent = parent.parent()
+        self.setCurrentItem(item)
+        self.scrollToItem(item)
+        self.blockSignals(False)
+
+    def visible_rows(self) -> int:
+        """Zeilen, die gerade zu sehen sind (aufgeklappte Zweige mitgezählt)."""
+
+        def count(item: QTreeWidgetItem) -> int:
+            if not item.isExpanded():
+                return 1
+            return 1 + sum(count(item.child(i)) for i in range(item.childCount()))
+
+        return sum(count(self.topLevelItem(i)) for i in range(self.topLevelItemCount()))
+
+
+class _CategoryDropdown(QComboBox):
+    """Kategorie-Auswahl für die schmale Symbolpalette: zeigt den Pfad und klappt den Baum als Popup auf.
+
+    Ein Klick auf einen Eintrag wählt ihn und schließt das Popup; die Pfeile im Baum
+    klappen Zweige auf, ohne zu wählen.
+    """
+
+    changed = pyqtSignal()
+
+    _MIN_POPUP_WIDTH = 240
+    _MAX_ROWS = 24
+
+    def __init__(self, nodes: list[CategoryNode], parent=None):
+        super().__init__(parent)
+        self.setToolTip(_CATEGORY_TOOLTIP)
+        self.addItem(_ALL_CATEGORIES)
+        self._key = ""
+        self._title = ""
+        self._menu = QMenu(self)
+        self.tree = _CategoryTree(nodes, self._MIN_POPUP_WIDTH)
+        self.tree.setFrameShape(QFrame.Shape.NoFrame)
+        action = QWidgetAction(self._menu)
+        action.setDefaultWidget(self.tree)
+        self._menu.addAction(action)
+        self.tree.itemClicked.connect(self._on_picked)
+        self.tree.itemActivated.connect(self._on_picked)
+
+    def key(self) -> str:
+        return self._key
+
+    def title(self) -> str:
+        return self._title
+
+    def set_key(self, key: str):
+        self.tree.set_key(key)
+        self._key, self._title = self.tree.key(), self.tree.title()
+        self.setItemText(0, self._title or _ALL_CATEGORIES)
+
+    def showPopup(self):
+        # Jedes Mal beim gewählten Eintrag öffnen – auch wenn zuletzt nur mit den Pfeiltasten gewandert wurde
+        self.tree.set_key(self._key)
+        rows = min(self.tree.visible_rows(), self._MAX_ROWS)
+        height = rows * max(self.tree.sizeHintForRow(0), 1) + 2 * self.tree.frameWidth() + 4
+        self.tree.setFixedSize(max(self.width(), self._MIN_POPUP_WIDTH), height)
+        self._menu.popup(self.mapToGlobal(QPoint(0, self.height())))
+        self.tree.setFocus()
+
+    def hidePopup(self):
+        self._menu.hide()
+
+    def _on_picked(self, item: QTreeWidgetItem, _column: int = 0):
+        self._menu.hide()
+        key = item.data(0, _CATEGORY_ROLE) or ""
+        if key != self._key:
+            self.set_key(key)
+            self.changed.emit()
+
+
 @dataclass(frozen=True)
 class PickerMode:
     """Wie sich der Picker verhält – je nachdem, wo er steckt."""
@@ -700,37 +1006,45 @@ class PickerMode:
     icon_size: int
     single_click: bool  # Klick übernimmt (Popup) statt Doppelklick
     draggable: bool  # Zeichen lassen sich herausziehen (Symbolpalette → Karte)
-    compact: bool  # schmale Spalte: Kategorie in eigener Zeile
+    compact: bool  # schmale Spalte: kürzere Reiter-Namen, Kategorie-Auswahl in eigener Zeile
     choose_label: str  # Eintrag „übernehmen“ im Rechtsklick-Menü eines Zeichens
-    hint: str
+    hint: str  # Bedienhinweis unter dem Raster; leer = keiner
+    # Kategorie-Baum links neben dem Raster: Breite (px), bis man sie selbst zieht;
+    # 0 = Auswahlfeld, das den Baum als Popup aufklappt (schmale Symbolpalette)
+    tree_width: int = 0
+    name: str = ""  # unter diesem Namen merkt sich der Picker die Breite des Baums
 
 
 DIALOG_MODE = PickerMode(
     cell_width=150,
-    icon_size=56,
+    icon_size=64,
     single_click=False,
     draggable=False,
     compact=False,
     choose_label="Übernehmen",
     hint="Doppelklick oder Enter übernimmt das Zeichen · der Stern oben rechts merkt es als Favorit (Strg+D)",
+    tree_width=200,
+    name="dialog",
 )
 POPUP_MODE = PickerMode(
     cell_width=112,
-    icon_size=48,
+    icon_size=56,
     single_click=True,
     draggable=False,
     compact=False,
     choose_label="Hier setzen",
     hint="Klick oder Enter setzt das Zeichen an die markierte Stelle · Stern: Favorit (Strg+D) · Esc schließt",
+    tree_width=170,
+    name="popup",
 )
 DOCK_MODE = PickerMode(
     cell_width=96,
-    icon_size=40,
+    icon_size=52,
     single_click=False,
     draggable=True,
     compact=True,
     choose_label="In die Kartenmitte setzen",
-    hint="Auf die Karte ziehen oder doppelklicken (Kartenmitte) · Rechtsklick auf die Karte setzt ein Zeichen dort",
+    hint="",
 )
 # Popup aus der Hotbar: erst das Zeichen wählen, der nächste Klick auf die Karte setzt es
 POPUP_TOOL_MODE = replace(
@@ -744,10 +1058,11 @@ POPUP_TOOL_MODE = replace(
 class SymbolPickerWidget(QWidget):
     """Gemeinsamer Zeichen-Picker: Suche, Favoriten, zuletzt verwendet, alle Zeichen nach Kategorie.
 
-    Die Reiter wählen, was gezeigt wird; die Kategorie filtert in jedem Reiter.
-    Eine Suche läuft immer über alle Zeichen (der gewählten Kategorie) und stellt
-    die besten Treffer nach vorn, Favoriten zuerst; ist sie wieder leer, geht es
-    zurück in den vorigen Reiter. Pfeiltasten im Suchfeld bewegen die Auswahl,
+    Die Reiter wählen, was gezeigt wird („Alle“ zuerst); die Kategorie filtert in jedem
+    Reiter, wer eine Kategorie wählt, landet unter „Alle“. Eine Suche läuft über alle
+    Zeichen in allen Kategorien und stellt die besten Treffer nach vorn, Favoriten
+    zuerst; ist sie wieder leer, kommen der vorige Reiter und die vorige Kategorie
+    zurück. Pfeiltasten im Suchfeld bewegen die Auswahl,
     Enter übernimmt, Strg+D merkt das Zeichen als Favorit, Esc leert die Suche.
 
     ``chosen(path)``: Zeichen übernommen (Doppelklick/Enter, im Popup ein Klick) –
@@ -764,6 +1079,8 @@ class SymbolPickerWidget(QWidget):
         self._mode = mode
         self._tab = TAB_ALL
         self._tab_before_search: str | None = None
+        # Gesucht wird in allen Kategorien; die vorher gewählte kommt zurück, wenn die Suche leer ist
+        self._category_before_search: str | None = None
         self.setStyleSheet(_STYLE)
 
         layout = QVBoxLayout(self)
@@ -784,13 +1101,13 @@ class SymbolPickerWidget(QWidget):
         self._tab_group.setExclusive(True)
         self._tab_buttons: dict[str, QToolButton] = {}
         for key, text, tooltip in (
+            (TAB_ALL, "Alle", "Alle Zeichen – mit der Kategorie eingrenzen"),
             (TAB_FAVORITES, "Favoriten", "Gemerkte Zeichen – Stern an einem Zeichen oder Strg+D"),
             (
                 TAB_RECENT,
                 "Zuletzt" if mode.compact else "Zuletzt verwendet",
                 "Zuletzt gesetzte oder gewählte Zeichen, das neueste zuerst",
             ),
-            (TAB_ALL, "Alle", "Alle Zeichen – mit der Kategorie eingrenzen"),
         ):
             button = QToolButton()
             button.setObjectName("thwTab")
@@ -799,7 +1116,7 @@ class SymbolPickerWidget(QWidget):
             button.setCheckable(True)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             if key == TAB_FAVORITES:
-                button.setIcon(_star_icon())
+                button.setIcon(star_icon())
                 button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
             button.clicked.connect(lambda _checked=False, k=key: self._on_tab_clicked(k))
             self._tab_group.addButton(button)
@@ -807,29 +1124,36 @@ class SymbolPickerWidget(QWidget):
             tabs.addWidget(button)
         tabs.addStretch(1)
 
-        self.category = QComboBox()
-        self.category.setMaxVisibleItems(24)
-        self.category.setToolTip("Kategorie: gilt für Favoriten, Verlauf, alle Zeichen und die Suche")
-        self.category.addItem("Alle Kategorien", "")
-        bold = QFont(self.category.font())
-        bold.setBold(True)
-        for group, kinds in catalog.groups:
-            self.category.addItem(group, _GROUP_DATA_PREFIX + group)
-            self.category.setItemData(self.category.count() - 1, bold, Qt.ItemDataRole.FontRole)
-            for kind, category in kinds:
-                self.category.addItem(f"{group} · {kind}", category)
-        if mode.compact:
-            layout.addLayout(tabs)
-            layout.addWidget(self.category)
-        else:
-            self.category.setMinimumWidth(220)
-            tabs.addWidget(self.category)
-            layout.addLayout(tabs)
-
         self.grid = _SymbolGrid(mode.cell_width, mode.icon_size, mode.draggable)
         self.model = _SymbolModel(catalog, prefs, self.grid)
         self.grid.setModel(self.model)
-        layout.addWidget(self.grid, 1)
+
+        if mode.tree_width:
+            # Kategorie-Baum links neben dem Raster; seine Breite lässt sich ziehen und bleibt gespeichert
+            layout.addLayout(tabs)
+            tree_width_key = f"{_PREFS_PREFIX}baumbreite_{mode.name}"
+            tree_width = QgsSettings().value(tree_width_key, mode.tree_width, type=int) or mode.tree_width
+            self.category = _CategoryTree(catalog.tree, tree_width)
+            self.splitter = QSplitter(Qt.Orientation.Horizontal)
+            self.splitter.setChildrenCollapsible(False)
+            self.splitter.addWidget(self.category)
+            self.splitter.addWidget(self.grid)
+            self.splitter.setStretchFactor(0, 0)
+            self.splitter.setStretchFactor(1, 1)
+            self.splitter.splitterMoved.connect(
+                lambda *_args: QgsSettings().setValue(tree_width_key, self.splitter.sizes()[0])
+            )
+            layout.addWidget(self.splitter, 1)
+        else:
+            # Schmale Spalte: kein zweites Fenster neben dem Raster – der Baum klappt als Popup auf
+            self.category = _CategoryDropdown(catalog.tree)
+            if mode.compact:
+                layout.addLayout(tabs)
+                layout.addWidget(self.category)
+            else:
+                tabs.addWidget(self.category)
+                layout.addLayout(tabs)
+            layout.addWidget(self.grid, 1)
 
         bottom = QHBoxLayout()
         # Voller Name + Kategorie des gewählten Zeichens (im Raster ist dafür nicht immer Platz)
@@ -845,12 +1169,13 @@ class SymbolPickerWidget(QWidget):
         self.hint = QLabel(mode.hint)
         self.hint.setWordWrap(True)
         _muted(self.hint, smaller=True)
+        self.hint.setVisible(bool(mode.hint))
         layout.addWidget(self.hint)
 
         self.search.textChanged.connect(self._on_search_changed)
         self.search.installEventFilter(self)
         self.grid.installEventFilter(self)
-        self.category.currentIndexChanged.connect(lambda _index: self._refresh())
+        self.category.changed.connect(self._on_category_changed)
         self.grid.selectionModel().currentChanged.connect(lambda *_args: self._show_current())
         if mode.single_click:
             self.grid.clicked.connect(self._on_index_chosen)
@@ -864,19 +1189,11 @@ class SymbolPickerWidget(QWidget):
         prefs.changed.connect(self._on_prefs_changed)
 
         self.history.set_terms(prefs.searches())
-        self._set_tab(self.default_tab())
+        self._set_tab(TAB_ALL)
 
     # ------------------------------------------------------------------
     # Öffentliche Schnittstelle
     # ------------------------------------------------------------------
-
-    def default_tab(self) -> str:
-        """Favoriten, sonst zuletzt verwendet, sonst alle – was am schnellsten zum Ziel führt."""
-        if self._prefs.favorites():
-            return TAB_FAVORITES
-        if self._prefs.recent():
-            return TAB_RECENT
-        return TAB_ALL
 
     def focus_search(self):
         self.search.setFocus()
@@ -895,25 +1212,30 @@ class SymbolPickerWidget(QWidget):
         symbol = self._catalog.by_path(path) if path else None
         if symbol is None:
             return False
-        self._tab_before_search = None
+        self._tab_before_search = self._category_before_search = None
         self._set_search_silently("")
-        self._set_category_silently(symbol.category)
+        self._set_category_silently(symbol.tree_key)
         self._set_tab(TAB_ALL)
         self._select_path(symbol.path)
         return True
 
     def state(self) -> tuple[str, str, str]:
         """Reiter, Kategorie und Suche – damit ein Dialog beim nächsten Öffnen dort weitermacht."""
-        return (self._tab_before_search or self._tab, self.category.currentData() or "", self.search.text())
+        category = self._category_before_search if self._category_before_search is not None else self.category.key()
+        return (self._tab_before_search or self._tab, category, self.search.text())
 
     def restore_state(self, state: tuple[str, str, str]):
         tab, category, text = state
-        self._set_category_silently(category)
         self._set_search_silently(text)
-        self._tab_before_search = None
-        if text.strip() and tab != TAB_ALL:
-            self._tab_before_search = tab
-            tab = TAB_ALL
+        self._tab_before_search = self._category_before_search = None
+        if text.strip():
+            # Wie beim Tippen: gesucht wird in allen Kategorien und unter „Alle“
+            self._category_before_search = category or None
+            category = ""
+            if tab != TAB_ALL:
+                self._tab_before_search = tab
+                tab = TAB_ALL
+        self._set_category_silently(category)
         self._set_tab(tab)
 
     def choose_current(self):
@@ -934,10 +1256,8 @@ class SymbolPickerWidget(QWidget):
         self.search.setText(text)
         self.search.blockSignals(False)
 
-    def _set_category_silently(self, data: str):
-        self.category.blockSignals(True)
-        self.category.setCurrentIndex(max(0, self.category.findData(data or "")))
-        self.category.blockSignals(False)
+    def _set_category_silently(self, key: str):
+        self.category.set_key(key)
 
     def _set_tab(self, key: str, refresh: bool = True):
         self._tab = key
@@ -951,17 +1271,34 @@ class SymbolPickerWidget(QWidget):
         if key != TAB_ALL and self.search.text():
             # Favoriten und Verlauf zeigen sich ganz – die Suche gilt für alle Zeichen
             self._set_search_silently("")
+            self._restore_category_after_search()
         self._set_tab(key)
+
+    def _on_category_changed(self):
+        """Eine Kategorie gewählt: ihre Zeichen zeigen – unter „Alle“, nicht nur Favoriten oder Verlauf daraus."""
+        self._tab_before_search = self._category_before_search = None
+        self._set_tab(TAB_ALL)
 
     def _on_search_changed(self, text: str):
         if text.strip():
             if self._tab != TAB_ALL:
                 self._tab_before_search = self._tab
                 self._set_tab(TAB_ALL, refresh=False)
-        elif self._tab_before_search is not None:
-            tab, self._tab_before_search = self._tab_before_search, None
-            self._set_tab(tab, refresh=False)
+            if self._category_before_search is None and self.category.key():
+                # Wie in der früheren Symbolpalette: gesucht wird in allen Kategorien
+                self._category_before_search = self.category.key()
+                self._set_category_silently("")
+        else:
+            if self._tab_before_search is not None:
+                tab, self._tab_before_search = self._tab_before_search, None
+                self._set_tab(tab, refresh=False)
+            self._restore_category_after_search()
         self._refresh()
+
+    def _restore_category_after_search(self):
+        if self._category_before_search is not None:
+            key, self._category_before_search = self._category_before_search, None
+            self._set_category_silently(key)
 
     def _search_for(self, term: str):
         self.search.setText(term)
@@ -969,19 +1306,18 @@ class SymbolPickerWidget(QWidget):
         self.search.end(False)
 
     def _in_category(self, symbols: list[Symbol]) -> list[Symbol]:
-        data = self.category.currentData()
-        if not data:
+        key = self.category.key()
+        if not key:
             return list(symbols)
-        if data.startswith(_GROUP_DATA_PREFIX):
-            group = data[len(_GROUP_DATA_PREFIX) :]
-            return [s for s in symbols if s.group == group]
-        return [s for s in symbols if s.category == data]
+        prefix = key + "/"
+        return [s for s in symbols if s.tree_key == key or s.tree_key.startswith(prefix)]
 
     def _refresh(self, keep_current: bool = False):
         keep = self.selected_path() if keep_current else None
         text = self.search.text().strip()
         # Leer wegen der Kategorie? Dann sagen, welche – sie gilt auch in Favoriten und Verlauf
-        where = f" in „{self.category.currentText()}“" if self.category.currentData() else ""
+        title = self.category.title()
+        where = f" in „{title}“" if title else ""
         if text:
             symbols = self._catalog.search(text, self._in_category(self._catalog.symbols), self._prefs.favorite_paths())
             empty = f"Keine Zeichen zu „{text}“{where}."
@@ -1033,7 +1369,7 @@ class SymbolPickerWidget(QWidget):
             self.info.setText("")
         else:
             favorite = " · Favorit" if self._prefs.is_favorite(symbol.path) else ""
-            self.info.setText(f"<b>{html.escape(symbol.name)}</b> – {html.escape(symbol.category)}{favorite}")
+            self.info.setText(f"<b>{html.escape(symbol.name)}</b> – {html.escape(symbol.tree_title)}{favorite}")
         self.current_changed.emit(symbol.path if symbol else "")
 
     def _on_prefs_changed(self):
@@ -1078,7 +1414,7 @@ class SymbolPickerWidget(QWidget):
         menu.addSeparator()
         favorite = self._prefs.is_favorite(symbol.path)
         star = menu.addAction(
-            _star_icon(), "Aus Favoriten entfernen\tStrg+D" if favorite else "Zu Favoriten hinzufügen\tStrg+D"
+            star_icon(), "Aus Favoriten entfernen\tStrg+D" if favorite else "Zu Favoriten hinzufügen\tStrg+D"
         )
         forget = clear = None
         if self._tab == TAB_RECENT and not self.search.text().strip():
@@ -1180,6 +1516,14 @@ class SymbolPickerDialog(QDialog):
             dialog.deleteLater()
 
 
+# Mausklicks, mit denen das Zeichen-Popup daneben geschlossen wird
+_OUTSIDE_PRESSES = (
+    QEvent.Type.MouseButtonPress,
+    QEvent.Type.MouseButtonDblClick,
+    QEvent.Type.NonClientAreaMouseButtonPress,
+)
+
+
 def _fit_on_screen(pos: QPoint, size: QSize, above: bool = False) -> QPoint:
     """Popup rechts unter ``pos`` (``above``: darüber); reicht der Platz nicht, auf die andere Seite bzw. nach links."""
     screen = QGuiApplication.screenAt(pos) or QGuiApplication.primaryScreen()
@@ -1196,7 +1540,10 @@ def _fit_on_screen(pos: QPoint, size: QSize, above: bool = False) -> QPoint:
 class SymbolPickerPopup(QDialog):
     """Schnellauswahl am Mauszeiger, z. B. nach Rechtsklick auf die Karte: ein Klick übernimmt.
 
-    Schließt mit Esc oder einem Klick daneben.
+    Schließt mit Esc oder einem Klick daneben. Ein rahmenloses Werkzeugfenster statt
+    eines Qt-Popups: Qt schließt Popups, sobald das Hauptfenster den Fokus abgibt, und
+    das passiert in QGIS gleich nach dem Öffnen – das Popup war sofort wieder zu.
+    Den Klick daneben fängt deshalb ``eventFilter`` selbst ab.
     """
 
     def __init__(
@@ -1206,7 +1553,8 @@ class SymbolPickerPopup(QDialog):
         title: str = "Taktisches Zeichen hinzufügen",
         mode: PickerMode = POPUP_MODE,
     ):
-        super().__init__(parent, Qt.WindowType.Popup)
+        window = parent.window() if parent is not None else None
+        super().__init__(window, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
         self._path: str | None = None
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -1221,11 +1569,34 @@ class SymbolPickerPopup(QDialog):
         self.picker = SymbolPickerWidget(catalog, symbol_prefs(catalog.plugin_dir), frame, mode)
         self.picker.chosen.connect(self._on_chosen)
         layout.addWidget(self.picker)
-        self.resize(620, 520)
+        self.resize(800, 540)
 
     def _on_chosen(self, path: str):
         self._path = path
         self.accept()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QApplication.instance().installEventFilter(self)
+
+    def hideEvent(self, event):
+        QApplication.instance().removeEventFilter(self)
+        super().hideEvent(event)
+
+    def eventFilter(self, watched, event):
+        """Klick irgendwo daneben (Karte, Docks, Titelleiste) schließt – der Klick selbst geht nicht weiter."""
+        if event.type() in _OUTSIDE_PRESSES and isinstance(watched, QWidget) and not self._owns(watched):
+            self.reject()
+            return True
+        return super().eventFilter(watched, event)
+
+    def _owns(self, widget: QWidget) -> bool:
+        """Gehört ``widget`` zum Popup – auch ein Menü daraus (Rechtsklick auf ein Zeichen)?"""
+        while widget is not None:
+            if widget is self:
+                return True
+            widget = widget.parentWidget()
+        return False
 
     @classmethod
     def pick(
@@ -1241,9 +1612,14 @@ class SymbolPickerPopup(QDialog):
         popup = cls(catalog, parent, title, mode)
         try:
             popup.move(_fit_on_screen(global_pos + QPoint(2, 2), popup.size(), above))
+            # Wie ein Kontextmenü: nicht modal, eigene Ereignisschleife bis zum Schließen
+            loop = QEventLoop()
+            popup.finished.connect(loop.quit)
+            popup.show()
+            popup.raise_()
+            popup.activateWindow()
             popup.picker.focus_search()
-            if popup.exec() != QDialog.DialogCode.Accepted:
-                return None
+            loop.exec()
             return popup._path
         finally:
             popup.deleteLater()

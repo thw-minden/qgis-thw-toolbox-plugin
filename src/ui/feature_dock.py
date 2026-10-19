@@ -1,16 +1,15 @@
 import os
-import time
 
-from qgis.core import QgsCoordinateTransform, QgsProject
+from qgis.core import QgsApplication, QgsCoordinateTransform, QgsProject
 from qgis.gui import QgsMapToolIdentify, QgsScaleWidget
 from qgis.PyQt.QtCore import Qt, QTimer
-from qgis.PyQt.QtGui import QIcon, QPixmap
+from qgis.PyQt.QtGui import QColor, QIcon, QPixmap
 from qgis.PyQt.QtWidgets import (
     QApplication,
     QCheckBox,
     QDockWidget,
-    QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -21,22 +20,28 @@ from qgis.PyQt.QtWidgets import (
     QSpacerItem,
     QSpinBox,
     QStackedWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from ..layer.background import background_of
 from ..layer.labeling import label_size_pt
-from ..layer.renderer import scale_limits
+from ..layer.renderer import embedded_svg_path, scale_limits
 from ..logging_utils import get_logger
 from ..paths import plugin_root
 from ..util.coordinates import WGS84, to_mgrs
 from .background_popup import BackgroundButton
 from .font_size_box import FontSizeBox
 from .origin_point_widget import OriginPointWidget
+from .symbol_picker import star_icon, symbol_catalog, symbol_prefs
 from .theme import muted_color, muted_style
 
 logger = get_logger(__name__)
+
+# Vorschau des Zeichens oben in den Details
+_PREVIEW_HEIGHT_PX = 140
+_PREVIEW_ICON_PX = 110
 
 
 def _load_svg_pixmap(path: str, size: int = 180) -> QPixmap | None:
@@ -49,10 +54,81 @@ def _load_svg_pixmap(path: str, size: int = 180) -> QPixmap | None:
     return pixmap if not pixmap.isNull() else None
 
 
+def _svg_pixmap_from_content(svg_content: str, size: int = 180) -> QPixmap | None:
+    """Vorschau direkt aus dem gespeicherten SVG-Text über den SVG-Cache von QGIS, ohne Datei."""
+    image, _ = QgsApplication.svgCache().svgAsImage(
+        embedded_svg_path(svg_content), float(size), QColor(0, 0, 0), QColor(0, 0, 0), 1.0, 1.0
+    )
+    if image.isNull():
+        return None
+    pixmap = QPixmap.fromImage(image)
+    return pixmap if not pixmap.isNull() else None
+
+
 def _scale_or_none(widget: QgsScaleWidget) -> float | None:
     """Maßstabszahl des Felds; leer (bzw. ungültig) = keine Grenze."""
     scale = widget.scale()
     return None if widget.isNull() or not scale > 0 else scale
+
+
+def _row_widget(*widgets: QWidget, stretch: int | None = None) -> QWidget:
+    """Mehrere Elemente in einer Zeile; ``stretch`` (Index) füllt die Breite, sonst Leerraum rechts."""
+    box = QWidget()
+    layout = QHBoxLayout(box)
+    layout.setContentsMargins(0, 0, 0, 0)
+    for index, widget in enumerate(widgets):
+        layout.addWidget(widget, 1 if index == stretch else 0)
+    if stretch is None:
+        layout.addStretch()
+    return box
+
+
+class _SectionGrid:
+    """Raster in Abschnitten: fette Überschrift über beide Spalten, darunter Beschriftung | Feld.
+
+    Ein gemeinsames Raster statt eines Formulars je Abschnitt, damit alle Felder bündig stehen.
+    """
+
+    def __init__(self):
+        self.grid = QGridLayout()
+        self.grid.setColumnStretch(1, 1)
+        self.grid.setHorizontalSpacing(10)
+        self.grid.setVerticalSpacing(6)
+        self._row = 0
+
+    def section(self, title: str):
+        label = QLabel(title)
+        font = label.font()
+        font.setBold(True)
+        label.setFont(font)
+        if self._row:
+            label.setContentsMargins(0, 10, 0, 0)
+        self.grid.addWidget(label, self._row, 0, 1, 2)
+        self._row += 1
+
+    def row(self, label: QLabel | str, field: QWidget, top: bool = False) -> list[QWidget]:
+        """Zeile anhängen; gibt ihre Widgets zurück (zum gemeinsamen Ein-/Ausblenden)."""
+        if isinstance(label, str):
+            label = QLabel(label) if label else None
+        widgets = [field]
+        if label is not None:
+            vertical = Qt.AlignmentFlag.AlignTop if top else Qt.AlignmentFlag.AlignVCenter
+            self.grid.addWidget(label, self._row, 0, Qt.AlignmentFlag.AlignLeft | vertical)
+            widgets.append(label)
+        self.grid.addWidget(field, self._row, 1)
+        self._row += 1
+        return widgets
+
+
+class _RowGroup:
+    """Mehrere Rasterzeilen, die gemeinsam ein- und ausgeblendet werden."""
+
+    def __init__(self, *rows: list[QWidget]):
+        self._widgets = [widget for row in rows for widget in row]
+
+    def setVisible(self, visible: bool):
+        for widget in self._widgets:
+            widget.setVisible(visible)
 
 
 class FeatureDock(QDockWidget):
@@ -87,25 +163,33 @@ class FeatureDock(QDockWidget):
         # SVG-Anzeige (Preview des ausgewählten Markers)
         self.svg_label = QLabel()
         self.svg_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.svg_label.setMinimumHeight(200)
+        self.svg_label.setFixedHeight(_PREVIEW_HEIGHT_PX)
         self.main_layout.addWidget(self.svg_label)
 
+        # Favorit wie mit dem Stern im Zeichen-Picker – liegt dann auch in der Hotbar (Tasten 1–9)
+        self.favorite_button = QToolButton()
+        self.favorite_button.setCheckable(True)
+        self.favorite_button.setAutoRaise(True)
+        self.favorite_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.favorite_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.favorite_button.clicked.connect(self.on_favorite_clicked)
+        self.main_layout.addWidget(self.favorite_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        self._favorite_path = None
+        self._prefs = None
+
+        # Alle Einstellungen in einem Raster: Beschriftungen links bündig, Felder rechts,
+        # dazwischen Abschnitte (Position, Beschriftung, Darstellung, Maßstab)
+        form = _SectionGrid()
+        self.main_layout.addLayout(form.grid)
+
         # Position des Ankerpunkts (UTMREF + Breite/Länge) mit Kopier-Button
-        self.position_widget = QWidget()
-        position_layout = QVBoxLayout(self.position_widget)
-        position_layout.setContentsMargins(0, 0, 0, 0)
-
-        coord_layout = QHBoxLayout()
+        form.section("Position")
         self.utmref_label = QLabel("")
-        coord_layout.addWidget(self.utmref_label)
         self.btn_copy_coords = QPushButton("Kopieren")
-        self.btn_copy_coords.setMaximumWidth(60)
-        coord_layout.addWidget(self.btn_copy_coords)
-        position_layout.addLayout(coord_layout)
-
+        self.btn_copy_coords.setToolTip("UTMREF in die Zwischenablage kopieren")
+        form.row("UTMREF:", _row_widget(self.utmref_label, self.btn_copy_coords, stretch=0))
         self.latlon_label = QLabel("")
-        position_layout.addWidget(self.latlon_label)
-
+        form.row("Breite/Länge:", self.latlon_label)
         # Koordinaten sind Links: Klick öffnet die Positionseingabe
         for label in (self.utmref_label, self.latlon_label):
             label.setTextFormat(Qt.TextFormat.RichText)
@@ -114,131 +198,80 @@ class FeatureDock(QDockWidget):
             label.setToolTip("Klicken, um die Position per Koordinate zu setzen")
             label.linkActivated.connect(self.on_edit_position)
 
-        self.main_layout.addWidget(self.position_widget)
-
-        # Label und Darstellung
-        label_layout = QHBoxLayout()
-        self.label_textfield_label = QLabel("Label:")
-        label_layout.addWidget(self.label_textfield_label)
+        form.section("Beschriftung")
+        self.label_textfield_label = QLabel("Text:")
         self.label_textfield = QLineEdit()
-        label_layout.addWidget(self.label_textfield)
-        self.cb_enable_label = QCheckBox("Label auf Karte zeigen")
-        label_layout.addWidget(self.cb_enable_label)
-        self.main_layout.addLayout(label_layout)
-
-        font_size_layout = QHBoxLayout()
-        font_size_layout.addWidget(QLabel("Schriftgröße:"))
+        self.label_textfield.setPlaceholderText("Beschriftung des Zeichens")
+        form.row(self.label_textfield_label, self.label_textfield)
+        self.cb_enable_label = QCheckBox("Auf der Karte zeigen")
+        form.row("", self.cb_enable_label)
         self.font_size_box = FontSizeBox()
         self.font_size_box.size_chosen.connect(self.on_font_size_chosen)
-        font_size_layout.addWidget(self.font_size_box)
-        font_size_layout.addWidget(QLabel("pt"))
-        font_size_layout.addStretch()
-        self.main_layout.addLayout(font_size_layout)
+        form.row("Schriftgröße:", _row_widget(self.font_size_box, QLabel("pt")))
 
-        # Größen-SpinBox und Schieberegler
-        size_layout = QHBoxLayout()
+        form.section("Darstellung")
         self.size_label = QLabel("Größe:")
-        size_layout.addWidget(self.size_label)
-
         self.size_spinbox = QSpinBox()
         # Klein genug für Millimeter-Größen nach dem Umschalten von „Mit Karte skalieren“
         self.size_spinbox.setMinimum(1)
         self.size_spinbox.setMaximum(2000)
         self.size_spinbox.setValue(50)
         self.size_spinbox.setSingleStep(1)
-        size_layout.addWidget(self.size_spinbox)
-
-        self.main_layout.addLayout(size_layout)
-
-        # Schieberegler für Größe
-        slider_layout = QHBoxLayout()
-        self.size_slider_label = QLabel("Größe:")
-        slider_layout.addWidget(self.size_slider_label)
-
         self.size_slider = QSlider(Qt.Orientation.Horizontal)
         self.size_slider.setMinimum(1)  # Minimale Größe
         self.size_slider.setMaximum(200)  # Maximale Größe
         self.size_slider.setValue(50)  # Standardwert
-        self.size_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self.size_slider.setTickInterval(20)  # Alle 20 Einheiten eine Markierung
-        slider_layout.addWidget(self.size_slider)
+        form.row(self.size_label, _row_widget(self.size_spinbox, self.size_slider, stretch=1))
 
-        self.main_layout.addLayout(slider_layout)
-
-        # Skalierungs-Checkbox
-        self.scale_checkbox = QCheckBox("Mit Karte skalieren")
-        self.main_layout.addWidget(self.scale_checkbox)
-
-        # Grenzen fürs Mitskalieren: darüber hinaus behält das Zeichen seine Größe
-        limits_layout = QFormLayout()
-        limits_layout.setContentsMargins(20, 0, 0, 0)
-        self.max_scale_widget = self._scale_limit_widget(
-            "Beim Reinzoomen über diesen Maßstab hinaus wird das Zeichen nicht mehr größer.\n"
-            "Leer = wächst immer mit. Der Knopf daneben übernimmt den aktuellen Maßstab."
-        )
-        limits_layout.addRow("Wächst bis:", self.max_scale_widget)
-        self.min_scale_widget = self._scale_limit_widget(
-            "Beim Rauszoomen über diesen Maßstab hinaus wird das Zeichen nicht mehr kleiner.\n"
-            "Leer = schrumpft immer mit. Der Knopf daneben übernimmt den aktuellen Maßstab."
-        )
-        limits_layout.addRow("Schrumpft bis:", self.min_scale_widget)
-        self.scale_limits_widget = QWidget()
-        self.scale_limits_widget.setLayout(limits_layout)
-        self.main_layout.addWidget(self.scale_limits_widget)
-
-        # Rotations-Schieberegler
-        rotation_layout = QHBoxLayout()
-        self.rotation_label = QLabel("Rotation:")
-        rotation_layout.addWidget(self.rotation_label)
-
+        self.rotation_label = QLabel("Drehung:")
         self.rotation_slider = QSlider(Qt.Orientation.Horizontal)
         self.rotation_slider.setMinimum(-180)
         self.rotation_slider.setMaximum(180)
         self.rotation_slider.setValue(0)
         self.rotation_slider.setSingleStep(10)
         self.rotation_slider.setPageStep(10)
-        self.rotation_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self.rotation_slider.setTickInterval(30)
-        rotation_layout.addWidget(self.rotation_slider)
-
         self.rotation_value_label = QLabel("0°")
         self.rotation_value_label.setMinimumWidth(40)
-        rotation_layout.addWidget(self.rotation_value_label)
-
-        self.main_layout.addLayout(rotation_layout)
-
-        # Ankerpunkt (Origin Point)
-        origin_layout = QHBoxLayout()
-        self.origin_label = QLabel("Ankerpunkt:")
-        origin_layout.addWidget(self.origin_label)
-        self.origin_widget = OriginPointWidget()
-        origin_layout.addWidget(self.origin_widget)
-        origin_layout.addStretch()
-        self.main_layout.addLayout(origin_layout)
+        self.rotation_value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.row(self.rotation_label, _row_widget(self.rotation_slider, self.rotation_value_label, stretch=0))
 
         # Hintergrund: Vorschau-Schaltfläche, Form/Farbe/Rand/Größe im Popup
-        background_layout = QHBoxLayout()
-        background_layout.addWidget(QLabel("Hintergrund:"))
         self.background_button = BackgroundButton()
         self.background_button.changed.connect(self.on_background_changed)
-        background_layout.addWidget(self.background_button)
-        background_layout.addStretch()
-        self.main_layout.addLayout(background_layout)
+        form.row("Hintergrund:", _row_widget(self.background_button))
 
-        # Buttons in horizontalem Layout
+        self.origin_label = QLabel("Ankerpunkt:")
+        self.origin_widget = OriginPointWidget()
+        form.row(self.origin_label, _row_widget(self.origin_widget), top=True)
+
+        form.section("Maßstab")
+        self.scale_checkbox = QCheckBox("Mit Karte skalieren")
+        form.row("", self.scale_checkbox)
+        # Grenzen fürs Mitskalieren: darüber hinaus behält das Zeichen seine Größe
+        self.max_scale_widget = self._scale_limit_widget(
+            "Beim Reinzoomen über diesen Maßstab hinaus wird das Zeichen nicht mehr größer.\n"
+            "Leer = wächst immer mit. Der Knopf daneben übernimmt den aktuellen Maßstab."
+        )
+        self.min_scale_widget = self._scale_limit_widget(
+            "Beim Rauszoomen über diesen Maßstab hinaus wird das Zeichen nicht mehr kleiner.\n"
+            "Leer = schrumpft immer mit. Der Knopf daneben übernimmt den aktuellen Maßstab."
+        )
+        self.scale_limits_widget = _RowGroup(
+            form.row("Wächst bis:", self.max_scale_widget),
+            form.row("Schrumpft bis:", self.min_scale_widget),
+        )
+
+        # Löschen mit etwas Abstand unter den Einstellungen
         self.button_layout = QHBoxLayout()
-
+        self.button_layout.setContentsMargins(0, 12, 0, 0)
         self.btn_delete = QPushButton("Löschen")
+        self.btn_delete.setToolTip("Zeichen löschen (Entf)")
         self.button_layout.addWidget(self.btn_delete)
-
         self.main_layout.addLayout(self.button_layout)
 
         # Spacer am Ende hinzufügen, um alles nach oben auszurichten
         spacer = QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
         self.main_layout.addItem(spacer)
-
-        # Tracker für letzte Preview-Datei
-        self.last_preview_path = None
 
         # Erst sichtbar, wenn Toolbox oder Objektplanung offen sind
         self.hide()
@@ -283,7 +316,6 @@ class FeatureDock(QDockWidget):
     def show_objects(self):
         if self.objects_page is None:
             return
-        self._remove_preview_file()
         self.feat = None
         self.objects_page.refresh()
         self.stack.setCurrentWidget(self.objects_page)
@@ -294,17 +326,11 @@ class FeatureDock(QDockWidget):
             return False
         return fid is None or self.feat.id() == fid
 
-    def _remove_preview_file(self):
-        try:
-            if getattr(self, "last_preview_path", None) and os.path.exists(self.last_preview_path):
-                os.remove(self.last_preview_path)
-                self.last_preview_path = None
-        except Exception as e:
-            logger.debug("Konnte Preview-Datei %s nicht löschen: %s", getattr(self, "last_preview_path", None), e)
+    def showing_placeholder(self) -> bool:
+        return self.stack.currentWidget() is self._empty_page
 
     def show_placeholder(self):
         """Nichts ausgewählt: Hinweise anzeigen."""
-        self._remove_preview_file()
         self.feat = None
         self.svg_label.clear()
         self.stack.setCurrentWidget(self._empty_page)
@@ -316,16 +342,16 @@ class FeatureDock(QDockWidget):
         except Exception:
             logger.exception("Konnte Marker-Position nicht nach WGS84 umrechnen")
             self.latlon_label.clear()
-            self.utmref_label.setText("UTMREF: Fehler")
+            self.utmref_label.setText("Fehler")
             self.current_utm_coords = ""
             return
 
-        self.latlon_label.setText(f'Breite/Länge: <a href="edit">{wgs.y():.6f} {wgs.x():.6f}</a>')
+        self.latlon_label.setText(f'<a href="edit">{wgs.y():.6f} {wgs.x():.6f}</a>')
         try:
             utmref = to_mgrs(wgs.y(), wgs.x())
         except ValueError:
             utmref = ""
-        self.utmref_label.setText(f'UTMREF: <a href="edit">{utmref or "–"}</a>')
+        self.utmref_label.setText(f'<a href="edit">{utmref or "–"}</a>')
         self.current_utm_coords = utmref
 
     def on_edit_position(self, _link=None):
@@ -354,10 +380,9 @@ class FeatureDock(QDockWidget):
             svg_content_feat = feat.attribute("svg_content") or ""
 
             if svg_content_feat.strip():
-                temp_svg = self._create_temp_svg_for_preview(svg_content_feat)
-                if temp_svg and os.path.exists(temp_svg):
-                    pixmap = _load_svg_pixmap(temp_svg)
+                pixmap = _svg_pixmap_from_content(svg_content_feat)
 
+            # Ältere Zeilen ohne Inhalt: Katalogdatei zum gespeicherten Pfad
             if pixmap is None or pixmap.isNull():
                 if not os.path.isabs(svg_path_feat):
                     absolute_path = os.path.join(plugin_root(), svg_path_feat)
@@ -367,10 +392,15 @@ class FeatureDock(QDockWidget):
 
             if pixmap is not None and not pixmap.isNull():
                 scaled_pixmap = pixmap.scaled(
-                    180, 180, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+                    _PREVIEW_ICON_PX,
+                    _PREVIEW_ICON_PX,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
                 )
                 self.svg_label.setPixmap(scaled_pixmap)
-                self.svg_label.setStyleSheet("QLabel { border: 2px solid #2E86AB; background-color: white; }")
+                self.svg_label.setStyleSheet(
+                    "QLabel { border: 1px solid #2E86AB; border-radius: 6px; background-color: white; }"
+                )
             else:
                 raise Exception("Pixmap konnte nicht geladen werden")
 
@@ -384,6 +414,9 @@ class FeatureDock(QDockWidget):
             self.svg_label.setText("SVG konnte nicht geladen werden")
             muted = muted_color()
             self.svg_label.setStyleSheet(f"QLabel {{ border: 2px dashed {muted}; color: {muted}; }}")
+
+        self._favorite_path = str(feat.attribute("svg_path") or "") or None
+        self._show_favorite()
 
         # Koordinaten anzeigen
         if feat.geometry():
@@ -492,41 +525,44 @@ class FeatureDock(QDockWidget):
         # Zeigen und nach vorn holen entscheidet das Plugin anhand der Auswahl
         # (sonst würde jedes Drag-Update alle 300 ms den Tab nach vorn holen)
 
-    def _create_temp_svg_for_preview(self, svg_content):
-        """Erstellt eine temporäre SVG-Datei für die Vorschau"""
-        try:
-            # Lösche vorherige Preview-Datei, falls vorhanden
+    def _symbol_prefs(self):
+        """Favoriten des Zeichen-Pickers – erst beim ersten Zeichen holen (liest den Katalog ein)."""
+        if self._prefs is None:
+            self._prefs = symbol_prefs(plugin_root())
+            # Stern im Picker oder in einer anderen Ansicht umgeschaltet: hier mitziehen
+            self._prefs.changed.connect(self._show_favorite)
+        return self._prefs
+
+    def _show_favorite(self):
+        """Stern-Knopf zum gezeigten Zeichen; Zeichen außerhalb der Symbolpalette lassen sich nicht merken."""
+        path = self._favorite_path
+        known = bool(path) and symbol_catalog(plugin_root()).by_path(path) is not None
+        favorite = known and self._symbol_prefs().is_favorite(path)
+        self.favorite_button.setEnabled(known)
+        self.favorite_button.setChecked(favorite)
+        self.favorite_button.setIcon(star_icon(favorite, QColor(muted_color())))
+        self.favorite_button.setText("Favorit" if favorite else "Zu Favoriten hinzufügen")
+        if not known:
+            tip = "Nur Zeichen aus der Symbolpalette lassen sich als Favorit merken"
+        elif favorite:
+            tip = "Klicken, um das Zeichen aus den Favoriten zu entfernen"
+        else:
+            tip = "Als Favorit merken: liegt dann in der Hotbar (Tasten 1–9) und im Zeichen-Picker unter „Favoriten“"
+        self.favorite_button.setToolTip(tip)
+
+    def dispose(self):
+        """Beim Entladen: die Favoriten gelten weiter, sollen aber kein gelöschtes Dock mehr rufen."""
+        if self._prefs is not None:
             try:
-                if getattr(self, "last_preview_path", None) and os.path.exists(self.last_preview_path):
-                    os.remove(self.last_preview_path)
-                    self.last_preview_path = None
-            except Exception as e:
-                logger.debug(
-                    "Konnte vorherige Preview-Datei %s nicht löschen: %s", getattr(self, "last_preview_path", None), e
-                )
+                self._prefs.changed.disconnect(self._show_favorite)
+            except (TypeError, RuntimeError):
+                pass
+            self._prefs = None
 
-            # Erstelle temporäres Verzeichnis falls es nicht existiert
-            temp_dir = os.path.join(plugin_root(), "temp_files", "preview_cache")
-            os.makedirs(temp_dir, exist_ok=True)
-
-            # Erstelle eindeutigen Dateinamen für Preview
-            temp_filename = f"preview_{int(time.time() * 1000)}.svg"
-            temp_path = os.path.join(temp_dir, temp_filename)
-
-            # Schreibe SVG-Inhalt in temporäre Datei
-            with open(temp_path, "w", encoding="utf-8") as f:
-                f.write(svg_content)
-
-            # Prüfe ob die Datei erfolgreich erstellt wurde
-            if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
-                # Merke die zuletzt erzeugte Preview-Datei
-                self.last_preview_path = temp_path
-                return temp_path
-            else:
-                return None
-
-        except Exception:
-            return None
+    def on_favorite_clicked(self):
+        if self._favorite_path:
+            # Meldet ``changed`` – das stellt den Knopf passend ein
+            self._symbol_prefs().toggle_favorite(self._favorite_path)
 
     def on_delete(self):
         fid = self.feat.id()

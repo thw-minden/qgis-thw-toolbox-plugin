@@ -1,5 +1,6 @@
 """GeoPackage-Layer der Objektplanung (Zelte, Fahrzeuge, Strom, Beleuchtung, Gebiete, Pfeile)."""
 
+import base64
 import os
 import time
 
@@ -12,13 +13,16 @@ from qgis.core import (
     QgsFields,
     QgsFillSymbol,
     QgsGeometryGeneratorSymbolLayer,
+    QgsLinePatternFillSymbolLayer,
     QgsLineSymbol,
     QgsMarkerLineSymbolLayer,
     QgsMarkerSymbol,
     QgsPalLayerSettings,
+    QgsPointPatternFillSymbolLayer,
     QgsProject,
     QgsProperty,
     QgsRendererCategory,
+    QgsSimpleFillSymbolLayer,
     QgsSimpleMarkerSymbolLayer,
     QgsSingleSymbolRenderer,
     QgsSvgMarkerSymbolLayer,
@@ -34,7 +38,9 @@ from qgis.PyQt.QtGui import QColor
 
 from ..layer.fields import _T_BOOL, _T_DOUBLE, _T_STRING
 from ..logging_utils import get_logger
+from ..util.svg_minify import minify_svg
 from .catalog import Catalog
+from .zone_style import DEFAULT_OPACITY, DEFAULT_STROKE_WIDTH, DOT_PATTERNS, HATCH_LINES, STYLE_FIELD
 
 logger = get_logger(__name__)
 
@@ -75,6 +81,34 @@ SIGN_ROLES = (ROLE_VEHICLES, ROLE_GENERATORS, ROLE_LIGHTS)
 _SIGN_ON_EXPR = f'coalesce("{SIGN_FIELD}", true)'
 _LAYER_ENABLED = QgsSymbolLayer.Property.LayerEnabled
 _LAYER_ENABLED_KEY = _LAYER_ENABLED if isinstance(_LAYER_ENABLED, int) else _LAYER_ENABLED.value
+# Die taktischen Zeichen liegen eingebettet (``base64:``) im Ausdruck des SVG-Markers, nicht als Pfad in den
+# Plugin-Ordner – so rendert das Projekt auch ohne Plugin. Ältere Layer werden beim Übernehmen einmal umgestellt
+_SVG_NAME = QgsSymbolLayer.Property.Name
+_SVG_NAME_KEY = _SVG_NAME if isinstance(_SVG_NAME, int) else _SVG_NAME.value
+_EMBEDDED_PREFIX = "base64:"
+
+# Gestaltung je Gebiet (JSON im Feld ``gestaltung``, siehe zone_style); leer = Darstellung nach Typ.
+# Ausdrücke, die NULL ergeben, lassen den festen Wert des Symbols (Typfarbe) stehen.
+_ZONE_STYLE = f'json_to_map("{STYLE_FIELD}")'
+
+
+def _zone_style_get(key: str) -> str:
+    return f"map_get({_ZONE_STYLE}, '{key}')"
+
+
+_ZONE_PATTERN_EXPR = f"coalesce({_zone_style_get('pattern')}, 'voll')"
+_ZONE_FILL_EXPR = (
+    f"set_color_part({_zone_style_get('fill')}, 'alpha', "
+    f"round(255 * coalesce({_zone_style_get('opacity')}, {DEFAULT_OPACITY})))"
+)
+_ZONE_STROKE_COLOR_EXPR = f"nullif({_zone_style_get('stroke')}, '')"
+_ZONE_STROKE_WIDTH_EXPR = f"coalesce({_zone_style_get('stroke_width')}, {DEFAULT_STROKE_WIDTH})"
+_ZONE_STROKE_STYLE_EXPR = (
+    f"if({_zone_style_get('stroke')} = '', 'no', coalesce({_zone_style_get('stroke_style')}, 'solid'))"
+)
+# Schraffur-Abstand und Linienstärke (mm)
+_HATCH_DISTANCE_MM = 2.5
+_HATCH_WIDTH_MM = 0.35
 
 # Zelte und Fahrzeuge: Rechteck-Grundflächen mit identischem Schema
 _FOOTPRINT_FIELDS = [
@@ -161,6 +195,8 @@ def build_fields(role: str) -> QgsFields:
     fields.append(QgsField(LABEL_SIZE_FIELD, _T_DOUBLE))
     if role in SIGN_ROLES:
         fields.append(QgsField(SIGN_FIELD, _T_BOOL))
+    if role == ROLE_ZONES:
+        fields.append(QgsField(STYLE_FIELD, _T_STRING))
     return fields
 
 
@@ -214,6 +250,8 @@ class PlanningLayers(QObject):
         self.catalog = catalog
         self._layers: dict[str, QgsVectorLayer] = {}
         self._resaving = False
+        # Eingebettete Zeichen je Katalogpfad (``svgs/<rel>``), einmal gelesen
+        self._sign_data: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Zugriff
@@ -275,6 +313,7 @@ class PlanningLayers(QObject):
                 lyr.setCustomProperty(ROLE_PROPERTY, role)
                 _ensure_label_switch(lyr)
                 self._ensure_sign_switch(lyr, role)
+                self._ensure_zone_style(lyr, role)
                 self._layers[role] = lyr
                 self._connect(lyr)
 
@@ -322,6 +361,7 @@ class PlanningLayers(QObject):
         self.apply_style(lyr, role)
         _ensure_label_switch(lyr)
         self._ensure_sign_switch(lyr, role)
+        self._ensure_zone_style(lyr, role)
 
         proj = QgsProject.instance()
         proj.addMapLayer(lyr, False)
@@ -512,11 +552,7 @@ class PlanningLayers(QObject):
             lyr.setRenderer(QgsSingleSymbolRenderer(_distributor_symbol()))
             _set_labels(lyr, 'coalesce(nullif("bezeichnung", \'\'), "typ")')
         elif role == ROLE_ZONES:
-            renderer = QgsCategorizedSymbolRenderer(
-                "typ_id", [QgsRendererCategory(t.id, _zone_symbol(t.farbe), t.name) for t in self.catalog.gebiete]
-            )
-            renderer.setSourceSymbol(_zone_symbol("#1565c0"))
-            lyr.setRenderer(renderer)
+            lyr.setRenderer(self._zone_renderer())
             # Gebiete sind groß – ihre Namen sollen auch in der Übersicht lesbar sein
             _set_labels(lyr, 'coalesce(nullif("bezeichnung", \'\'), "typ")', polygon=True, min_scale=50000)
         elif role == ROLE_ARROWS:
@@ -526,6 +562,25 @@ class PlanningLayers(QObject):
             renderer.setSourceSymbol(_arrow_symbol("#c62828"))
             lyr.setRenderer(renderer)
             _set_labels(lyr, "nullif(\"bezeichnung\", '')", line=True, min_scale=50000)
+        lyr.triggerRepaint()
+
+    def _zone_renderer(self) -> QgsCategorizedSymbolRenderer:
+        renderer = QgsCategorizedSymbolRenderer(
+            "typ_id", [QgsRendererCategory(t.id, _zone_symbol(t.farbe), t.name) for t in self.catalog.gebiete]
+        )
+        renderer.setSourceSymbol(_zone_symbol("#1565c0"))
+        return renderer
+
+    def _ensure_zone_style(self, lyr: QgsVectorLayer, role: str) -> None:
+        """Ältere Gebiete-Layer nachrüsten: Feld ``gestaltung`` ergänzen und die Darstellung daran knüpfen."""
+        if role != ROLE_ZONES or not _ensure_field(lyr, STYLE_FIELD, _T_STRING):
+            return
+        renderer = lyr.renderer()
+        source = renderer.sourceSymbol() if isinstance(renderer, QgsCategorizedSymbolRenderer) else None
+        if source is not None and _has_sign_switch(source):
+            return
+        # Darstellung aus einer Version ohne Gestaltung – neu aufbauen, die Beschriftung bleibt
+        lyr.setRenderer(self._zone_renderer())
         lyr.triggerRepaint()
 
     def _sign_symbol(self, role: str):
@@ -538,25 +593,51 @@ class PlanningLayers(QObject):
         return _vehicle_symbol(self._sign_expr(self.catalog.fahrzeuge, "THW_Fahrzeuge/Kraftfahrzeug.svg"))
 
     def _ensure_sign_switch(self, lyr: QgsVectorLayer, role: str) -> None:
-        """Ältere Layer nachrüsten: Feld ``zeichen`` ergänzen und das taktische Zeichen daran knüpfen."""
+        """Ältere Layer nachrüsten: Feld ``zeichen`` ergänzen, das taktische Zeichen daran knüpfen und einbetten.
+
+        Zeigt ein Zeichen noch als Pfad in den Plugin-Ordner, wird die Darstellung einmal neu aufgebaut
+        (danach steht ``base64:`` im Ausdruck, ein weiteres Öffnen ändert nichts mehr). Die Beschriftung bleibt.
+        """
         if role not in SIGN_ROLES or not _ensure_field(lyr, SIGN_FIELD):
             return
         renderer = lyr.renderer()
-        if isinstance(renderer, QgsSingleSymbolRenderer) and not _has_sign_switch(renderer.symbol()):
-            # Darstellung aus einer Version ohne Schalter – neu aufbauen, die Beschriftung bleibt
-            lyr.setRenderer(QgsSingleSymbolRenderer(self._sign_symbol(role)))
-            lyr.triggerRepaint()
+        if not isinstance(renderer, QgsSingleSymbolRenderer):
+            return
+        symbol = renderer.symbol()
+        if _has_sign_switch(symbol) and _signs_embedded(symbol):
+            return
+        # Darstellung aus einer Version ohne Schalter oder mit Zeichen aus dem Plugin-Ordner – neu aufbauen
+        lyr.setRenderer(QgsSingleSymbolRenderer(self._sign_symbol(role)))
+        lyr.triggerRepaint()
 
     def _sign_expr(self, types, default: str) -> str:
-        """Ausdruck: Pfad des taktischen Zeichens je ``typ_id`` (aus dem Katalog)."""
+        """Ausdruck: eingebettetes taktisches Zeichen (``base64:``) je ``typ_id`` aus dem Katalog.
+
+        base64 enthält keine Anführungszeichen; das Escaping bleibt für den Ersatzpfad, falls eine Datei fehlt.
+        """
 
         def path(rel: str) -> str:
-            full = os.path.join(self.plugin_dir, "svgs", rel).replace("\\", "/")
-            return "'" + full.replace("'", "''") + "'"
+            return "'" + self._sign_data_uri(rel).replace("'", "''") + "'"
 
         pairs = ", ".join(f"'{t.id}', {path(t.zeichen)}" for t in types if t.zeichen)
         lookup = f'map_get(map({pairs}), "typ_id")' if pairs else "NULL"
         return f"coalesce({lookup}, {path(default)})"
+
+    def _sign_data_uri(self, rel: str) -> str:
+        """``base64:``-Pfad des verkleinerten Katalog-SVGs ``svgs/<rel>``; fehlt die Datei, ihr Pfad auf der Platte."""
+        cached = self._sign_data.get(rel)
+        if cached is not None:
+            return cached
+        full = os.path.join(self.plugin_dir, "svgs", rel)
+        try:
+            with open(full, encoding="utf-8") as f:
+                text = f.read()
+        except (OSError, UnicodeDecodeError) as e:
+            logger.warning("Taktisches Zeichen %s nicht lesbar, Pfad bleibt: %s", rel, e)
+            return full.replace("\\", "/")
+        uri = _EMBEDDED_PREFIX + base64.b64encode(minify_svg(text).encode("utf-8")).decode("ascii")
+        self._sign_data[rel] = uri
+        return uri
 
 
 def _tent_symbol() -> QgsFillSymbol:
@@ -678,6 +759,27 @@ def _has_sign_switch(symbol) -> bool:
     return any(layer.dataDefinedProperties().isActive(_LAYER_ENABLED_KEY) for layer in symbol.symbolLayers())
 
 
+def _symbol_layers_deep(symbol):
+    """Alle Symbolebenen samt Unter-Symbolen (beim Fahrzeug trägt ein Geometrie-Generator das Zeichen)."""
+    for layer in symbol.symbolLayers():
+        yield layer
+        sub = layer.subSymbol()
+        if sub is not None:
+            yield from _symbol_layers_deep(sub)
+
+
+def _signs_embedded(symbol) -> bool:
+    """True, wenn jeder SVG-Marker sein Zeichen eingebettet trägt statt als Pfad (in den Plugin-Ordner)."""
+    for layer in _symbol_layers_deep(symbol):
+        if not isinstance(layer, QgsSvgMarkerSymbolLayer):
+            continue
+        prop = layer.dataDefinedProperties().property(_SVG_NAME_KEY)
+        name = prop.expressionString() if prop.isActive() else layer.path()
+        if name and _EMBEDDED_PREFIX not in name:
+            return False
+    return True
+
+
 def _sign_symbol_layers(symbol: QgsMarkerSymbol, sign_expr: str, size_mm: float, color: str) -> None:
     """Zeichen auf rundem Grund (schon erste Ebene von ``symbol``) plus Ersatzpunkt, wenn es aus ist.
 
@@ -719,15 +821,66 @@ def _rgba(color: str, alpha: int = 255) -> str:
 
 
 def _zone_symbol(color: str) -> QgsFillSymbol:
-    return QgsFillSymbol.createSimple(
-        {
-            "color": _rgba(color, 45),
-            "outline_color": _rgba(color),
-            "outline_width": "0.8",
-            "outline_width_unit": "MM",
-            "joinstyle": "round",
-        }
+    """Gebiet in der Typfarbe; die Gestaltung des Gebiets (Feld ``gestaltung``) überschreibt Füllung und Rand.
+
+    Ebenen: Flächenfüllung, je eine Linienschraffur pro Winkel, Punktraster und zuletzt der Rand –
+    welche Füllung zu sehen ist, entscheidet das Muster.
+    """
+    symbol = QgsFillSymbol.createSimple({"color": _rgba(color, 45), "outline_style": "no"})
+    fill = symbol.symbolLayer(0)
+    fill.setDataDefinedProperty(QgsSymbolLayer.Property.FillColor, QgsProperty.fromExpression(_ZONE_FILL_EXPR))
+    _enable_for_patterns(fill, ("voll",))
+
+    for angle, patterns in HATCH_LINES:
+        hatch = QgsLinePatternFillSymbolLayer()
+        hatch.setLineAngle(angle)
+        hatch.setDistance(_HATCH_DISTANCE_MM)
+        hatch.setDistanceUnit(Qgis.RenderUnit.Millimeters)
+        hatch.setLineWidth(_HATCH_WIDTH_MM)
+        hatch.setColor(QColor(color))
+        hatch.subSymbol().symbolLayer(0).setDataDefinedProperty(
+            QgsSymbolLayer.Property.StrokeColor, QgsProperty.fromExpression(_ZONE_FILL_EXPR)
+        )
+        _enable_for_patterns(hatch, patterns)
+        symbol.appendSymbolLayer(hatch)
+
+    dots = QgsPointPatternFillSymbolLayer()
+    dots.setDistanceX(_HATCH_DISTANCE_MM)
+    dots.setDistanceY(_HATCH_DISTANCE_MM)
+    dots.setDistanceXUnit(Qgis.RenderUnit.Millimeters)
+    dots.setDistanceYUnit(Qgis.RenderUnit.Millimeters)
+    # Jede zweite Reihe versetzt, wie ein Punktraster auf Papier
+    dots.setDisplacementX(_HATCH_DISTANCE_MM / 2)
+    dots.setDisplacementXUnit(Qgis.RenderUnit.Millimeters)
+    dot = QgsMarkerSymbol.createSimple({"name": "circle", "size": "0.7", "size_unit": "MM", "outline_style": "no"})
+    dot.setColor(QColor(color))
+    dot.symbolLayer(0).setDataDefinedProperty(
+        QgsSymbolLayer.Property.FillColor, QgsProperty.fromExpression(_ZONE_FILL_EXPR)
     )
+    dots.setSubSymbol(dot)
+    _enable_for_patterns(dots, DOT_PATTERNS)
+    symbol.appendSymbolLayer(dots)
+
+    outline = QgsSimpleFillSymbolLayer()
+    outline.setBrushStyle(Qt.BrushStyle.NoBrush)
+    outline.setStrokeColor(QColor(color))
+    outline.setStrokeWidth(DEFAULT_STROKE_WIDTH)
+    outline.setStrokeWidthUnit(Qgis.RenderUnit.Millimeters)
+    outline.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    for prop, expression in (
+        (QgsSymbolLayer.Property.StrokeColor, _ZONE_STROKE_COLOR_EXPR),
+        (QgsSymbolLayer.Property.StrokeWidth, _ZONE_STROKE_WIDTH_EXPR),
+        (QgsSymbolLayer.Property.StrokeStyle, _ZONE_STROKE_STYLE_EXPR),
+    ):
+        outline.setDataDefinedProperty(prop, QgsProperty.fromExpression(expression))
+    symbol.appendSymbolLayer(outline)
+    return symbol
+
+
+def _enable_for_patterns(layer: QgsSymbolLayer, patterns) -> None:
+    """Füllebene nur zeichnen, wenn das Gebiet eines dieser Muster hat."""
+    listed = ", ".join(f"'{p}'" for p in patterns)
+    layer.setDataDefinedProperty(_LAYER_ENABLED, QgsProperty.fromExpression(f"{_ZONE_PATTERN_EXPR} IN ({listed})"))
 
 
 def _arrow_symbol(color: str) -> QgsLineSymbol:

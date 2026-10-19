@@ -60,6 +60,7 @@ from .tools import (
     VertexTool,
     ZoneTool,
 )
+from .zone_style import STYLE_FIELD, ZoneStyle, zone_style_of
 
 logger = get_logger(__name__)
 
@@ -334,8 +335,11 @@ class PlanningController(QObject):
 
     def add_marker_at(self, map_point: QgsPointXY, global_pos):
         """Rechtsklick auf die Karte: taktisches Zeichen im Picker wählen und an der Klickstelle setzen."""
-        if self.plugin is not None:
-            self.plugin.pick_marker_at(map_point, global_pos)
+        if self.plugin is None:
+            return
+        # Erst nach dem Rechtsklick öffnen – Windows liefert danach noch das Kontextmenü-Ereignis
+        plugin = self.plugin
+        QTimer.singleShot(0, lambda: plugin.pick_marker_at(map_point, global_pos))
 
     def marker_slots(self) -> tuple[list[Symbol], bool]:
         """Zeichen für Hotbar und Tasten 1–9 und ob es Favoriten sind.
@@ -668,6 +672,9 @@ class PlanningController(QObject):
             feat.setAttribute("breite", obj.breite)
             feat.setAttribute("abspannung", obj.abspannung)
             feat.setAttribute("rotation", round(rotation, 2))
+            if role == ROLE_VEHICLES and feat.fields().indexFromName(SIGN_FIELD) >= 0:
+                # Neue Fahrzeuge zeigen nur ihre Grundfläche; das Zeichen lässt sich in den Details einschalten
+                feat.setAttribute(SIGN_FIELD, False)
             features.append(feat)
         return self.layers.add_features(role, features)
 
@@ -960,6 +967,34 @@ class PlanningController(QObject):
                 self.layers.changed.emit()
             else:
                 self.layers.change_features(role, {}, {fid: {LABEL_SIZE_FIELD: size_pt} for fid in fids})
+
+    def zone_type_color(self, feature) -> str:
+        """Farbe des Gebietstyps (Katalog) – Grundlage der Darstellung ohne eigene Gestaltung."""
+        type_id = feature.attribute("typ_id")
+        return next((t.farbe for t in self.catalog.gebiete if t.id == type_id), "#1565c0")
+
+    def selection_zone_styles(self) -> list[ZoneStyle]:
+        """Gestaltung je ausgewähltem Gebiet (ohne eigene Angabe: nach Typ)."""
+        return [zone_style_of(f, self.zone_type_color(f)) for role, f in self.selection() if role == ROLE_ZONES]
+
+    def update_selection_zone_styles(self, changes: dict):
+        """Geänderte Angaben (Muster, Farbe, Rand …) auf alle ausgewählten Gebiete anwenden.
+
+        Jedes Gebiet behält dabei seine übrigen Einstellungen, z. B. die eigene Farbe.
+        """
+        attrs = {
+            f.id(): {STYLE_FIELD: zone_style_of(f, self.zone_type_color(f)).updated(**changes).to_json()}
+            for role, f in self.selection()
+            if role == ROLE_ZONES
+        }
+        if attrs:
+            self.layers.change_features(ROLE_ZONES, {}, attrs)
+
+    def reset_selection_zone_styles(self):
+        """Eigene Gestaltung der ausgewählten Gebiete entfernen – wieder Darstellung nach Typ."""
+        fids = self.selection_ids().get(ROLE_ZONES, set())
+        if fids:
+            self.layers.change_features(ROLE_ZONES, {}, {fid: {STYLE_FIELD: None} for fid in fids})
 
     def selection_signs_visible(self) -> list[bool]:
         """Je Fahrzeug, Stromerzeuger bzw. Leuchte der Auswahl: zeigt es sein taktisches Zeichen?"""

@@ -10,6 +10,7 @@ from collections import Counter
 from qgis.core import QgsCoordinateTransform, QgsProject
 from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtWidgets import (
+    QApplication,
     QCheckBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -25,6 +26,7 @@ from qgis.PyQt.QtWidgets import (
 
 from ..ui.font_size_box import FontSizeBox
 from ..ui.theme import muted_style
+from ..ui.zone_style_popup import ZoneStyleButton
 from ..util.coordinates import WGS84, to_mgrs
 from .catalog import fmt_m
 from .geometry import MetricFrame
@@ -152,17 +154,51 @@ def properties(role: str, feature, crs) -> list[tuple[str, str]]:
     elif role == ROLE_ARROWS:
         rows.append(("Länge", measure_text(role, [feature], crs)))
     if feature.hasGeometry():
-        rows.append(("Position", _utmref(feature, crs)))
+        # Wie bei den Zeichen: UTMREF und Breite/Länge (Mitte des Objekts)
+        utmref, latlon = _coords(feature.geometry().centroid().asPoint(), crs)
+        rows.append(("UTMREF", utmref))
+        rows.append(("Breite/Länge", latlon))
+        if role == ROLE_ZONES:
+            for number, (utmref, latlon) in enumerate(zone_points(feature, crs), 1):
+                rows.append((f"Punkt {number}", f"{utmref}\n{latlon}"))
     return rows
 
 
-def _utmref(feature, crs) -> str:
+def zone_points(feature, crs) -> list[tuple[str, str]]:
+    """Eckpunkte eines Gebiets (Außenrand, ohne den schließenden Punkt) als (UTMREF, „Breite Länge“)."""
+    geom = feature.geometry()
+    if geom is None or geom.isEmpty():
+        return []
+    polygons = geom.asMultiPolygon() if geom.isMultipart() else [geom.asPolygon()]
+    points = []
+    for polygon in polygons:
+        if not polygon:
+            continue
+        ring = list(polygon[0])
+        if len(ring) > 1 and ring[0] == ring[-1]:
+            ring.pop()
+        points.extend(_coords(point, crs) for point in ring)
+    return points
+
+
+def zone_points_text(feature, crs) -> str:
+    """Eckpunkte zum Kopieren: je Zeile Nummer, UTMREF und Breite/Länge, durch Tabulator getrennt."""
+    return "\n".join(
+        f"{number}\t{utmref}\t{latlon}" for number, (utmref, latlon) in enumerate(zone_points(feature, crs), 1)
+    )
+
+
+def _coords(point, crs) -> tuple[str, str]:
+    """Punkt als UTMREF und „Breite Länge“ (WGS 84)."""
     try:
-        center = feature.geometry().centroid().asPoint()
-        wgs = QgsCoordinateTransform(crs, WGS84, QgsProject.instance()).transform(center)
-        return to_mgrs(wgs.y(), wgs.x()) or "–"
+        wgs = QgsCoordinateTransform(crs, WGS84, QgsProject.instance()).transform(point)
     except Exception:
-        return "–"
+        return "–", "–"
+    try:
+        utmref = to_mgrs(wgs.y(), wgs.x()) or "–"
+    except ValueError:
+        utmref = "–"
+    return utmref, f"{wgs.y():.6f} {wgs.x():.6f}"
 
 
 def _show_states(box: QCheckBox, states: list[bool]):
@@ -243,6 +279,15 @@ class SelectionDetails(QWidget):
         self._rotation.valueChanged.connect(self._on_rotation_edited)
         form.addRow("Drehung:", self._rotation)
         self._rotation_label = form.labelForField(self._rotation)
+        # Gebiete: Muster bzw. Schraffur, Farbe, Deckkraft und Rand im Popup (wie der Hintergrund der Zeichen)
+        self._zone_style = ZoneStyleButton()
+        self._zone_style.changed.connect(controller.update_selection_zone_styles)
+        self._zone_style.reset.connect(controller.reset_selection_zone_styles)
+        zone_style_row = QHBoxLayout()
+        zone_style_row.addWidget(self._zone_style)
+        zone_style_row.addStretch()
+        form.addRow("Gestaltung:", zone_style_row)
+        self._zone_style_label = form.labelForField(zone_style_row)
         layout.addLayout(form)
 
         # Angaben zum einzelnen Objekt – werden bei jeder Aktualisierung neu aufgebaut
@@ -313,6 +358,12 @@ class SelectionDetails(QWidget):
             _show_states(self._signs_shown, signs)
         self._rotation.setVisible(footprint)
         self._rotation_label.setVisible(footprint)
+        # Gestaltung nur, wenn ausschließlich Gebiete ausgewählt sind
+        zone_styles = self.controller.selection_zone_styles() if all(r == ROLE_ZONES for r, _f in items) else []
+        self._zone_style.setVisible(bool(zone_styles))
+        self._zone_style_label.setVisible(bool(zone_styles))
+        if zone_styles:
+            self._zone_style.set_style(zone_styles[0])
         if footprint:
             self._rotation_value = _num(single[1], "rotation") % 360.0
             self._rotation.blockSignals(True)
@@ -327,6 +378,12 @@ class SelectionDetails(QWidget):
                 text = QLabel(value)
                 text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
                 self._props.addRow(f"{label}:", text)
+            if role == ROLE_ZONES and feature.hasGeometry():
+                points = zone_points_text(feature, self._crs(role))
+                copy = QPushButton("Eckpunkte kopieren")
+                copy.setToolTip("Alle Eckpunkte (UTMREF und Breite/Länge) in die Zwischenablage kopieren")
+                copy.clicked.connect(lambda _checked=False, text=points: QApplication.clipboard().setText(text))
+                self._props.addRow("", copy)
 
         self._fill_list(items if single is None else [])
         self._rotate.setEnabled(any(role in FOOTPRINT_ROLES for role, _f in items))

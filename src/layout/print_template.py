@@ -10,7 +10,9 @@ Laden am fertigen Layout:
   Layout-Variablen (`@thw_ov`, ...) ersetzt. Die Werte lassen sich danach in den
   Layout-Eigenschaften unter "Variablen" ändern.
 - Relative Bildpfade (`./GRAFIKEN/LAYOUT/...`) werden neben der Vorlage bzw. in
-  `templates/assets/` gesucht, falls das Projekt die Grafiken nicht mitbringt.
+  `templates/assets/` gesucht, falls das Projekt die Grafiken nicht mitbringt;
+  gefundene SVGs landen eingebettet (`base64:`) im Layout, damit sich das Projekt
+  auch ohne den Plugin-Ordner öffnen lässt.
 - Trägt die Karte `Hauptkarte` die Gitter `UTMREF` / `LONLAT`, wird das gewählte
   eingeschaltet; die Karte übernimmt den aktuellen Ausschnitt in dessen UTM-Zone.
 - Übersichtskarten zeigen nur die Hintergrundkarte.
@@ -18,6 +20,7 @@ Laden am fertigen Layout:
 - Die Legende wird auf das Nötige reduziert (siehe `legend.py`).
 """
 
+import base64
 import json
 import math
 import os
@@ -26,6 +29,7 @@ import shutil
 from dataclasses import dataclass
 
 from qgis.core import (
+    Qgis,
     QgsApplication,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
@@ -45,6 +49,7 @@ from qgis.PyQt.QtXml import QDomDocument
 
 from ..logging_utils import get_logger
 from ..tools.layer_setup import GROUP_NAME_BASEMAPS
+from ..util.svg_minify import minify_svg
 from .legend import apply_legend
 
 logger = get_logger(__name__)
@@ -83,6 +88,10 @@ _VSNFD_ID = "VS-NfD"
 _MAIN_MAP_ID = "Hauptkarte"
 _BUNDESLOGO_ID = "Logo Bundesadler"
 _UNIT_SIGN_ID = "Taktisches Zeichen Einheit"
+
+# Eingebettete Bilder (base64:) – QGIS erkennt das Format dann nicht am Dateinamen, es muss mitgegeben werden
+_EMBEDDED_PREFIX = "base64:"
+_PICTURE_SVG = Qgis.PictureFormat.SVG if hasattr(Qgis, "PictureFormat") else QgsLayoutItemPicture.FormatSVG
 
 _STANDARD_SCALES = (500, 1000, 2500, 5000, 10000, 25000, 50000, 100000, 200000, 250000, 500000, 1000000)
 
@@ -402,13 +411,16 @@ def _apply_canvas_view(layout: QgsPrintLayout, canvas) -> None:
 
 
 def _basemap_layers() -> list:
-    """Eingeschaltete Hintergrundkarten: die der Gruppe aus dem Setup, sonst alle Raster- und Kachellayer."""
+    """Eingeschaltete Hintergrundkarten: die der Gruppe aus dem Setup, sonst alle Raster- und Kachellayer.
+
+    Vektorlayer zählen nie dazu, auch nicht in der Gruppe: Dort landet z. B. der Layer der
+    taktischen Zeichen, wenn er angelegt wird, während die Gruppe im Layerbaum gewählt ist.
+    """
     root = QgsProject.instance().layerTreeRoot()
     group = root.findGroup(GROUP_NAME_BASEMAPS)
-    nodes = [n for n in (group.findLayers() if group else []) if n.isVisible()]
-    if not nodes:
-        nodes = [n for n in root.findLayers() if n.isVisible() and not isinstance(n.layer(), QgsVectorLayer)]
-    return [n.layer() for n in nodes if n.layer() is not None]
+    candidates = [n for n in root.findLayers() if n.isVisible() and not isinstance(n.layer(), QgsVectorLayer)]
+    in_group = [n for n in candidates if group is not None and group.findLayer(n.layerId()) is not None]
+    return [n.layer() for n in (in_group or candidates) if n.layer() is not None]
 
 
 def _apply_overview_layers(layout: QgsPrintLayout) -> None:
@@ -423,17 +435,40 @@ def _apply_overview_layers(layout: QgsPrintLayout) -> None:
 
 
 def _fix_picture_paths(layout: QgsPrintLayout, search_dirs: list[str]) -> None:
-    """Fehlende Bilder (relativ zum Projekt gedacht) in `search_dirs` suchen, zuerst mit Unterordner."""
+    """Bilder der Vorlage finden und SVGs einbetten, damit das Projekt ohne Plugin-Ordner auskommt.
+
+    Fehlende Bilder (relativ zum Projekt gedacht) werden in `search_dirs` gesucht, zuerst mit Unterordner.
+    Gefundene SVGs landen als ``base64:`` im Bildelement – rendert in QGIS 3.44 und 4.2 wie die Datei und
+    übersteht Speichern/Laden des Projekts. Andere Formate behalten ihren Pfad.
+    """
     for picture in _items_of_type(layout, QgsLayoutItemPicture):
         current = picture.picturePath()
-        if not current or os.path.exists(current):
+        if not current or current.startswith(_EMBEDDED_PREFIX):
             continue
-        relative = current.replace("\\", "/")
-        names = [os.path.basename(relative)] if os.path.isabs(relative) else [relative, os.path.basename(relative)]
-        found = next(
-            (p for name in names for folder in search_dirs if os.path.isfile(p := os.path.join(folder, name))), None
-        )
-        if found:
-            picture.setPicturePath(found)
-        else:
+        found = current if os.path.isfile(current) else _find_picture(current, search_dirs)
+        if not found:
             logger.warning("Bild der Druckvorlage nicht gefunden: %s", current)
+        elif found.lower().endswith(".svg"):
+            _embed_svg(picture, found)
+        elif found != current:
+            picture.setPicturePath(found)
+
+
+def _find_picture(current: str, search_dirs: list[str]) -> str | None:
+    relative = current.replace("\\", "/")
+    names = [os.path.basename(relative)] if os.path.isabs(relative) else [relative, os.path.basename(relative)]
+    return next(
+        (p for name in names for folder in search_dirs if os.path.isfile(p := os.path.join(folder, name))), None
+    )
+
+
+def _embed_svg(picture: QgsLayoutItemPicture, path: str) -> None:
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except (OSError, UnicodeDecodeError) as e:
+        logger.warning("Bild der Druckvorlage %s nicht einbettbar, Pfad bleibt: %s", path, e)
+        picture.setPicturePath(path)
+        return
+    data = base64.b64encode(minify_svg(text).encode("utf-8")).decode("ascii")
+    picture.setPicturePath(_EMBEDDED_PREFIX + data, _PICTURE_SVG)

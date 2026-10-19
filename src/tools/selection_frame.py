@@ -1,3 +1,4 @@
+import hashlib
 import math
 import os
 from dataclasses import dataclass
@@ -19,7 +20,7 @@ from qgis.PyQt.QtGui import (
     QTransform,
 )
 
-from ..layer.renderer import svg_symbol_layer
+from ..layer.renderer import is_embedded_svg_path, svg_symbol_layer
 
 # Figma-like selection blue
 _FRAME_COLOR = QColor(13, 153, 255)
@@ -118,11 +119,17 @@ def _content_bounds(svg) -> tuple[float, float, float, float]:
     padding; framing the viewBox would leave a large empty margin.
     """
     path = svg.path()
-    try:
-        stat = os.stat(path)
-        key = (path, stat.st_mtime_ns, stat.st_size)
-    except OSError:
-        key = (path,)
+    # Das SVG steckt als base64-Pfad im Symbol (einige KB): als Schlüssel genügt sein Digest.
+    # Dateipfade (Katalog, alte Projekte) zählen mtime und Größe mit, damit eine geänderte
+    # Datei neu vermessen wird.
+    digest = hashlib.sha1(path.encode("utf-8", "replace")).hexdigest()
+    key: tuple = (digest,)
+    if not is_embedded_svg_path(path):
+        try:
+            stat = os.stat(path)
+            key = (digest, stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            pass
     cached = _content_bounds_cache.get(key)
     if cached is not None:
         return cached
@@ -140,7 +147,7 @@ def _content_bounds(svg) -> tuple[float, float, float, float]:
                 (rect.right() + 1) / image.width(),
                 (rect.bottom() + 1) / image.height(),
             )
-    # The renderer rewrites its temp SVGs on every rebuild (new mtime → new key)
+    # Ein Eintrag je Zeichen; werden es zu viele verschiedene, einfach von vorn
     if len(_content_bounds_cache) >= _CONTENT_CACHE_MAX:
         _content_bounds_cache.clear()
     _content_bounds_cache[key] = bounds

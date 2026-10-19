@@ -7,14 +7,20 @@ will, hakt einzelne Layer im Druckvorlagen-Dialog an oder ab; die Abweichung
 wird als Layer-Eigenschaft im Projekt gespeichert.
 
 Die Legende wird einmalig aufgebaut und folgt dem Projekt danach nicht mehr von
-selbst. „Legende aktualisieren“ im Layout-Menü des Designers baut sie neu auf.
+selbst. Der Button „Legende aktualisieren“ in der Toolbar des Designers (auch im
+Layout-Menü) baut sie neu auf; sein Menü stellt ein, was in der Legende steht.
 """
 
+from functools import partial
+
 from qgis.core import (
+    Qgis,
+    QgsApplication,
     QgsCoordinateTransform,
     QgsCsException,
     QgsFeatureRequest,
     QgsLayerTree,
+    QgsLayout,
     QgsLayoutItemLegend,
     QgsLegendRenderer,
     QgsLegendStyle,
@@ -27,8 +33,8 @@ from qgis.core import (
     QgsUnitTypes,
     QgsVectorLayer,
 )
-from qgis.PyQt.QtCore import QPointF
-from qgis.PyQt.QtWidgets import QAction
+from qgis.PyQt.QtCore import QPointF, Qt
+from qgis.PyQt.QtWidgets import QAction, QMainWindow, QMenu, QToolBar, QToolButton
 
 from ..layer.background import DEFAULT_SCALE
 from ..layer.renderer import category_value, svg_symbol_layer
@@ -36,6 +42,10 @@ from ..planning.layers import ROLE_PROPERTY
 
 # Layer-Eigenschaft: 1/0 überstimmt die Regel aus `_default_in_legend`
 LEGEND_PROPERTY = "thw_toolbox/legende"
+# Layout-Eigenschaft: 1 = Überschriften über den Layern der Toolbox (Taktische Zeichen, Fahrzeuge …)
+TITLES_PROPERTY = "thw_toolbox/legende_ueberschriften"
+# Überschrift der taktischen Zeichen statt des Layernamens
+MARKER_TITLE = "Taktische Zeichen"
 
 
 def _is_marker_layer(layer) -> bool:
@@ -71,6 +81,27 @@ def legend_candidates() -> list[QgsMapLayer]:
     return [node.layer() for node in nodes if node.isVisible() and node.layer() is not None]
 
 
+def titles_shown(layout: QgsLayout) -> bool:
+    return str(layout.customProperty(TITLES_PROPERTY, "")).lower() in ("1", "true")
+
+
+def set_titles_shown(layout: QgsLayout, show: bool) -> None:
+    layout.setCustomProperty(TITLES_PROPERTY, int(show))
+
+
+def _take_project_tree(legend: QgsLayoutItemLegend) -> None:
+    """Eigenes Legendenmodell mit dem aktuellen Stand des Projekt-Layerbaums, das ihm danach nicht mehr folgt.
+
+    Das Hin- und Herschalten verwirft auch Verweise auf Layer, die es nicht mehr gibt.
+    """
+    if hasattr(legend, "setSyncMode"):  # QGIS 4
+        legend.setSyncMode(Qgis.LegendSyncMode.AllProjectLayers)
+        legend.setSyncMode(Qgis.LegendSyncMode.Manual)
+    else:
+        legend.setAutoUpdateModel(True)
+        legend.setAutoUpdateModel(False)
+
+
 def apply_legend(legend: QgsLayoutItemLegend) -> None:
     """Legende auf das Nötige reduzieren. Die Kartendarstellung bleibt unverändert.
 
@@ -78,12 +109,10 @@ def apply_legend(legend: QgsLayoutItemLegend) -> None:
     Renderer der taktischen Zeichen legt pro Feature eine Kategorie mit eigener
     Größe/Drehung an; hier bleibt pro Zeichen ein Eintrag mit einem eigenen
     Symbol fester Größe (in mm). Die Layer der Toolbox stehen ohne Überschrift
-    da, ihre Zeichen erklären sich selbst.
+    da, ihre Zeichen erklären sich selbst – außer `titles_shown` ist am Layout gesetzt.
     """
-    # Eigenes Legendenmodell statt automatischem Spiegel des Projekt-Layerbaums;
-    # das Ein- und Ausschalten holt dabei den aktuellen Stand des Layerbaums
-    legend.setAutoUpdateModel(True)
-    legend.setAutoUpdateModel(False)
+    _take_project_tree(legend)
+    show_titles = legend.layout() is not None and titles_shown(legend.layout())
     model = legend.model()
     root = model.rootGroup()
 
@@ -101,25 +130,135 @@ def apply_legend(legend: QgsLayoutItemLegend) -> None:
         layer = node.layer()
         if _is_marker_layer(layer):
             _unify_markers(model, node, size_mm, legend.linkedMap())
-        if _is_marker_layer(layer) or layer.customProperty(ROLE_PROPERTY):
+            node.setCustomProperty("legend/title-label", MARKER_TITLE)
+        if not show_titles and (_is_marker_layer(layer) or layer.customProperty(ROLE_PROPERTY)):
             QgsLegendRenderer.setNodeLegendStyle(node, QgsLegendStyle.Style.Hidden)
 
     legend.updateLegend()
 
 
-def refresh_legends(layout: QgsPrintLayout) -> None:
-    for item in layout.items():
-        if isinstance(item, QgsLayoutItemLegend):
-            apply_legend(item)
+def legends_of(layout: QgsPrintLayout) -> list[QgsLayoutItemLegend]:
+    return [item for item in layout.items() if isinstance(item, QgsLayoutItemLegend)]
+
+
+def refresh_legends(layout: QgsPrintLayout) -> int:
+    """Alle Legenden des Layouts neu aufbauen; gibt ihre Anzahl zurück."""
+    legends = legends_of(layout)
+    for legend in legends:
+        apply_legend(legend)
+    return len(legends)
 
 
 def add_legend_action(designer) -> QAction:
-    """Menüeintrag „Legende aktualisieren“ im Layout-Designer anlegen."""
-    action = QAction("Legende aktualisieren (THW Toolbox)", designer.window())
-    action.setToolTip("Zeichenerklärung neu aufbauen: nur gewählte Layer, jedes Zeichen einmal")
-    action.triggered.connect(lambda: refresh_legends(designer.layout()))
+    """„Legende aktualisieren“ im Layout-Designer: Eintrag im Layout-Menü und Button in einer eigenen Toolbar.
+
+    Der Pfeil am Button öffnet ein Menü, das einstellt, was in der Legende steht.
+    """
+    window = designer.window()
+    action = QAction(QgsApplication.getThemeIcon("/mActionRefresh.svg"), "Legende aktualisieren (THW Toolbox)", window)
+    action.setIconText("Legende aktualisieren")
+    action.setToolTip(
+        "Zeichenerklärung neu aufbauen: nur gewählte Layer, jedes Zeichen einmal.\n"
+        "Pfeil daneben: einstellen, was in der Legende steht."
+    )
+    action.triggered.connect(lambda: _refresh_from_designer(designer, notify=True))
     designer.layoutMenu().addAction(action)
+
+    if isinstance(window, QMainWindow):
+        menu = QMenu(window)
+        menu.setToolTipsVisible(True)
+        menu.aboutToShow.connect(lambda: _fill_menu(menu, designer, action))
+        toolbar = QToolBar("THW Toolbox", window)
+        toolbar.setObjectName("THWToolboxLayoutToolbar")
+        button = QToolButton(toolbar)
+        button.setDefaultAction(action)
+        button.setMenu(menu)
+        button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        toolbar.addWidget(button)
+        window.addToolBar(toolbar)
+        # Das Plugin räumt beim Entladen nur die Aktion ab – die Toolbar geht mit
+        action.destroyed.connect(toolbar.deleteLater)
     return action
+
+
+def _refresh_from_designer(designer, notify: bool = False) -> None:
+    count = refresh_legends(designer.layout())
+    if count == 0:
+        designer.messageBar().pushMessage("Legende", "Das Layout enthält keine Legende.", Qgis.MessageLevel.Info, 4)
+    elif notify:
+        designer.messageBar().pushMessage("Legende", "Zeichenerklärung aktualisiert.", Qgis.MessageLevel.Success, 3)
+
+
+def _fill_menu(menu: QMenu, designer, refresh_action: QAction) -> None:
+    """Menü beim Öffnen neu füllen, damit es Layerbaum und Legende im aktuellen Stand zeigt."""
+    menu.clear()
+    menu.addAction(refresh_action)
+    layout = designer.layout()
+    legends = legends_of(layout)
+    if not legends:
+        _add_note(menu, "Das Layout enthält keine Legende.")
+        return
+
+    menu.addSeparator()
+    _add_note(menu, "In der Legende (gilt für alle Layouts):")
+    candidates = legend_candidates()
+    if not candidates:
+        _add_note(menu, "Keine eingeschalteten Layer")
+    for layer in candidates:
+        item = menu.addAction(layer.name())
+        item.setCheckable(True)
+        item.setChecked(in_legend(layer))
+        item.toggled.connect(partial(_set_layer_shown, designer, layer.id()))
+
+    menu.addSeparator()
+    in_map = menu.addAction("Nur Inhalte des Kartenausschnitts")
+    in_map.setCheckable(True)
+    in_map.setChecked(all(legend.legendFilterByMapEnabled() for legend in legends))
+    in_map.setToolTip("Aus: alle Zeichen und Typen der Layer, auch außerhalb der Karte")
+    in_map.toggled.connect(partial(_set_filter_by_map, designer))
+
+    titles = menu.addAction("Überschriften (Taktische Zeichen, Fahrzeuge …)")
+    titles.setCheckable(True)
+    titles.setChecked(titles_shown(layout))
+    titles.setToolTip("Überschrift über jedem Layer der Toolbox; Gruppen bleiben ohne Überschrift")
+    titles.toggled.connect(partial(_set_titles_shown, designer))
+
+    menu.addSeparator()
+    more = menu.addAction("Weitere Einstellungen …")
+    more.setToolTip(
+        "Eigenschaften der Legende in QGIS (Spalten, Schrift, einzelne Einträge).\n"
+        "„Legende aktualisieren“ baut die Einträge danach wieder neu auf."
+    )
+    more.triggered.connect(lambda: _show_legend_options(designer, legends[0]))
+
+
+def _add_note(menu: QMenu, text: str) -> None:
+    note = menu.addAction(text)
+    note.setEnabled(False)
+
+
+def _set_layer_shown(designer, layer_id: str, show: bool) -> None:
+    layer = QgsProject.instance().mapLayer(layer_id)
+    if layer is not None:
+        set_in_legend(layer, show)
+        _refresh_from_designer(designer)
+
+
+def _set_filter_by_map(designer, enabled: bool) -> None:
+    for legend in legends_of(designer.layout()):
+        legend.setLegendFilterByMapEnabled(enabled)
+    _refresh_from_designer(designer)
+
+
+def _set_titles_shown(designer, show: bool) -> None:
+    set_titles_shown(designer.layout(), show)
+    _refresh_from_designer(designer)
+
+
+def _show_legend_options(designer, legend: QgsLayoutItemLegend) -> None:
+    designer.selectItems([legend])
+    designer.showItemOptions(legend, True)
 
 
 def _groups(group):

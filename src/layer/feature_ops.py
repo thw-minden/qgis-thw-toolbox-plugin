@@ -13,7 +13,9 @@ from qgis.core import (
     QgsVectorLayer,
 )
 
+from ..util.svg_minify import minify_svg
 from .background import Background
+from .canvas_fit import fit_size
 from .fields import field_types_dict
 
 # Default size used when adaptive sizing has no zoom info
@@ -177,7 +179,8 @@ class FeatureOperations:
         values = {
             "name": os.path.basename(svg_path),
             "svg_path": self._relative_to_plugin(svg_path),
-            "svg_content": svg_content,
+            # Ohne eingebettete Schrift: ein Zwanzigstel der Datei, rendert gleich (svg_minify)
+            "svg_content": minify_svg(svg_content),
         }
         if not layer.isEditable():
             layer.startEditing()
@@ -285,13 +288,14 @@ class FeatureOperations:
     # Place
     # ------------------------------------------------------------------
 
-    def place_feature(self, svg_path: str, point: QgsPointXY) -> QgsFeature | None:
+    def place_feature(self, svg_path: str, point: QgsPointXY, fit_canvas: bool = False) -> QgsFeature | None:
         """Insert a new feature at `point` from an SVG file.
 
         Auto-migrates the layer schema if newer fields are missing,
         embeds the SVG content into `svg_content`, computes an adaptive
         initial size based on the current zoom, and returns the inserted
         feature (refreshed from the layer so it has the persisted fid).
+        `fit_canvas` caps the size at half the map window's width (see canvas_fit).
 
         Returns None if the SVG is unreadable or the layer is not ready.
         Caller is responsible for any UI follow-up (selection, dock).
@@ -311,13 +315,16 @@ class FeatureOperations:
             icon_size, scale_with_map = self._last_size_style
         else:
             icon_size, scale_with_map = self._initial_size(layer), self._settings.new_icon_scaling_with_map
+        if fit_canvas:
+            icon_size = fit_size(self._canvas, icon_size, scale_with_map, _MIN_SIZE)
         default_label = os.path.splitext(os.path.basename(svg_path))[0].replace("_", " ")
 
         f = QgsFeature(layer.fields())
         f.setGeometry(QgsGeometry.fromPointXY(point))
         f.setAttribute("name", os.path.basename(svg_path))
         f.setAttribute("svg_path", relative_path)
-        f.setAttribute("svg_content", svg_content)
+        # Ohne eingebettete Schrift: ein Zwanzigstel der Datei, rendert gleich (svg_minify)
+        f.setAttribute("svg_content", minify_svg(svg_content))
         f.setAttribute("size", icon_size)
         f.setAttribute("scale_with_map", scale_with_map)
         f.setAttribute("unique_id", str(uuid.uuid4()))

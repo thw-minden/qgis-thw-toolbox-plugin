@@ -134,7 +134,8 @@ class TemplateDialog(QDialog):
 
         hint = QLabel(
             "Angehakte Layer erscheinen in der Legende, jedes Zeichen einmal und gleich groß. "
-            "Hintergrundkarten stehen unter „Quellen“. Später im Designer: Layout → Legende aktualisieren."
+            "Hintergrundkarten stehen unter „Quellen“. Später im Designer: Button „Legende aktualisieren“ "
+            "(Pfeil daneben: einstellen, was in der Legende steht)."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet(muted_style())
