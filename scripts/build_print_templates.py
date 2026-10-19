@@ -9,13 +9,13 @@ Auf dem Blatt steht nur, was zum Lesen der Karte nötig ist:
 - Titelleiste: Bundeslogo, Kartentitel mit Einsatz/Ort, rechts das taktische Zeichen
   des Trupps UL (abschaltbar)
 - Karte: Gitter mit Randbeschriftung, Nordpfeil oben rechts, Maßstab unten links
-  in der Karte wie in den Vorlagen der THW-Leitung, beide auf durchscheinendem Grund
+  in der Karte wie in den THW-Vorlagen, beide auf durchscheinendem Grund
 - Seitenleiste: Zeichenerklärung, Übersicht, Stand, Gitter, Herausgeber, Quellen
 
 Schwarz auf Weiß ohne Flächenfüllungen, Schrift BundesSans. Jede Vorlage enthält
 zwei Gitter, von denen das Plugin beim Laden eines einschaltet: `UTMREF`
 (Meldegitter in der UTM-Zone des Ausschnitts) und `LONLAT` (geografisch,
-Dezimalgrad). Die Bildpfade werden wie in den Vorlagen der THW-Leitung als
+Dezimalgrad). Die Bildpfade werden wie in den THW-Vorlagen als
 `./GRAFIKEN/LAYOUT/...` gespeichert; das Plugin biegt sie beim Laden auf
 `templates/assets/` um.
 """
@@ -361,7 +361,7 @@ class Builder:
         arrow.setNorthMode(QgsLayoutItemPicture.NorthMode.TrueNorth)
 
     def _scale(self, main_map, map_left, map_bottom):
-        """Maßstab unten links in der Karte wie in den Vorlagen der THW-Leitung, auf durchscheinendem Grund."""
+        """Maßstab unten links in der Karte wie in den THW-Vorlagen, auf durchscheinendem Grund."""
         s = self.s
         inset = 0.2 * s  # der Kartenrahmen bleibt frei
         # Vier Abschnitte von höchstens 10 mm ergeben bei den gängigen Maßstäben runde Werte,
@@ -545,7 +545,7 @@ def save_template(layout: QgsPrintLayout, path: str) -> None:
         raise RuntimeError(f"Vorlage konnte nicht gespeichert werden: {path}")
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
-    # Bildpfade wie in den Vorlagen der THW-Leitung relativ ablegen
+    # Bildpfade wie in den THW-Vorlagen relativ ablegen
     for prefix in {ASSETS_DIR + os.sep, ASSETS_DIR.replace("\\", "/") + "/"}:
         content = content.replace(prefix, ASSET_PREFIX)
     with open(path, "w", encoding="utf-8", newline="\n") as f:

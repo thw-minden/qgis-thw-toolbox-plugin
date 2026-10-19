@@ -1,0 +1,5 @@
+# Flake8 läuft im Sicherheitsscan von plugins.qgis.org mit; hier dieselben Regeln wie in ruff.toml
+[flake8]
+# Zeilenlänge (120) und Leerzeichen vor ":" in Slices regelt ruff format; lange Texte und URLs
+# bricht es bewusst nicht um
+extend-ignore = E203, E501

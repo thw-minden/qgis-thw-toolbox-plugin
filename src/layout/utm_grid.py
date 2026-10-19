@@ -7,13 +7,13 @@ Arial 7pt, Dezimal-Format ohne Nachkommastellen.
 from __future__ import annotations
 
 from qgis.core import (
+    Qgis,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsLayoutItemMap,
     QgsLayoutItemMapGrid,
     QgsProject,
     QgsTextFormat,
-    QgsUnitTypes,
 )
 from qgis.PyQt.QtGui import QFont
 
@@ -67,29 +67,35 @@ def add_utm_grid_to_map(map_item: QgsLayoutItemMap) -> tuple[int, str]:
     grid.setIntervalY(interval)
     grid.setOffsetX(0)
     grid.setOffsetY(0)
-    grid.setStyle(QgsLayoutItemMapGrid.Solid)
+    grid.setStyle(QgsLayoutItemMapGrid.GridStyle.Solid)
 
     # Anmerkungen (Labels) aktivieren + außerhalb des Rahmens platzieren
     grid.setAnnotationEnabled(True)
-    grid.setAnnotationFormat(QgsLayoutItemMapGrid.Decimal)
+    grid.setAnnotationFormat(QgsLayoutItemMapGrid.AnnotationFormat.Decimal)
     grid.setAnnotationPrecision(0)
 
     font = QFont("Arial", 7)
     text_format = QgsTextFormat.fromQFont(font)
     text_format.setSize(7)
-    text_format.setSizeUnit(QgsUnitTypes.RenderPoints)
+    text_format.setSizeUnit(Qgis.RenderUnit.Points)
     grid.setAnnotationTextFormat(text_format)
 
-    outside = QgsLayoutItemMapGrid.OutsideMapFrame
-    grid.setAnnotationPosition(outside, QgsLayoutItemMapGrid.Left)
-    grid.setAnnotationPosition(outside, QgsLayoutItemMapGrid.Right)
-    grid.setAnnotationPosition(outside, QgsLayoutItemMapGrid.Top)
-    grid.setAnnotationPosition(outside, QgsLayoutItemMapGrid.Bottom)
+    outside = QgsLayoutItemMapGrid.AnnotationPosition.OutsideMapFrame
+    grid.setAnnotationPosition(outside, QgsLayoutItemMapGrid.BorderSide.Left)
+    grid.setAnnotationPosition(outside, QgsLayoutItemMapGrid.BorderSide.Right)
+    grid.setAnnotationPosition(outside, QgsLayoutItemMapGrid.BorderSide.Top)
+    grid.setAnnotationPosition(outside, QgsLayoutItemMapGrid.BorderSide.Bottom)
 
-    grid.setAnnotationDirection(QgsLayoutItemMapGrid.Vertical, QgsLayoutItemMapGrid.Left)
-    grid.setAnnotationDirection(QgsLayoutItemMapGrid.VerticalDescending, QgsLayoutItemMapGrid.Right)
-    grid.setAnnotationDirection(QgsLayoutItemMapGrid.Horizontal, QgsLayoutItemMapGrid.Top)
-    grid.setAnnotationDirection(QgsLayoutItemMapGrid.Horizontal, QgsLayoutItemMapGrid.Bottom)
+    grid.setAnnotationDirection(QgsLayoutItemMapGrid.AnnotationDirection.Vertical, QgsLayoutItemMapGrid.BorderSide.Left)
+    grid.setAnnotationDirection(
+        QgsLayoutItemMapGrid.AnnotationDirection.VerticalDescending, QgsLayoutItemMapGrid.BorderSide.Right
+    )
+    grid.setAnnotationDirection(
+        QgsLayoutItemMapGrid.AnnotationDirection.Horizontal, QgsLayoutItemMapGrid.BorderSide.Top
+    )
+    grid.setAnnotationDirection(
+        QgsLayoutItemMapGrid.AnnotationDirection.Horizontal, QgsLayoutItemMapGrid.BorderSide.Bottom
+    )
 
     grid.setAnnotationFrameDistance(1.0)
 

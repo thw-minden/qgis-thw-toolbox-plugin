@@ -3,32 +3,59 @@ import os
 import shutil
 import time
 
+from qgis.PyQt.QtCore import QTimer
+
 from ..logging_utils import get_logger
+from ..paths import legacy_temp_dir, temp_dir
 
 logger = get_logger(__name__)
 
-# Alte GeoPackage-Snapshots im tmp/ älter als 24h löschen
+# Alte GeoPackage-Snapshots im tmp-Ordner älter als 24h löschen
 _GPKG_AGE_THRESHOLD_S = 24 * 60 * 60
 # Reste des SVG-/Preview-Caches älter als 1h löschen. Frühere Versionen legten dort
 # Zeichen und Vorschauen als Dateien ab; heute stecken sie im Symbol bzw. im Speicher.
 _CACHE_AGE_THRESHOLD_S = 60 * 60
 
 
+def remove_temp_file(path: str) -> None:
+    """Alte tmp-Datei löschen, nachdem ihr Layer neben die Projektdatei gezogen ist (best effort).
+
+    Direkt nach ``setDataSource()`` hält der OGR-Provider die Datei meist noch offen – die alten Verbindungen
+    werden erst mit den aufgeschobenen Löschungen der Ereignisschleife geschlossen. Deshalb ein zweiter Versuch
+    kurz nach dem Speichern.
+    """
+
+    def attempt(final: bool) -> bool:
+        try:
+            os.remove(path)
+            logger.debug("Alte tmp-Datei gelöscht: %s", path)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError as e:
+            if final:
+                logger.warning("Alte tmp-Datei %s bleibt liegen: %s", path, e)
+            return False
+
+    if not attempt(final=False):
+        QTimer.singleShot(1500, lambda: attempt(final=True))
+
+
 def cleanup_temp_files(plugin_dir: str) -> None:
     """Räume Plugin-Temp-Verzeichnisse auf (idempotent, fail-safe pro Pfad).
 
-    Wird beim Plugin-Activate und -Unload aufgerufen, damit alte Snapshots und
-    Cache-Reste früherer Versionen nicht ewig im Plugin-Verzeichnis liegen bleiben.
+    Wird beim Plugin-Activate und -Unload aufgerufen, damit alte Snapshots im
+    tmp-Ordner des Profils und Reste früherer Versionen im Plugin-Verzeichnis nicht
+    ewig liegen bleiben. Andere Dateien im alten ``tmp/`` des Plugin-Ordners bleiben,
+    wo sie sind: Gespeicherte Projekte können noch auf sie verweisen.
     Einzelne Fehler (z.B. Datei noch von QGIS gelockt) werden geschluckt
     und als DEBUG-Print ausgegeben — der Cleanup ist Best-Effort.
     """
     try:
-        # 1) GeoPackage-Snapshots im tmp/ + Plugin-Root (Legacy)
-        tmp_dir = os.path.join(plugin_dir, "tmp")
-        if os.path.exists(tmp_dir):
-            temp_files = glob.glob(os.path.join(tmp_dir, "*_taktischezeichen.gpkg"))
-        else:
-            temp_files = []
+        # 1) GeoPackage-Snapshots im tmp-Ordner des Profils, im alten tmp/ des Plugins und im Plugin-Root (Legacy)
+        temp_files = []
+        for folder in (temp_dir(), legacy_temp_dir()):
+            temp_files.extend(glob.glob(os.path.join(folder, "*_taktischezeichen.gpkg")))
         # Plugin-Root war früher Speicherort — Rückwärtskompatibilität
         temp_files.extend(glob.glob(os.path.join(plugin_dir, "*_taktischezeichen.gpkg")))
 
@@ -82,7 +109,8 @@ def cleanup_temp_files(plugin_dir: str) -> None:
             except Exception as e:
                 logger.warning("Fehler beim Entfernen des temp_files Verzeichnisses: %s", e)
 
-        # 4) Leeres tmp/ entfernen
+        # 4) Leeres tmp/ im Plugin-Ordner entfernen
+        tmp_dir = legacy_temp_dir()
         if os.path.exists(tmp_dir):
             try:
                 if not os.listdir(tmp_dir):

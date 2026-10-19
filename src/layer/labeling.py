@@ -108,21 +108,10 @@ def _apply_show_gating(label_settings: QgsPalLayerSettings, label_props, setting
 
 
 def _apply_placement(label_settings: QgsPalLayerSettings) -> None:
-    """Place label below the point. Handles both modern (>=3.26) and older QGIS APIs."""
+    """Place label below the point."""
     try:
-        if hasattr(Qgis, "LabelPlacement") and hasattr(Qgis.LabelPlacement, "OverPoint"):
-            label_settings.placement = Qgis.LabelPlacement.OverPoint
-        else:
-            label_settings.placement = QgsPalLayerSettings.OverPoint
-
-        if hasattr(Qgis, "LabelQuadrantPosition"):
-            label_settings.quadOffset = Qgis.LabelQuadrantPosition.Below
-        elif hasattr(QgsPalLayerSettings, "BottomMiddle"):
-            label_settings.quadOffset = QgsPalLayerSettings.BottomMiddle
-        elif hasattr(QgsPalLayerSettings, "Bottom"):
-            label_settings.quadOffset = QgsPalLayerSettings.Bottom
-        else:
-            label_settings.quadOffset = 0
+        label_settings.placement = Qgis.LabelPlacement.OverPoint
+        label_settings.quadOffset = Qgis.LabelQuadrantPosition.Below
     except Exception as e:
         logger.warning("Position festsetzen fehlgeschlagen: %s", e)
 

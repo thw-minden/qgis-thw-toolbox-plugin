@@ -130,7 +130,7 @@ Suchleiste im oberen Bereich des Symbol-Docks nutzen. Funktioniert mit deutschen
 **Druckvorlagen** in der Toolbar öffnet die Auswahl. Die gewählte Vorlage wird mit dem aktuellen Kartenausschnitt als neues Layout angelegt und im Layout-Designer geöffnet.
 
 - **THW Toolbox** - aufgeräumte Vorlagen A4/A3 quer; „A3 quer (2 × A4)“ lässt sich über *Layout → Als A4-Blätter exportieren* auf einem A4-Drucker ausgeben
-- **THW-Leitung** - die Standardvorlagen A4 bis A0
+- **THW-Vorlagen** - die Standardvorlagen A4 bis A0
 - **Eigene Vorlagen** - mit **Eigene hinzufügen …** beliebige QGIS-Layoutvorlagen (`.qpt`) aufnehmen
 
 **Gitter** - UTMREF oder Lon/Lat (Dezimalgrad), jeweils mit Randbeschriftung. Welches Gitter die Karte trägt, steht mit Linienabstand und einer Beispielkoordinate in der Seitenleiste.
@@ -160,7 +160,7 @@ Heißt die Karte `Hauptkarte` und trägt sie Gitter mit den Namen `UTMREF` bzw. 
 | Geometrie | Punkt-Features |
 | Symbole | SVG mit eingebettetem Inhalt |
 | CRS | Automatische Anpassung an Projekt-CRS |
-| Speicherort | `tmp`-Verzeichnis des Plugins |
+| Speicherort | neben der Projektdatei; vor dem ersten Speichern im QGIS-Profil (`thw_toolbox/tmp`) |
 
 ### Feature-Attribute
 
@@ -234,7 +234,7 @@ Dieses Plugin steht unter der **MIT-Lizenz**; ausgenommen sind das THW-Logo und 
 **Symbole werden nicht angezeigt**
 - Layer "THW Toolbox Marker" sichtbar?
 - SVG-Dateien im `svgs`-Verzeichnis vorhanden?
-- Schreibrechte im Plugin-Verzeichnis?
+- Schreibrechte im QGIS-Profil bzw. im Projektordner?
 
 **Performance-Probleme**
 - Anzahl gleichzeitig angezeigter Symbole reduzieren
@@ -243,8 +243,8 @@ Dieses Plugin steht unter der **MIT-Lizenz**; ausgenommen sind das THW-Logo und 
 
 ### Logs
 
-- **Log-Datei**: `svg_dock.log` im Plugin-Verzeichnis
-- **QGIS-Log**: `Plugins` > `Python-Konsole` > Log-Ausgabe
+- **QGIS-Protokoll**: `Ansicht` > `Bedienfelder` > `Protokollmeldungen`, Reiter „THW Toolbox“
+- **Ausführlicher**: in `config.ini` `level = DEBUG` setzen oder die Umgebungsvariable `THW_TOOLBOX_LOG_LEVEL=DEBUG`
 
 ### Bekannte Einschränkungen
 
@@ -277,6 +277,15 @@ Nützliche Flags:
 - `-f json -o bandit.json` — Report als JSON speichern
 
 False-Positives lassen sich mit `# nosec <BXXX>` an der betroffenen Zeile unterdrücken (immer mit kurzem Kommentar, warum es sicher ist).
+
+### Release für plugins.qgis.org
+
+```powershell
+python scripts/release.py --bump   # nächste freie Version in metadata.txt eintragen
+python scripts/release.py          # prüfen und dist/qgisthwplugin-<version>.zip bauen
+```
+
+Das Skript baut das ZIP aus dem letzten Commit (Ordner `qgisthwplugin`, wie auf plugins.qgis.org) und bricht ab, wenn noch Änderungen uncommittet sind, die Version dort schon existiert (auch blockierte Versionen zählen) oder Bandit bzw. detect-secrets im ZIP etwas finden. Die Hinweise für Nutzer stehen in `metadata.txt` unter `changelog=`.
 
 ### Lint & Format (Ruff)
 

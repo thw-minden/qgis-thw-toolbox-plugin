@@ -9,6 +9,7 @@ Quellen in dieser Reihenfolge:
 Die Position bleibt nur im Speicher; sie wird nirgends abgelegt oder versendet.
 """
 
+import importlib
 import math
 import sys
 import time
@@ -31,12 +32,12 @@ from qgis.PyQt.QtWidgets import QApplication, QPushButton
 from ..logging_utils import get_logger
 from ..util.coordinates import WGS84, to_mgrs
 
-# qgis.PyQt bringt kein QtPositioning mit; manche Linux-Pakete liefern es gar nicht aus
+# qgis.PyQt bringt kein QtPositioning mit: das Modul kommt passend zur Qt-Version aus PyQt5 bzw. PyQt6.
+# Manche Linux-Pakete liefern es gar nicht aus.
 try:
-    if QT_VERSION_STR.startswith("5."):
-        from PyQt5.QtPositioning import QGeoPositionInfo, QGeoPositionInfoSource
-    else:
-        from PyQt6.QtPositioning import QGeoPositionInfo, QGeoPositionInfoSource
+    _positioning = importlib.import_module(f"PyQt{QT_VERSION_STR.split('.')[0]}.QtPositioning")
+    QGeoPositionInfo = _positioning.QGeoPositionInfo
+    QGeoPositionInfoSource = _positioning.QGeoPositionInfoSource
 except ImportError:
     QGeoPositionInfo = QGeoPositionInfoSource = None
 

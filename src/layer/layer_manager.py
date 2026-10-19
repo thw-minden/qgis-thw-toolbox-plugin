@@ -15,6 +15,8 @@ from qgis.core import (
 )
 
 from ..logging_utils import get_logger
+from ..paths import in_temp_dir, temp_dir
+from ..util.temp_files import remove_temp_file
 from .fields import build_qgs_fields
 from .renderer import catalog_svg
 
@@ -149,12 +151,12 @@ class LayerManager:
             return 0
 
     def _gpkg_path_for_project(self, proj: QgsProject, pfile: str) -> str:
-        """Return the GeoPackage path: next to the project file, or in tmp/."""
+        """Return the GeoPackage path: next to the project file, or in the tmp folder of the QGIS profile."""
         if pfile:
             return os.path.splitext(pfile)[0] + GPKG_SUFFIX + ".gpkg"
 
-        # Project not yet saved — write into the plugin's tmp/ with a unique name
-        tmp_dir = os.path.join(self.plugin_dir, "tmp")
+        # Project not yet saved — write into the profile's tmp folder with a unique name
+        tmp_dir = temp_dir()
         os.makedirs(tmp_dir, exist_ok=True)
 
         proj_id = proj.title() or "unnamed"
@@ -636,13 +638,10 @@ class LayerManager:
                 self.layer.setDataSource(old_uri, LAYER_DISPLAY_NAME, "ogr")
                 raise Exception(f"Layer ist nach dem Verschieben nicht gültig: {message}")
 
-            # Try to remove the old file (best effort — may still be locked)
-            try:
-                time.sleep(0.5)
-                os.remove(current_source)
-                logger.debug("Alte Datei gelöscht: %s", current_source)
-            except Exception as e:
-                logger.warning("Konnte alte Datei nicht löschen (wird beim nächsten Start bereinigt): %s", e)
+            # Die Datei eines ungespeicherten Projekts aus dem tmp-Ordner wird nicht mehr gebraucht; eine Datei
+            # neben einem anderen Projekt („Speichern unter“) gehört zu dem und bleibt liegen
+            if in_temp_dir(current_source):
+                remove_temp_file(current_source)
 
             logger.debug("Layer erfolgreich zum Projektpfad verschoben")
 

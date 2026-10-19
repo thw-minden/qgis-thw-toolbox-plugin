@@ -13,8 +13,9 @@ from ..logging_utils import get_logger
 logger = get_logger(__name__)
 
 # Files / dirs that ship with every export. Resources stay at plugin root,
-# Python code lives under src/, plus the QGIS plugin manifest.
-_EXPORT_DIRS = ("svgs", "icons", "src", "templates")
+# Python code lives under src/, plus the QGIS plugin manifest. data/ holds the
+# Objektplanung catalog (tents, vehicles, ...) and the THW-Dienststellen list.
+_EXPORT_DIRS = ("svgs", "icons", "src", "templates", "data")
 _EXPORT_FILES = ("__init__.py", "metadata.txt", "LICENSE")
 _GPKG_EXPORT_NAME = "taktische_zeichen.gpkg"
 # Subdirectory created inside the user-picked container
@@ -51,7 +52,7 @@ Hinweis:
 class PortableExporter:
     """Bundle the plugin + current GeoPackage into a portable ZIP.
 
-    Copies plugin code (src/), resources (svgs/, icons/), the current
+    Copies plugin code (src/), resources (svgs/, icons/, templates/, data/), the current
     layer's GeoPackage, plus a README into a target directory and zips it.
     The output ZIP can be dropped into any QGIS plugin folder.
 

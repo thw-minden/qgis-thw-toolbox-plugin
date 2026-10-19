@@ -1,7 +1,7 @@
 [general]
 name=THW Toolbox
 description=QGIS plugin designed for THW (Technisches Hilfswerk) operations and civil protection missions. Provides easy addition and management of tactical symbols on maps with drag & drop placement of SVG symbols for THW, Bundeswehr, fire departments, police and other organizations. Features intelligent sizing and feature management. Intended for use in civil protection and disaster response operations only.
-version=2.1.1
+version=2.2.2
 qgisMinimumVersion=3.44
 qgisMaximumVersion=4.99
 author=THW Minden
@@ -15,6 +15,16 @@ icon=icons/icon.svg
 experimental=False
 deprecated=False
 tags=THW,Feuerwehr,Polizei,Rettungswesen,Katastrophenschutz,taktische Zeichen,SVG,Symbole,Kartierung,Einsatzplanung
+changelog=2.2.2
+    - Fixed: the portable package (export) was missing data/, so Objektplanung had no tents or vehicles (GKW, MTW and others) and THW-Dienststellen were missing
+    2.2.1
+    IMPORTANT before updating: the update deletes the old plugin folder including tmp/. Using the old version, save open projects first, and open and save projects with Objektplanung (site planning) twice.
+    - New: Objektplanung to scale (tents, vehicles, power supply, lighting, areas, arrows) with load per generator
+    - New: print templates A4 to A0 with UTM grid and custom templates, unified symbol picker with favourites, CSV/Excel import, zoom to own position
+    - Projects open without the plugin: symbols, Dienststellen and template logos are embedded
+    - Fixed: unsaved projects survive plugin updates (stored in the QGIS profile instead of the plugin folder)
+    - Fixed: Objektplanung path after the first save, markers lost on Save As, question marks instead of symbols
+    - QGIS 4 / Qt6: scoped enums throughout, legacy code for QGIS older than 3.26 removed
 
 # Lizenzinformationen für verwendete externe Ressourcen
 # Taktische Zeichen: https://github.com/jonas-koeritz/Taktische-Zeichen

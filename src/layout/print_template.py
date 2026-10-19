@@ -1,6 +1,6 @@
 """Laden von Druckvorlagen (.qpt) mit Ortsverband-/Einsatzdaten, Gitter und aufgeräumter Legende.
 
-Mitgeliefert werden im Ordner `templates/` die Vorlagen der THW-Leitung
+Mitgeliefert werden im Ordner `templates/` die THW-Vorlagen
 (`THW_*`, unverändert, damit neue Versionen einfach ersetzt werden können) und
 die der Toolbox (`Toolbox_*`, erzeugt mit `scripts/build_print_templates.py`).
 Eigene Vorlagen liegen im QGIS-Profil. Alle Anpassungen passieren erst nach dem
@@ -30,7 +30,6 @@ from dataclasses import dataclass
 
 from qgis.core import (
     Qgis,
-    QgsApplication,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsExpressionContextUtils,
@@ -48,6 +47,7 @@ from qgis.core import (
 from qgis.PyQt.QtXml import QDomDocument
 
 from ..logging_utils import get_logger
+from ..paths import profile_dir
 from ..tools.layer_setup import GROUP_NAME_BASEMAPS
 from ..util.svg_minify import minify_svg
 from .legend import apply_legend
@@ -77,7 +77,7 @@ GITTER_NAMEN = {GITTER_UTMREF: "UTMREF", GITTER_LONLAT: "Lon/Lat (Dezimalgrad)"}
 
 # Gruppen im Druckvorlagen-Dialog; mitgelieferte Vorlagen ordnet ihr Dateipräfix zu
 GROUP_TOOLBOX = "THW Toolbox"
-GROUP_THW = "THW-Leitung"
+GROUP_THW = "THW-Vorlagen"
 GROUP_OWN = "Eigene Vorlagen"
 _BUNDLED_GROUPS = {"Toolbox": GROUP_TOOLBOX, "THW": GROUP_THW}
 _GROUP_ORDER = (GROUP_TOOLBOX, GROUP_THW, GROUP_OWN)
@@ -91,7 +91,7 @@ _UNIT_SIGN_ID = "Taktisches Zeichen Einheit"
 
 # Eingebettete Bilder (base64:) – QGIS erkennt das Format dann nicht am Dateinamen, es muss mitgegeben werden
 _EMBEDDED_PREFIX = "base64:"
-_PICTURE_SVG = Qgis.PictureFormat.SVG if hasattr(Qgis, "PictureFormat") else QgsLayoutItemPicture.FormatSVG
+_PICTURE_SVG = Qgis.PictureFormat.SVG
 
 _STANDARD_SCALES = (500, 1000, 2500, 5000, 10000, 25000, 50000, 100000, 200000, 250000, 500000, 1000000)
 
@@ -197,7 +197,7 @@ class TemplateEntry:
 
 def user_templates_dir() -> str:
     """Ordner der eigenen Vorlagen im QGIS-Profil, damit sie Plugin-Updates überstehen."""
-    return os.path.normpath(os.path.join(QgsApplication.qgisSettingsDirPath(), "thw_toolbox", "druckvorlagen"))
+    return os.path.join(profile_dir(), "druckvorlagen")
 
 
 def user_template_path(source: str) -> str:

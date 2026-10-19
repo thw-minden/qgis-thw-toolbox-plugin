@@ -160,7 +160,7 @@ class PlanningController(QObject):
         self._drop_filter = PlanningDropFilter(self.canvas, self.drop_object)
         self.canvas.viewport().installEventFilter(self._drop_filter)
         self.canvas.mapToolSet.connect(self._on_map_tool_set)
-        QgsProject.instance().projectSaved.connect(self.layers.on_project_saved)
+        QgsProject.instance().writeProject.connect(self.layers.on_project_write)
         self.layers.selection_changed.connect(self._on_selection_changed)
 
     def _on_selection_changed(self):
@@ -207,7 +207,7 @@ class PlanningController(QObject):
         except (TypeError, RuntimeError):
             pass
         try:
-            QgsProject.instance().projectSaved.disconnect(self.layers.on_project_saved)
+            QgsProject.instance().writeProject.disconnect(self.layers.on_project_write)
         except (TypeError, RuntimeError):
             pass
         self._close_capacity_dialog()

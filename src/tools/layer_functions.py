@@ -24,11 +24,12 @@ from qgis.core import (
     QgsVectorLayer,
     QgsVectorLayerSimpleLabeling,
 )
-from qgis.PyQt.QtCore import QTimer
 from qgis.PyQt.QtGui import QColor
 
 from ..logging_utils import get_logger
+from ..paths import in_temp_dir, temp_dir
 from ..util.svg_minify import minify_svg
+from ..util.temp_files import remove_temp_file
 
 logger = get_logger(__name__)
 
@@ -60,12 +61,12 @@ def _plugin_dir() -> str:
     return os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 
-def _gpkg_path(proj: QgsProject, plugin_dir: str) -> str:
-    """GeoPackage neben der Projektdatei; bei ungespeichertem Projekt im tmp-Ordner des Plugins (wie die Marker)."""
+def _gpkg_path(proj: QgsProject) -> str:
+    """GeoPackage neben der Projektdatei; bei ungespeichertem Projekt im tmp-Ordner des Profils (wie die Marker)."""
     pfile = proj.fileName()
     if pfile:
         return os.path.splitext(pfile)[0] + GPKG_SUFFIX + ".gpkg"
-    tmp_dir = os.path.join(plugin_dir, "tmp")
+    tmp_dir = temp_dir()
     os.makedirs(tmp_dir, exist_ok=True)
     return os.path.join(tmp_dir, f"projekt_{int(time.time())}{GPKG_SUFFIX}.gpkg")
 
@@ -122,7 +123,7 @@ def setup_thw_dienststellen(label: str) -> QgsVectorLayer:
     if not source.isValid():
         raise ValueError(f"{label} layer invalid: {source.error().summary()}")
 
-    gpkg = _gpkg_path(QgsProject.instance(), plugin_dir)
+    gpkg = _gpkg_path(QgsProject.instance())
     layer = None
     if _write_gpkg(source, gpkg) or os.path.exists(gpkg):
         layer = QgsVectorLayer(f"{gpkg}|layername={GPKG_LAYER_NAME}", label, "ogr")
@@ -156,28 +157,9 @@ def setup_thw_dienststellen(label: str) -> QgsVectorLayer:
     label_settings.isExpression = True
 
     try:
-        # 1) Place labels around the point (cartographic / ordered positions)
-        if hasattr(Qgis, "LabelPlacement") and hasattr(Qgis.LabelPlacement, "OverPoint"):
-            label_settings.placement = Qgis.LabelPlacement.OverPoint
-        else:
-            # Fallback for older versions
-            label_settings.placement = QgsPalLayerSettings.OverPoint
-
-        # 2) Tell QGIS to put the label in the bottom/below quadrant of the point
-        if hasattr(Qgis, "LabelQuadrantPosition"):
-            # QGIS >= 3.26: use the new enum
-            label_settings.quadOffset = Qgis.LabelQuadrantPosition.Below
-        else:
-            # Older API: use QuadrantPosition enum from QgsPalLayerSettings
-            if hasattr(QgsPalLayerSettings, "BottomMiddle"):
-                label_settings.quadOffset = QgsPalLayerSettings.BottomMiddle
-            elif hasattr(QgsPalLayerSettings, "Bottom"):
-                label_settings.quadOffset = QgsPalLayerSettings.Bottom
-            else:
-                # last resort: standard bottom-middle index
-                label_settings.quadOffset = (
-                    QgsPalLayerSettings.BottomMiddle if hasattr(QgsPalLayerSettings, "BottomMiddle") else 0
-                )
+        # Labels über dem Punkt, im Quadranten darunter
+        label_settings.placement = Qgis.LabelPlacement.OverPoint
+        label_settings.quadOffset = Qgis.LabelQuadrantPosition.Below
     except Exception as e:
         logger.debug("Label placement could not be set: %s", e)
 
@@ -225,11 +207,7 @@ def _same_file(a: str, b: str) -> bool:
     return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
-def _in_plugin_tmp(path: str, plugin_dir: str) -> bool:
-    return _same_file(os.path.dirname(path), os.path.join(plugin_dir, "tmp"))
-
-
-def _move_dienststellen_layer(layer: QgsVectorLayer, current: str, target: str, plugin_dir: str) -> bool:
+def _move_dienststellen_layer(layer: QgsVectorLayer, current: str, target: str) -> bool:
     """Ein GeoPackage nach ``target`` exportieren (notfalls kopieren) und den Layer darauf umstellen."""
     if not os.path.exists(current):
         logger.warning("Dienststellen-GeoPackage %s fehlt, Layer „%s“ bleibt unverändert", current, layer.name())
@@ -254,41 +232,17 @@ def _move_dienststellen_layer(layer: QgsVectorLayer, current: str, target: str, 
 
     # Die Datei eines ungespeicherten Projekts aus dem tmp-Ordner wird nicht mehr gebraucht; eine Datei neben
     # einem anderen Projekt („Speichern unter“) bleibt liegen
-    if _in_plugin_tmp(current, plugin_dir):
-        _remove_tmp_file(current)
+    if in_temp_dir(current):
+        remove_temp_file(current)
     return True
 
 
-def _remove_tmp_file(path: str) -> None:
-    """Alte tmp-Datei löschen (best effort).
-
-    Direkt nach ``setDataSource()`` hält der OGR-Provider die Datei meist noch offen – die alten Verbindungen
-    werden erst mit den aufgeschobenen Löschungen der Ereignisschleife geschlossen. Deshalb ein zweiter Versuch
-    kurz nach dem Speichern.
-    """
-
-    def attempt(final: bool) -> bool:
-        try:
-            os.remove(path)
-            logger.debug("Alte tmp-Datei gelöscht: %s", path)
-            return True
-        except FileNotFoundError:
-            return True
-        except OSError as e:
-            if final:
-                logger.warning("Alte tmp-Datei %s bleibt liegen: %s", path, e)
-            return False
-
-    if not attempt(final=False):
-        QTimer.singleShot(1500, lambda: attempt(final=True))
-
-
-def _update_layer_tree_sources(doc, proj: QgsProject, layers: list[QgsVectorLayer]) -> None:
+def update_layer_tree_sources(doc, proj: QgsProject, layers: list[QgsVectorLayer]) -> None:
     """``source``-Attribut der umgezogenen Layer im Layerbaum des Projekt-XML nachziehen.
 
     QGIS schreibt den Layerbaum vor dem Signal ``writeProject`` in das Dokument, die Layer selbst erst danach.
     Ohne Nachziehen stünde im Baum noch der alte Pfad (der Layer wird zwar über die ID gefunden, aber der
-    Plugin-Ordner soll nicht im Projekt stehen).
+    tmp-Ordner soll nicht im Projekt stehen).
     """
     if doc is None or not layers or not hasattr(doc, "elementsByTagName"):
         return
@@ -308,7 +262,7 @@ def move_dienststellen_next_to_project(doc=None) -> None:
     Wird aus ``QgsProject.writeProject`` aufgerufen, also bevor QGIS die Layer in die Projektdatei schreibt;
     ``doc`` ist das dabei übergebene Projekt-XML. Liegt das GeoPackage eines Dienststellen-Layers noch nicht
     als ``<projekt>_dienststellen.gpkg`` neben der Projektdatei (ungespeichertes Projekt → tmp-Ordner des
-    Plugins, oder „Speichern unter“), wird es dorthin exportiert und die Datenquelle per ``setDataSource()``
+    Profils, oder „Speichern unter“), wird es dorthin exportiert und die Datenquelle per ``setDataSource()``
     umgestellt; der Layer selbst bleibt. Fehler werden nur protokolliert, nie geworfen – das Speichern des
     Projekts soll daran nicht scheitern.
     """
@@ -318,16 +272,15 @@ def move_dienststellen_next_to_project(doc=None) -> None:
         if not pfile:
             return
         target = os.path.splitext(pfile)[0] + GPKG_SUFFIX + ".gpkg"
-        plugin_dir = _plugin_dir()
         moved = []
         for layer, current in _dienststellen_layers(proj):
             if _same_file(current, target):
                 continue
             try:
-                if _move_dienststellen_layer(layer, current, target, plugin_dir):
+                if _move_dienststellen_layer(layer, current, target):
                     moved.append(layer)
             except Exception:
                 logger.exception("Dienststellen-GeoPackage von „%s“ zieht nicht neben das Projekt", layer.name())
-        _update_layer_tree_sources(doc, proj, moved)
+        update_layer_tree_sources(doc, proj, moved)
     except Exception:
         logger.exception("Umzug der Dienststellen-GeoPackages beim Speichern fehlgeschlagen")

@@ -2,6 +2,7 @@ import math
 
 from qgis.core import (
     QgsCoordinateTransform,
+    QgsCsException,
     QgsFeature,
     QgsFeatureRequest,
     QgsPointXY,
@@ -94,7 +95,7 @@ def find_nearest_feature(layer: QgsVectorLayer, canvas, point: QgsPointXY) -> Qg
         if layer_to_map is not None:
             try:
                 feat_point = layer_to_map.transform(feat_point)
-            except Exception:
+            except QgsCsException:
                 continue
         feat_px = to_pixel.transform(feat_point)
         size_px = _symbol_size_px(feature, names, context)

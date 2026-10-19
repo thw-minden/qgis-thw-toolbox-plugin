@@ -44,7 +44,7 @@ from .settings import THWToolboxSettings
 from .tools import style_library
 from .tools.canvas_drop_filter import CanvasDropFilter
 from .tools.identify_tool import IdentifyTool
-from .tools.layer_functions import move_dienststellen_next_to_project
+from .tools.layer_functions import move_dienststellen_next_to_project, update_layer_tree_sources
 from .tools.move_tool import MoveTool
 from .tools.own_position import OwnPositionLocator
 from .ui.config_dialog import ConfigDialog
@@ -664,6 +664,7 @@ class THWToolboxPlugin:
             return
         self.settings.save_settings(QgsProject.instance())
         new_layer = self.layer_manager.on_project_save()
+        update_layer_tree_sources(doc, QgsProject.instance(), [new_layer or self.layer])
         if new_layer:
             self.on_layer_replaced(new_layer)
 

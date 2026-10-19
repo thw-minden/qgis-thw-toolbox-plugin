@@ -891,13 +891,13 @@ class PhotoTargetDialog(QDialog):
             self._clear_map_preview()
             return
         if self._rubber_band is None:
-            self._rubber_band = QgsRubberBand(self._canvas, _line_geometry_type())
+            self._rubber_band = QgsRubberBand(self._canvas, Qgis.GeometryType.Line)
             self._rubber_band.setColor(QColor(230, 40, 40, 200))
             self._rubber_band.setWidth(2)
             self._rubber_band.setLineStyle(Qt.PenStyle.DashLine)
             self._drone_marker = _vertex_marker(self._canvas, "ICON_CIRCLE", QColor(20, 90, 200), 12)
             self._target_marker = _vertex_marker(self._canvas, "ICON_CROSS", QColor(230, 40, 40), 18)
-        self._rubber_band.reset(_line_geometry_type())
+        self._rubber_band.reset(Qgis.GeometryType.Line)
         self._rubber_band.addPoint(drone_map, False)
         self._rubber_band.addPoint(target_map, True)
         self._drone_marker.setCenter(drone_map)
@@ -967,15 +967,6 @@ class PhotoTargetDialog(QDialog):
             return
         self._show_target()
         self._set_status(f"Zeichen gesetzt: {self._target_text}", _COLOR_OK)
-
-
-def _line_geometry_type():
-    geometry_type = getattr(Qgis, "GeometryType", None)
-    if geometry_type is not None:
-        return geometry_type.Line
-    from qgis.core import QgsWkbTypes  # QGIS < 3.30
-
-    return QgsWkbTypes.LineGeometry
 
 
 def _vertex_marker(canvas, icon_name: str, color: QColor, size: int) -> QgsVertexMarker:

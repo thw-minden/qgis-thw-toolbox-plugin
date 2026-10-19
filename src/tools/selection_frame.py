@@ -122,7 +122,7 @@ def _content_bounds(svg) -> tuple[float, float, float, float]:
     # Das SVG steckt als base64-Pfad im Symbol (einige KB): als Schlüssel genügt sein Digest.
     # Dateipfade (Katalog, alte Projekte) zählen mtime und Größe mit, damit eine geänderte
     # Datei neu vermessen wird.
-    digest = hashlib.sha1(path.encode("utf-8", "replace")).hexdigest()
+    digest = hashlib.sha1(path.encode("utf-8", "replace"), usedforsecurity=False).hexdigest()
     key: tuple = (digest,)
     if not is_embedded_svg_path(path):
         try:

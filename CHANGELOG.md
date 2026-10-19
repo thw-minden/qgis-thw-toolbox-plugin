@@ -1,23 +1,32 @@
 # Changelog
 
-## [Unreleased]
+## [2.2.2]
+
+### Behoben
+- **Portables Paket ohne Fahrzeuge und Dienststellen**: Der Export „Portables Paket“ nahm den Ordner `data/` nicht mit. Ein daraus installiertes Plugin hatte keinen Objektplanungs-Katalog (keine Zelte, Fahrzeuge wie GKW und MTW, Stromerzeuger, Leuchten), keine THW-Dienststellen und keine OV-Vorschläge im Druckvorlagen-Dialog
+
+## [2.2.1]
+
+2.2.0 wurde hochgeladen, vom Sicherheitsscan von plugins.qgis.org aber blockiert und nie freigegeben; 2.2.1 enthält alles Folgende.
+
+> **Vor dem Update auf diese Version:** Das Update löscht noch den alten Plugin-Ordner samt `tmp/`. Deshalb vorher, mit der alten Version: offene Projekte speichern und Projekte mit Objektplanung einmal öffnen und **zweimal** speichern. Die alte Version trägt den Pfad `<projekt>_objektplanung.gpkg` erst beim zweiten Speichern in die Projektdatei ein; bis dahin zeigt sie auf das GeoPackage im `tmp/`-Ordner des Plugins.
 
 ### Hinzugefügt
-- **Druckvorlagen der Toolbox A4/A3 quer** (`Toolbox_*.qpt`, im Dialog unter „THW Toolbox“; Schrift BundesSans), reduziert auf das Nötige und schwarz auf weiß ohne Flächenfüllungen: Titelleiste mit Bundeslogo, Kartentitel samt Einsatz/Ort und rechts dem taktischen Zeichen des Trupps UL (im Dialog abschaltbar); in der Karte Nordpfeil oben rechts und Maßstab unten links wie in den Vorlagen der THW-Leitung, beide auf durchscheinendem Grund; alle übrigen Angaben in der Seitenleiste (Zeichenerklärung, eine Übersicht, Stand, Gitter, Herausgeber, Quellen)
+- **Druckvorlagen der Toolbox A4/A3 quer** (`Toolbox_*.qpt`, im Dialog unter „THW Toolbox“; Schrift BundesSans), reduziert auf das Nötige und schwarz auf weiß ohne Flächenfüllungen: Titelleiste mit Bundeslogo, Kartentitel samt Einsatz/Ort und rechts dem taktischen Zeichen des Trupps UL (im Dialog abschaltbar); in der Karte Nordpfeil oben rechts und Maßstab unten links wie in den THW-Vorlagen, beide auf durchscheinendem Grund; alle übrigen Angaben in der Seitenleiste (Zeichenerklärung, eine Übersicht, Stand, Gitter, Herausgeber, Quellen)
   - **Gitter wählbar**: UTMREF (Maschenweite 10 m / 100 m / 1 km / 10 km je nach Maßstab) oder Lon/Lat in Dezimalgrad, jeweils mit Randbeschriftung; die Seitenleiste nennt das Gitter, den Linienabstand und die Koordinate der Kartenmitte als Lesebeispiel (`@thw_gitter`)
   - Kartenausschnitt und UTM-Zone werden beim Öffnen aus dem Kartenfenster übernommen, der Maßstab auf einen gängigen Wert aufgerundet
   - Neue Felder „Kartentitel“ (mit Vorschlägen) und „Einsatzort“ im Druckvorlagen-Dialog (`@thw_kartentitel`, `@thw_einsatzort`), im Projekt gespeichert; „Blatt“ (`@thw_blatt`) erscheint nur, wenn angegeben
   - Abfrage der Berechtigung für das Bundeslogo beim Öffnen (merkbar; alternativ „Ohne Logo öffnen“)
   - Erzeugt mit `scripts/build_print_templates.py`
 - **Moderne Druckvorlagen A4/A3 quer** (`Toolbox_Modern_*.qpt`, im Dialog unter „THW Toolbox“ als „Modern …“) mit Kartenrand nach THW-Kartenkunde: oben Bundeslogo, Maßstab, Kartentitel mit Einsatz/Ort, Blattnummer; seitlich Zeichenerklärung, CAUTION-Hinweis, zwei Übersichten (150× / 25×) und maßstäblicher Planzeiger; unten Maßstabsbalken, Meridiankonvergenz, Herausgeber/Stand, Grenzen/Quellen; auch als A3 aus zwei A4-Blättern. Erzeugt mit `scripts/build_modern_print_templates.py`
-- **Eigene Druckvorlagen**: „Eigene hinzufügen …“ im Druckvorlagen-Dialog übernimmt beliebige `.qpt`-Dateien in das QGIS-Profil (`thw_toolbox/druckvorlagen`, übersteht Plugin-Updates), „Entfernen“ löscht sie wieder; die Angaben aus dem Dialog stehen darin als Layout-Variablen bereit. Die Vorlagen sind nach „THW Toolbox“, „THW-Leitung“ und „Eigene Vorlagen“ gruppiert
+- **Eigene Druckvorlagen**: „Eigene hinzufügen …“ im Druckvorlagen-Dialog übernimmt beliebige `.qpt`-Dateien in das QGIS-Profil (`thw_toolbox/druckvorlagen`, übersteht Plugin-Updates), „Entfernen“ löscht sie wieder; die Angaben aus dem Dialog stehen darin als Layout-Variablen bereit. Die Vorlagen sind nach „THW Toolbox“, „THW-Vorlagen“ und „Eigene Vorlagen“ gruppiert
 - **Zeichenerklärung nach Wahl**: Die Legende zeigt nur, was auf die Grundkarte gezeichnet wurde (taktische Zeichen, Objektplanung, eigene Vektorlayer im Kartenausschnitt) – ohne Hintergrundkarten, Gitter-Layer, leere Gruppen und Gruppenüberschriften; Zeichennamen ohne Unterstriche. Einzelne Layer lassen sich im Dialog an- und abhaken (am Layer im Projekt gespeichert); „Legende aktualisieren“ im Designer baut sie nach Änderungen neu auf
   - **Button „Legende aktualisieren“** in einer eigenen Toolbar „THW Toolbox“ im Layout-Designer (weiterhin auch unter „Layout → Legende aktualisieren (THW Toolbox)“). Der Pfeil daneben öffnet ein Menü zum Einstellen: Layer an- und abhaken (wie im Druckvorlagen-Dialog), „Nur Inhalte des Kartenausschnitts“, „Überschriften“ (taktische Zeichen, Fahrzeuge, Gebiete … unter eigener Überschrift, am Layout gespeichert) und „Weitere Einstellungen …“ für die Legenden-Eigenschaften von QGIS; jede Änderung baut die Legende gleich neu auf
 - Übersichtskarten der Druckvorlagen zeigen nur noch die Hintergrundkarte, nicht mehr Zeichen und deren Beschriftungen. Aus der Gruppe „Hintergrundkarten“ zählen dafür nur Raster- und Kachelkarten, Vektorlayer wie die taktischen Zeichen nicht
 - **A3 aus zwei A4-Blättern**: Im Layout-Designer exportiert „Layout → Als A4-Blätter exportieren (PDF) …“ jedes Layout maßstabstreu als mehrseitiges A4-PDF zum Zusammenkleben (5 mm Druckrand, 10 mm Überlappung, Schnittlinie auf den Folgeblättern). Die Vorlage `Toolbox_A3_QUER_2xA4` (400 × 297 mm) passt genau auf zwei A4-Blätter hoch
-- **THW-Drucklayouts A0–A4 quer** (Standard der THW-Leitung) in `templates/` inkl. Logo und Nordpfeil
+- **THW-Drucklayouts A0–A4 quer** (THW-Standardvorlagen) in `templates/` inkl. Logo und Nordpfeil
 - Druckvorlagen-Dialog fragt Ortsverband, Einheit, Bearbeiter und Einsatz ab; OV/Einheit/Bearbeiter werden in den Benutzereinstellungen, der Einsatz im Projekt gemerkt
-- Keine Einstufung VS-NfD: eingestufte Inhalte dürfen mit QGIS nicht verarbeitet werden. Die Toolbox-Vorlagen tragen keine Kennzeichnung, die ausgeblendete VS-NfD-Kennzeichnung der Vorlagen der THW-Leitung wird beim Laden entfernt
+- Keine Einstufung VS-NfD: eingestufte Inhalte dürfen mit QGIS nicht verarbeitet werden. Die Toolbox-Vorlagen tragen keine Kennzeichnung, die ausgeblendete VS-NfD-Kennzeichnung der THW-Vorlagen wird beim Laden entfernt
 - Autovervollständigung für den Ortsverband aus `data/ovs.json` (670 OVs, Teilwortsuche)
 - Platzhalter der Vorlagen werden zu Layout-Variablen (`@thw_ov`, `@thw_einheit`, `@thw_einheit_kurz`, `@thw_bearbeiter`, `@thw_einsatz`), nachträglich in den Layout-Eigenschaften änderbar
 - **Objektplanung** (Dock + schwebende Hotbar unten auf der Karte, Paket `planning/`; Standardwerkzeug ist die Auswahl, Esc führt nach dem Platzieren dorthin zurück):
@@ -57,6 +66,7 @@
   - Ist die Toolbox noch aus (nur die Objektplanung offen), schaltet das Setzen sie ein
 
 ### Verbessert
+- **QGIS 4 / Qt6**: Enums durchgehend mit Enum-Namen (`Qgis.LabelPlacement.Line`, `QgsLayoutItemMapGrid.BorderSide.Left` …), `QtPositioning` passend zur Qt-Version ohne festen PyQt5-/PyQt6-Import; geprüft in QGIS 3.44 und 4.2
 - **Zeichen-Auswahl** (Icon-Picker): Namen werden vollständig und mehrzeilig angezeigt statt abgekürzt, das Raster füllt die ganze Breite, das gewählte Zeichen steht mit Kategorie unter dem Raster, Pfeiltasten im Suchfeld bewegen die Auswahl
 - Symbolpalette ohne Ladedialog: Der Zeichen-Picker lädt Icons erst beim Anzeigen; der Reiter „Verwendet“ heißt jetzt „Auf der Karte“ (nicht zu verwechseln mit „Zuletzt verwendet“)
 - Rechtsklick auf ein einzelnes taktisches Zeichen zeigt ein Kontextmenü (Duplizieren, Löschen)
@@ -74,14 +84,19 @@
 - **Neue Zeichen passen ins Kartenfenster**: Reingezogene bzw. gesetzte taktische Zeichen werden höchstens halb so breit wie das Kartenfenster (in einem sehr kleinen Fenster bis 30 mm), statt bei starkem Zoom die ganze Karte zu füllen. Ist ein mit der Karte skaliertes Zeichen kaum zu sehen (unter 3 mm), zoomt die Karte darauf, bis es etwa ein Zehntel der Fensterbreite einnimmt (`layer/canvas_fit.py`)
 - **Projekte öffnen auch ohne das Plugin**: Objektplanung, THW-Dienststellen und Druckvorlagen hängen nicht mehr am Plugin-Ordner (die GeoPackages der taktischen Zeichen und der Objektplanung lagen schon neben der Projektdatei)
   - **Objektplanung**: Die taktischen Zeichen von Fahrzeugen, Stromerzeugern und Leuchten stecken eingebettet (`base64:`-Pfad, ohne die von Qt ignorierte Schrift) im Symbol statt als Pfad in den Plugin-Ordner. Layer älterer Projekte werden beim Übernehmen einmal umgestellt, die Beschriftung bleibt
-  - **THW Dienststellen**: Die Daten aus `data/ovs.json` landen beim Hinzufügen als `<projekt>_dienststellen.gpkg` neben der Projektdatei (bei noch ungespeichertem Projekt zunächst im tmp-Ordner des Plugins; beim Speichern des Projekts zieht das GeoPackage neben die Projektdatei, auch bei „Speichern unter“), die Zeichen der Dienststellen eingebettet im Renderer
+  - **THW Dienststellen**: Die Daten aus `data/ovs.json` landen beim Hinzufügen als `<projekt>_dienststellen.gpkg` neben der Projektdatei (bei noch ungespeichertem Projekt zunächst im tmp-Ordner des QGIS-Profils; beim Speichern des Projekts zieht das GeoPackage neben die Projektdatei, auch bei „Speichern unter“), die Zeichen der Dienststellen eingebettet im Renderer
   - **Druckvorlagen**: Bundeslogo, THW-Logo, Nordpfeil, Planzeiger und Einheitenzeichen werden beim Laden einer Vorlage als SVG ins Layout eingebettet (rendert in QGIS 3.44 und 4.2 wie die Datei). Vorhandene Layouts älterer Projekte bleiben unverändert; wer sie unabhängig haben will, lädt die Vorlage neu
   - Das **MGRS-Gitter** („temporär hinzufügen“) bleibt bewusst ein Speicher-Layer, den QGIS nicht mit dem Projekt speichert; für den Druck haben die Toolbox-Vorlagen ein eigenes UTMREF-Gitter
 
 ### Behoben
+- **Sicherheitsscan (Bandit B112)**: Die Zeichensuche fängt beim Umrechnen der Koordinaten nur noch `QgsCsException` statt jeder Exception ab
+- **Ungespeicherte Projekte überstehen Plugin-Updates**: Marker, Objektplanung und Dienststellen eines noch nicht gespeicherten Projekts liegen im QGIS-Profil (`thw_toolbox/tmp`) statt im Plugin-Ordner, den QGIS bei jedem Update löscht. Dateien im alten `tmp/` des Plugin-Ordners bleiben unangetastet, damit gespeicherte Projekte, die noch darauf verweisen, weiter öffnen
+- **Objektplanung nach dem ersten Speichern**: Die Projektdatei (`.qgz`) zeigte weiter auf das GeoPackage im tmp-Ordner statt auf `<projekt>_objektplanung.gpkg`, weil das zweite Speichern nach dem Umzug nicht in der Datei ankam. Die Objektplanung zieht jetzt wie Marker und Dienststellen schon beim Schreiben des Projekts um; das GeoPackage im tmp-Ordner wird danach gelöscht
+- **„Speichern unter“ lässt die Marker des alten Projekts stehen**: Der Umzug konnte bisher das Marker-GeoPackage neben dem alten Projekt löschen; gelöscht wird nur noch die Datei aus dem tmp-Ordner
 - **Fragezeichen statt Zeichen ab dem 51. taktischen Zeichen**: Der Renderer schrieb jedes Zeichen als Datei in einen Temp-Ordner des Plugins, der auf 50 Dateien gedeckelt war; die ältesten wurden noch während des Aufbaus gelöscht, und QGIS zeichnete sein Fragezeichen. Die Zeichen stecken jetzt eingebettet (`base64:`-Pfad) im Symbol und damit im Projekt: Projekte rendern auch ohne das Plugin, Temp-Dateien werden nicht mehr geschrieben, und die eingebettete Schrift der Katalog-SVGs (von Qt ohnehin ignoriert) bleibt weg; `svg_content` und damit das GeoPackage werden rund zwanzigmal kleiner. Bestehende Projekte werden beim Öffnen umgestellt (auch bei inaktiver Toolbox, Legenden der Layouts eingeschlossen) und sind nach dem Speichern eigenständig; leere `svg_content`-Felder älterer Zeichen werden aus dem Katalog nachgefüllt
 
 ### Entfernt
+- Rückfallcode für QGIS vor 3.26/3.30 (Label-Platzierung, Bildformat, Geometrietyp); Mindestversion ist 3.44
 - Drucklayout `templates/Einsatz.qpt`
 
 ## [2.1.1]

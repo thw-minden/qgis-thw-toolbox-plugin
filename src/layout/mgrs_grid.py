@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 
 from qgis.core import (
+    Qgis,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsFeature,
@@ -147,7 +148,7 @@ def build_mgrs_grid_layer(
 
     settings = QgsPalLayerSettings()
     settings.fieldName = "label"
-    settings.placement = QgsPalLayerSettings.Line
+    settings.placement = Qgis.LabelPlacement.Line
     settings.enabled = True
 
     text_format = QgsTextFormat()

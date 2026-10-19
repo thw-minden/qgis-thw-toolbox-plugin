@@ -1,6 +1,5 @@
 import html
 import os
-import tempfile
 import zipfile
 from collections.abc import Callable
 

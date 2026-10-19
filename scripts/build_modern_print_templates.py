@@ -12,8 +12,8 @@ Der Kartenrand folgt der THW-Ausbildungsunterlage "Kartenkunde":
   Herausgeber mit Fortführungsstand, Grenzen/Quellen
 
 Druckfreundlich ohne Flächenfüllungen, Blau nur für Titel, Linien und Gitter;
-Schrift BundesSans, UTMREF-Gitter nach der Vorlage "OV Minden A4 UTMREF". Die Bildpfade werden wie in den Vorlagen der
-THW-Leitung als `./GRAFIKEN/LAYOUT/...` gespeichert; das Plugin biegt sie beim
+Schrift BundesSans, UTMREF-Gitter nach der Vorlage "OV Minden A4 UTMREF". Die Bildpfade werden wie in den THW-Vorlagen
+als `./GRAFIKEN/LAYOUT/...` gespeichert; das Plugin biegt sie beim
 Laden auf `templates/assets/` um.
 """
 
@@ -606,7 +606,7 @@ def save_template(layout: QgsPrintLayout, path: str) -> None:
         raise RuntimeError(f"Vorlage konnte nicht gespeichert werden: {path}")
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
-    # Bildpfade wie in den Vorlagen der THW-Leitung relativ ablegen
+    # Bildpfade wie in den THW-Vorlagen relativ ablegen
     for prefix in {ASSETS_DIR + os.sep, ASSETS_DIR.replace("\\", "/") + "/"}:
         content = content.replace(prefix, ASSET_PREFIX)
     with open(path, "w", encoding="utf-8", newline="\n") as f:

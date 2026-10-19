@@ -38,7 +38,10 @@ from qgis.PyQt.QtGui import QColor
 
 from ..layer.fields import _T_BOOL, _T_DOUBLE, _T_STRING
 from ..logging_utils import get_logger
+from ..paths import in_temp_dir, temp_dir
+from ..tools.layer_functions import update_layer_tree_sources
 from ..util.svg_minify import minify_svg
+from ..util.temp_files import remove_temp_file
 from .catalog import Catalog
 from .zone_style import DEFAULT_OPACITY, DEFAULT_STROKE_WIDTH, DOT_PATTERNS, HATCH_LINES, STYLE_FIELD
 
@@ -249,7 +252,6 @@ class PlanningLayers(QObject):
         self.plugin_dir = plugin_dir
         self.catalog = catalog
         self._layers: dict[str, QgsVectorLayer] = {}
-        self._resaving = False
         # Eingebettete Zeichen je Katalogpfad (``svgs/<rel>``), einmal gelesen
         self._sign_data: dict[str, str] = {}
 
@@ -321,7 +323,7 @@ class PlanningLayers(QObject):
         pfile = proj.fileName()
         if pfile:
             return os.path.splitext(pfile)[0] + GPKG_SUFFIX + ".gpkg"
-        tmp_dir = os.path.join(self.plugin_dir, "tmp")
+        tmp_dir = temp_dir()
         os.makedirs(tmp_dir, exist_ok=True)
         return os.path.join(tmp_dir, f"projekt_{int(time.time())}{GPKG_SUFFIX}.gpkg")
 
@@ -474,9 +476,13 @@ class PlanningLayers(QObject):
     # Projekt speichern: GeoPackage neben die Projektdatei verschieben
     # ------------------------------------------------------------------
 
-    def on_project_saved(self) -> None:
-        if self._resaving:
-            return
+    def on_project_write(self, doc=None) -> None:
+        """GeoPackage beim Speichern neben die Projektdatei ziehen (wie Marker und Dienststellen).
+
+        Läuft im Signal ``writeProject``, also bevor QGIS die Layer in die Projektdatei schreibt: So steht
+        gleich der neue Pfad im Projekt. Ein zweites Speichern danach (früher aus ``projectSaved``) kam bei
+        ``.qgz`` nicht an, das Projekt zeigte weiter auf das GeoPackage im tmp-Ordner.
+        """
         layers = {r: self.layer(r) for r in _ROLE_ORDER}
         if not any(layers.values()):
             return
@@ -486,7 +492,10 @@ class PlanningLayers(QObject):
             return
         target = os.path.splitext(pfile)[0] + GPKG_SUFFIX + ".gpkg"
 
-        moved = False
+        moved: list[QgsVectorLayer] = []
+        # GeoPackages aus dem tmp-Ordner, die nach dem Umzug keiner mehr braucht
+        leftovers: set[str] = set()
+        kept: set[str] = set()
         for role, lyr in layers.items():
             if lyr is None or lyr.providerType() != "ogr":
                 continue
@@ -506,18 +515,18 @@ class PlanningLayers(QObject):
             result = QgsVectorFileWriter.writeAsVectorFormatV3(lyr, target, proj.transformContext(), opts)
             if result[0] != QgsVectorFileWriter.WriterError.NoError:
                 logger.error("Objektplanung: Layer %s konnte nicht nach %s kopiert werden: %s", role, target, result[1])
+                kept.add(current)
                 continue
             # setDataSource behält Stil, ID und Position im Layerbaum
             lyr.setDataSource(f"{target}|layername={role}", lyr.name(), "ogr")
-            moved = True
+            moved.append(lyr)
+            if in_temp_dir(current):
+                leftovers.add(current)
 
-        if moved:
-            # Die gerade geschriebene Projektdatei zeigt noch auf den alten Pfad
-            self._resaving = True
-            try:
-                proj.write()
-            finally:
-                self._resaving = False
+        # Den Layerbaum hat QGIS schon mit dem alten Pfad ins Projekt-XML geschrieben
+        update_layer_tree_sources(doc, proj, moved)
+        for path in leftovers - kept:
+            remove_temp_file(path)
 
     # ------------------------------------------------------------------
     # Darstellung

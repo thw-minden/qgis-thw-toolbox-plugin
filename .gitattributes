@@ -1,0 +1,10 @@
+# Nicht im Plugin-ZIP (git archive): nur für GitHub und die Entwicklung
+/docs/preview.gif export-ignore
+/.github export-ignore
+/.gitattributes export-ignore
+/.gitignore export-ignore
+/.pre-commit-config.yaml export-ignore
+/qgis-thw-toolbox-plugin.code-workspace export-ignore
+/requirements-dev.txt export-ignore
+/IDEEN.md export-ignore
+/scripts export-ignore
