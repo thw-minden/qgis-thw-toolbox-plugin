@@ -202,6 +202,37 @@ class PlanningController(QObject):
         self.canvas.mapToolSet.connect(self._on_map_tool_set)
         QgsProject.instance().writeProject.connect(self.layers.on_project_write)
         self.layers.selection_changed.connect(self._on_selection_changed)
+        # Rückgängig gilt nur innerhalb eines Projekts
+        QgsProject.instance().cleared.connect(self.layers.history.clear)
+        QgsProject.instance().readProject.connect(self._clear_history)
+
+    # ------------------------------------------------------------------
+    # Rückgängig / Wiederherstellen
+    # ------------------------------------------------------------------
+
+    def _clear_history(self, *_args):
+        self.layers.history.clear()
+
+    def undo(self) -> bool:
+        return self._step_history(undo=True)
+
+    def redo(self) -> bool:
+        return self._step_history(undo=False)
+
+    def _step_history(self, undo: bool) -> bool:
+        history = self.layers.history
+        # Eine laufende Punktbearbeitung bzw. Geste zeigt sonst einen veralteten Stand
+        if self.active_tool_kind()[0] not in (TOOL_SELECT, None):
+            self.back_to_select()
+        done = history.undo() if undo else history.redo()
+        undo_left, redo_left = history.counts()
+        if done:
+            text = "Rückgängig gemacht" if undo else "Wiederhergestellt"
+            hint = f"{text} – noch {undo_left} rückgängig, {redo_left} wiederherstellbar"
+        else:
+            hint = "Nichts rückgängig zu machen" if undo else "Nichts wiederherzustellen"
+        self.iface.statusBarIface().showMessage(f"Objektplanung: {hint}", 3000)
+        return done
 
     def _on_selection_changed(self):
         if self.plugin is not None:
@@ -231,6 +262,14 @@ class PlanningController(QObject):
     def unload(self):
         # Vorschau-Intervall der Karte nicht zurückgehalten lassen
         self.layers.release_preview()
+        for signal, slot in (
+            (QgsProject.instance().cleared, self.layers.history.clear),
+            (QgsProject.instance().readProject, self._clear_history),
+        ):
+            try:
+                signal.disconnect(slot)
+            except (TypeError, RuntimeError):
+                pass
         if self.dock:
             try:
                 self.dock.visibilityChanged.disconnect(self._on_dock_visibility)

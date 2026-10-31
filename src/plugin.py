@@ -33,6 +33,7 @@ from .layer.canvas_fit import zoom_if_tiny
 from .layer.feature_ops import FeatureOperations
 from .layer.labeling import apply_labeling
 from .layer.layer_manager import LAYER_DISPLAY_NAME, LayerManager
+from .layer.marker_history import MarkerHistory
 from .layer.renderer import apply_renderer, has_file_svg_paths
 from .layout.legend import add_legend_action, refresh_legends
 from .layout.mgrs_grid import build_mgrs_grid_layer
@@ -42,6 +43,7 @@ from .paths import plugin_root
 from .planning.controller import PlanningController
 from .planning.details import SelectionDetails
 from .planning.expressions import MGRS_RESOLUTION_VARIABLE
+from .planning.layers import ROLE_MARKERS
 from .settings import THWToolboxSettings
 from .tools import style_library
 from .tools.canvas_drop_filter import CanvasDropFilter
@@ -49,6 +51,7 @@ from .tools.identify_tool import IdentifyTool
 from .tools.layer_functions import move_dienststellen_next_to_project, update_layer_tree_sources
 from .tools.move_tool import MoveTool
 from .tools.own_position import OwnPositionLocator
+from .tools.undo_shortcuts import UndoShortcutFilter
 from .ui.config_dialog import ConfigDialog
 from .ui.feature_dock import FeatureDock
 from .ui.marker_table_dialog import MarkerTableDialog
@@ -93,6 +96,8 @@ class THWToolboxPlugin:
         # Nutzer mit der Deaktivierungs-Warnung zu konfrontieren.
         self._project_clearing = False
         self.planning = None
+        # Taktische Zeichen in der Rückgängig-Historie (angelegt mit dem Marker-Layer)
+        self._marker_history = None
         # Details zur Auswahl (Zeichen, Objekte, Mehrfachauswahl) – für Toolbox und Objektplanung gemeinsam
         self.details = None
         self._details_timer = None
@@ -269,6 +274,19 @@ class THWToolboxPlugin:
             pass
         QgsProject.instance().cleared.connect(self._on_project_cleared)
 
+        # Strg+Z / Strg+Y: Objektplanung rückgängig machen bzw. wiederherstellen – mit Fokus auf der Karte
+        # und solange kein Vektorlayer bearbeitet wird (dann gilt das Rückgängig von QGIS). Der Filter sitzt
+        # nur an der Karte; an der ganzen Anwendung brachte er QGIS beim Start zum Absturz.
+        self._undo_filter = UndoShortcutFilter(
+            is_available=self._planning_undo_available,
+            on_undo=lambda: self.planning.undo() if self.planning else None,
+            on_redo=lambda: self.planning.redo() if self.planning else None,
+            parent=self.canvas,
+        )
+        # Den Fokus kann die Karte selbst oder ihr Viewport haben
+        self.canvas.installEventFilter(self._undo_filter)
+        self.canvas.viewport().installEventFilter(self._undo_filter)
+
         # Default-Style-Cache nachfüllen (QGIS-4 lädt nicht zuverlässig alle
         # DB-Einträge in mSymbols beim Start). Deferred via QTimer, damit der
         # Plugin-Init nicht blockiert.
@@ -286,6 +304,12 @@ class THWToolboxPlugin:
         # Plugin deaktivieren falls aktiv
         if self.action and self.action.isChecked():
             self.deactivate()
+
+        if getattr(self, "_undo_filter", None) is not None:
+            self.canvas.removeEventFilter(self._undo_filter)
+            self.canvas.viewport().removeEventFilter(self._undo_filter)
+            self._undo_filter.deleteLater()
+            self._undo_filter = None
 
         if self._details_timer is not None:
             self._details_timer.stop()
@@ -411,6 +435,7 @@ class THWToolboxPlugin:
                 self._check_map_available,
             )
         self.layer = self.layer_manager.init_layer()
+        self._hook_marker_history()
         if self.feature_ops is None:
             self.feature_ops = FeatureOperations(
                 layer_provider=lambda: self.layer,
@@ -693,6 +718,10 @@ class THWToolboxPlugin:
         if not new_layer or new_layer is self.layer:
             return
         self.layer = new_layer
+        # Feature-IDs des alten Layers gelten nicht mehr: Rückgängig beginnt hier neu
+        self._hook_marker_history()
+        if self.planning:
+            self.planning.layers.history.clear()
         self._update_tool_references()
         self._init_renderer(new_layer)
         if self.marker_table and self.marker_table.isVisible():
@@ -738,6 +767,8 @@ class THWToolboxPlugin:
         new_feature = self.feature_ops.place_feature(svg_path, point, fit_canvas=True)
         if not new_feature:
             return None
+        if self._marker_history is not None:
+            self._marker_history.record_added([new_feature.id()])
 
         if hasattr(self, "svg_dock_widget"):
             self.svg_dock_widget.refresh_marker_list()
@@ -932,6 +963,8 @@ class THWToolboxPlugin:
         if not self.feature_ops:
             return []
         new_fids = self.feature_ops.duplicate(fids, geometries)
+        if new_fids and self._marker_history is not None:
+            self._marker_history.record_added(new_fids)
         if new_fids:
             if hasattr(self, "svg_dock_widget"):
                 self.svg_dock_widget.refresh_marker_list()
@@ -947,6 +980,8 @@ class THWToolboxPlugin:
             for fid, geom in geometries.items():
                 layer.changeGeometry(fid, geom)
         else:
+            if self._marker_history is not None:
+                self._marker_history.record_moved(geometries)
             layer.dataProvider().changeGeometryValues(geometries)
             layer.updateExtents()
         layer.triggerRepaint()
@@ -1145,6 +1180,36 @@ class THWToolboxPlugin:
 
     def _open_template_dialog(self):
         TemplateDialog(self.plugin_dir, self.iface.mainWindow()).exec()
+
+    def _hook_marker_history(self):
+        """Taktische Zeichen in die Rückgängig-Historie der Objektplanung aufnehmen."""
+        if self.layer is None:
+            return
+        if self._marker_history is None:
+            self._marker_history = MarkerHistory(
+                self._planning_controller().layers.history, ROLE_MARKERS, self._after_marker_undo, parent=self.canvas
+            )
+        self._marker_history.attach(self.layer)
+
+    def _after_marker_undo(self, fids):
+        """Nach Rückgängig/Wiederherstellen bei Zeichen: Symbole (eins je Zeichen), Auswahl, Ansichten auffrischen."""
+        self._update_renderer()
+        if self.move_tool:
+            # Hebt die Auswahl auf, wenn das Zeichen dabei verschwunden ist
+            self.move_tool.refresh_selection()
+        self.refresh_marker_views(fids)
+        if self.planning:
+            self.planning.layers.notify_changed()
+        self.canvas.refresh()
+
+    def _planning_undo_available(self) -> bool:
+        """Objektplanung vorhanden und kein Vektorlayer im QGIS-Bearbeitungsmodus."""
+        if self.planning is None:
+            return False
+        return not any(
+            isinstance(layer, QgsVectorLayer) and layer.isEditable()
+            for layer in QgsProject.instance().mapLayers().values()
+        )
 
     def _planning_controller(self) -> PlanningController:
         """Steuerung von Hotbar und Auswahlwerkzeug – für taktische Zeichen und Objektplanung gemeinsam."""

@@ -10,6 +10,7 @@ from qgis.core import (
     QgsCategorizedSymbolRenderer,
     QgsCoordinateReferenceSystem,
     QgsFeature,
+    QgsFeatureRequest,
     QgsField,
     QgsFields,
     QgsFillSymbol,
@@ -47,6 +48,7 @@ from ..util.svg_minify import minify_svg
 from ..util.temp_files import remove_temp_file
 from .catalog import Catalog
 from .expressions import meters_text_expr, metric_length_expr, note_label_expr
+from .history import PlanningHistory
 from .object_style import (
     ARROWS_BOTH,
     ARROWS_END,
@@ -418,6 +420,8 @@ class PlanningLayers(QObject):
         self._changed_timer.setSingleShot(True)
         self._changed_timer.setInterval(0)
         self._changed_timer.timeout.connect(self.changed)
+        # Rückgängig / Wiederherstellen: jede Änderung unten wird mitgeschrieben
+        self.history = PlanningHistory(self)
         # Karte, deren Zwischenbilder beim Neuzeichnen nach einer Änderung zurückgehalten werden (siehe _hold_preview)
         self.canvas = None
         self._held_interval: int | None = None
@@ -620,7 +624,9 @@ class PlanningLayers(QObject):
         if lyr.isEditable():
             ok = lyr.addFeatures(features)
         else:
-            ok, _ = lyr.dataProvider().addFeatures(features)
+            ok, added = lyr.dataProvider().addFeatures(features)
+            if ok:
+                self.history.record_add(role, added)
             lyr.updateExtents()
         self._hold_preview()
         lyr.triggerRepaint()
@@ -634,6 +640,7 @@ class PlanningLayers(QObject):
         if lyr.isEditable():
             ok = lyr.deleteFeature(fid)
         else:
+            self.history.record_delete(role, _features(lyr, [fid]))
             ok = lyr.dataProvider().deleteFeatures([fid])
         self._hold_preview()
         lyr.triggerRepaint()
@@ -648,6 +655,7 @@ class PlanningLayers(QObject):
         if lyr.isEditable():
             ok = lyr.deleteFeatures(fids)
         else:
+            self.history.record_delete(role, _features(lyr, fids))
             ok = lyr.dataProvider().deleteFeatures(fids)
         self._hold_preview()
         lyr.triggerRepaint()
@@ -669,6 +677,7 @@ class PlanningLayers(QObject):
                 for idx, value in values.items():
                     ok = lyr.changeAttributeValue(fid, idx, value) and ok
         else:
+            self.history.record_change(role, lyr, geometries, attributes or {})
             provider = lyr.dataProvider()
             ok = provider.changeGeometryValues(geometries) if geometries else True
             if attr_map:
@@ -1225,6 +1234,10 @@ def _dimensions_used(lyr: QgsVectorLayer) -> bool:
 def _has_dimensions(lyr: QgsVectorLayer) -> bool:
     """Enthält die aktuelle Darstellung die Maß-Ebenen?"""
     return str(lyr.customProperty(_DIMENSIONS_PROPERTY, "0")) in ("1", "true")
+
+
+def _features(lyr: QgsVectorLayer, fids) -> list[QgsFeature]:
+    return list(lyr.getFeatures(QgsFeatureRequest().setFilterFids(list(fids))))
 
 
 def _category_values(renderer: QgsCategorizedSymbolRenderer) -> set[str]:
