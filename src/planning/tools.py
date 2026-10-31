@@ -24,13 +24,16 @@ from .catalog import fmt_m
 from .geometry import MetricFrame, circle_polygon, split_line
 from .layers import (
     FOOTPRINT_ROLES,
+    NOTE_ROLES,
     ROLE_ARROWS,
     ROLE_CABLES,
     ROLE_DISTRIBUTORS,
     ROLE_GENERATORS,
     ROLE_LIGHTS,
     ROLE_MARKERS,
+    ROLE_POINTS,
     ROLE_TENTS,
+    ROLE_TEXTS,
     ROLE_VEHICLES,
     ROLE_ZONES,
 )
@@ -62,6 +65,8 @@ _EPS_M = 0.01
 # Trefferreihenfolge: Punkte und Linien zuerst, sonst wären sie auf Zelten nicht greifbar.
 # Gebiete zuletzt und nur am Umriss, damit man in ihnen weiter auswählen und Rahmen aufziehen kann.
 _PICK_ORDER = (
+    ROLE_TEXTS,
+    ROLE_POINTS,
     ROLE_GENERATORS,
     ROLE_DISTRIBUTORS,
     ROLE_LIGHTS,
@@ -328,6 +333,36 @@ class PointTool(_PlanningTool):
         layer = self.controller.layers.layer(self.role)
         if layer is not None:
             self.controller.place_point(self.role, self.toLayerCoordinates(layer, event.mapPoint()))
+
+
+class NoteTool(_PlanningTool):
+    """Punkt oder Text per Klick setzen.
+
+    Wie beim taktischen Zeichen führt der Klick zurück zur Auswahl: Das neue Objekt ist
+    ausgewählt, Beschreibung bzw. Text stehen in den Details zum Schreiben bereit.
+    Shift+Klick setzt es und bleibt im Werkzeug für weitere, Esc oder Rechtsklick brechen ab.
+    """
+
+    def __init__(self, canvas, controller, role: str):
+        super().__init__(canvas, controller)
+        self.role = role
+
+    def canvasMoveEvent(self, event):
+        obj = self.controller.current_point_type(self.role)
+        if obj is not None:
+            what = "Text" if self.role == ROLE_TEXTS else "Punkt"
+            self._tooltip(event, f"{obj.name}: Klick setzt den {what} · Shift+Klick: mehrere")
+
+    def canvasReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.RightButton:
+            self.cancel()
+            return
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        layer = self.controller.layers.layer(self.role)
+        if layer is not None:
+            keep = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self.controller.place_note(self.role, self.toLayerCoordinates(layer, event.mapPoint()), keep_tool=keep)
 
 
 # ----------------------------------------------------------------------
@@ -696,6 +731,9 @@ class ZoneTool(_DrawTool):
     def __init__(self, canvas, controller):
         obj = controller.current_point_type(ROLE_ZONES)
         super().__init__(canvas, controller, QColor(obj.farbe))
+        if not obj.gefuellt:
+            # Typ ohne Füllung: schon beim Zeichnen nur der Rand
+            self._band.setFillColor(QColor(0, 0, 0, 0))
         self.hint = f"{obj.name}: Eckpunkte anklicken · Rechtsklick / Doppelklick schließt ab"
 
     def _commit(self, geom: QgsGeometry):
@@ -703,14 +741,15 @@ class ZoneTool(_DrawTool):
 
 
 class ArrowTool(_DrawTool):
-    """Pfeil zeichnen: Start anklicken, beliebig viele Knickpunkte, die Spitze sitzt am letzten Punkt."""
+    """Linie bzw. Pfeil zeichnen: Start anklicken, beliebig viele Knickpunkte, eine Spitze sitzt am letzten Punkt."""
 
     polygon = False
 
     def __init__(self, canvas, controller):
         obj = controller.current_point_type(ROLE_ARROWS)
         super().__init__(canvas, controller, QColor(obj.farbe))
-        self.hint = f"{obj.name}: Start anklicken, dann Verlauf · Rechtsklick / Doppelklick setzt die Spitze"
+        end = "setzt die Spitze" if controller.arrow_heads else "beendet die Linie"
+        self.hint = f"{obj.name}: Start anklicken, dann Verlauf · Rechtsklick / Doppelklick {end}"
 
     def _commit(self, geom: QgsGeometry):
         self.controller.place_shape(ROLE_ARROWS, geom, self.canvas.mapSettings().destinationCrs())
@@ -864,7 +903,7 @@ class VertexTool(_PlanningTool):
 
     def _remove(self, index: int):
         if len(self._points) <= self._min_points:
-            kind = "Ein Gebiet braucht mindestens drei" if self.polygon else "Ein Pfeil braucht mindestens zwei"
+            kind = "Ein Gebiet braucht mindestens drei" if self.polygon else "Eine Linie braucht mindestens zwei"
             self._tooltip_at(self.canvas.mapFromGlobal(QCursor.pos()), f"{kind} Punkte")
             return
         del self._points[index]
@@ -937,10 +976,9 @@ class VertexTool(_PlanningTool):
             tool.canvasPressEvent(event)
 
     def cancel(self):
-        """Esc / Enter beendet die Bearbeitung. Ein Gebiet wird dabei abgewählt – ausgewählt ist es immer in Bearbeitung."""
+        """Esc / Enter beendet die Bearbeitung und wählt ab – ausgewählt sind Gebiet und Linie immer in Bearbeitung."""
         self.controller.back_to_select()
-        if self.polygon:
-            self.controller.clear_selection()
+        self.controller.clear_selection()
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -1020,6 +1058,7 @@ class SelectTool(_PlanningTool):
         self.controller.layers.selection_changed.connect(self._refresh_overlay)
         self.controller.layers.changed.connect(self._refresh_overlay)
         self.canvas.extentsChanged.connect(self._on_extent_changed)
+        self.canvas.mapCanvasRefreshed.connect(self._on_canvas_refreshed)
         self._refresh_overlay()
 
     def deactivate(self):
@@ -1027,6 +1066,7 @@ class SelectTool(_PlanningTool):
             (self.controller.layers.selection_changed, self._refresh_overlay),
             (self.controller.layers.changed, self._refresh_overlay),
             (self.canvas.extentsChanged, self._on_extent_changed),
+            (self.canvas.mapCanvasRefreshed, self._on_canvas_refreshed),
         ):
             try:
                 signal.disconnect(slot)
@@ -1047,10 +1087,12 @@ class SelectTool(_PlanningTool):
         self.overlay.frame = frame
         self.overlay.badge = badge
         # Mit Zeichen in der Auswahl wird nur verschoben – ohne Eckpunkte kein Drehen.
-        # Ein einzelnes Gebiet wird über seine Punkte bearbeitet, nicht gedreht.
+        # Ein einzelnes Gebiet bzw. eine Linie wird über seine Punkte bearbeitet, nicht gedreht.
+        # Punkte und Texte drehen nicht – ihr Rahmen ist der Umriss von Punkt und Beschriftung
         ids = self.controller.selection_ids()
-        single_zone = list(ids) == [ROLE_ZONES] and len(ids[ROLE_ZONES]) == 1
-        self.overlay.show_handles = ROLE_MARKERS not in ids and not single_zone
+        single_shape = self.controller.editable_shape() is not None
+        notes_only = bool(ids) and all(role in NOTE_ROLES for role in ids)
+        self.overlay.show_handles = ROLE_MARKERS not in ids and not single_shape and not notes_only
         self.overlay.ghosts = []
         self.overlay.guides = []
         self.overlay.refresh()
@@ -1058,6 +1100,11 @@ class SelectTool(_PlanningTool):
     def _on_extent_changed(self):
         # Zeichen mit fester Bildschirmgröße: ihr Umriss in Karteneinheiten ändert sich beim Zoomen
         if self.controller.marker_sel:
+            self._refresh_overlay()
+
+    def _on_canvas_refreshed(self):
+        # Rahmen von Texten und Punkten folgt ihrer Beschriftung – deren Lage steht erst nach dem Zeichnen fest
+        if any(role in NOTE_ROLES for role in self.controller.selection_ids()):
             self._refresh_overlay()
 
     # -- Taktische Zeichen ----------------------------------------------------
@@ -1093,6 +1140,10 @@ class SelectTool(_PlanningTool):
             feat = markers.marker_at(map_point)
             if feat is not None:
                 return ROLE_MARKERS, feat
+        # Texte (und Beschreibungen der Punkte) greift man an ihrer Beschriftung, nicht nur am Ankerpunkt
+        hit = self.controller.note_at(map_point)
+        if hit is not None:
+            return hit
         tol = self._pixel_tolerance()
         rect = QgsRectangle(map_point.x() - tol, map_point.y() - tol, map_point.x() + tol, map_point.y() + tol)
         for role in _PICK_ORDER:
@@ -1140,6 +1191,8 @@ class SelectTool(_PlanningTool):
         """Umriss für Hover/Erfassen im Canvas-CRS (bei Zeichen der Rahmen ihres Symbols)."""
         if role == ROLE_MARKERS:
             return self.controller.marker_outline(feat)
+        if role in NOTE_ROLES:
+            return self.controller.note_outline(role, feat)
         return self._to_canvas(role, feat.geometry())
 
     def _frame_hit(self, pos: QPointF) -> str | None:
@@ -1465,11 +1518,13 @@ class SelectTool(_PlanningTool):
             if self.controller.editable_shape() is not None:
                 menu.addAction("Punkte bearbeiten\tDoppelklick", self.controller.edit_vertices)
             menu.addAction("Bezeichnung bearbeiten …\tEnter", self.controller.focus_label)
-            labels_shown = all(self.controller.selection_labels_visible())
-            menu.addAction(
-                "Beschriftung ausblenden" if labels_shown else "Beschriftung einblenden",
-                self.controller.toggle_selection_labels,
-            )
+            # Texte bestehen nur aus ihrer Beschriftung – ausblenden ergäbe nichts Sichtbares mehr
+            if set(self.controller.selection_ids()) != {ROLE_TEXTS}:
+                labels_shown = all(self.controller.selection_labels_visible())
+                menu.addAction(
+                    "Beschriftung ausblenden" if labels_shown else "Beschriftung einblenden",
+                    self.controller.toggle_selection_labels,
+                )
             signs = self.controller.selection_signs_visible()
             if signs:
                 menu.addAction(

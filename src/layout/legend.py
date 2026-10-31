@@ -38,7 +38,7 @@ from qgis.PyQt.QtWidgets import QAction, QMainWindow, QMenu, QToolBar, QToolButt
 
 from ..layer.background import DEFAULT_SCALE
 from ..layer.renderer import category_value, svg_symbol_layer
-from ..planning.layers import ROLE_PROPERTY
+from ..planning.layers import ROLE_PROPERTY, ROLE_TEXTS
 
 # Layer-Eigenschaft: 1/0 überstimmt die Regel aus `_default_in_legend`
 LEGEND_PROPERTY = "thw_toolbox/legende"
@@ -56,7 +56,12 @@ def _is_marker_layer(layer) -> bool:
 
 
 def _default_in_legend(layer: QgsMapLayer) -> bool:
-    """Regel ohne Angabe des Nutzers: Vektorlayer ja, Hintergrund- und Rasterkarten nein."""
+    """Regel ohne Angabe des Nutzers: Vektorlayer ja, Hintergrund- und Rasterkarten nein.
+
+    Die Texte der Objektplanung stehen für sich (der Layer zeichnet nur Beschriftungen) – auch nein.
+    """
+    if layer.customProperty(ROLE_PROPERTY) == ROLE_TEXTS:
+        return False
     return isinstance(layer, QgsVectorLayer) and layer.isSpatial()
 
 

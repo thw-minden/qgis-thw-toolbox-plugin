@@ -1,8 +1,9 @@
-"""GeoPackage-Layer der Objektplanung (Zelte, Fahrzeuge, Strom, Beleuchtung, Gebiete, Pfeile)."""
+"""GeoPackage-Layer der Objektplanung (Zelte, Fahrzeuge, Strom, Beleuchtung, Gebiete, Pfeile, Punkte, Texte)."""
 
 import base64
 import os
 import time
+from dataclasses import dataclass
 
 from qgis.core import (
     Qgis,
@@ -43,6 +44,14 @@ from ..tools.layer_functions import update_layer_tree_sources
 from ..util.svg_minify import minify_svg
 from ..util.temp_files import remove_temp_file
 from .catalog import Catalog
+from .object_style import (
+    ARROWS_BOTH,
+    ARROWS_END,
+    ARROWS_START,
+    CIRCLE_OPACITY,
+    CIRCLE_STROKE_WIDTH,
+    DEFAULT_LINE_WIDTH,
+)
 from .zone_style import DEFAULT_OPACITY, DEFAULT_STROKE_WIDTH, DOT_PATTERNS, HATCH_LINES, STYLE_FIELD
 
 logger = get_logger(__name__)
@@ -62,6 +71,8 @@ ROLE_GENERATORS = "stromerzeuger"
 ROLE_LIGHTS = "beleuchtung"
 ROLE_ZONES = "gebiete"
 ROLE_ARROWS = "pfeile"
+ROLE_POINTS = "punkte"
+ROLE_TEXTS = "texte"
 # Kein Objektplanungs-Layer: unter dieser Rolle führt die Auswahl die taktischen Zeichen (Marker-Layer) mit
 ROLE_MARKERS = "zeichen"
 
@@ -77,6 +88,8 @@ LABEL_SIZE_DEFAULT_PT = 8.0
 _LABEL_SIZE_EXPR = f'coalesce("{LABEL_SIZE_FIELD}", {LABEL_SIZE_DEFAULT_PT})'
 _SIZE = getattr(QgsPalLayerSettings, "Property", QgsPalLayerSettings).Size
 _SIZE_PROPERTY = _SIZE if isinstance(_SIZE, int) else _SIZE.value
+_COLOR = getattr(QgsPalLayerSettings, "Property", QgsPalLayerSettings).Color
+_COLOR_PROPERTY = _COLOR if isinstance(_COLOR, int) else _COLOR.value
 
 # Taktisches Zeichen je Objekt ein/aus (leer = an); nur die Layer, deren Objekte eins tragen, haben das Feld
 SIGN_FIELD = "zeichen"
@@ -92,23 +105,89 @@ _EMBEDDED_PREFIX = "base64:"
 
 # Gestaltung je Gebiet (JSON im Feld ``gestaltung``, siehe zone_style); leer = Darstellung nach Typ.
 # Ausdrücke, die NULL ergeben, lassen den festen Wert des Symbols (Typfarbe) stehen.
-_ZONE_STYLE = f'json_to_map("{STYLE_FIELD}")'
+_STYLE = f'json_to_map("{STYLE_FIELD}")'
 
 
-def _zone_style_get(key: str) -> str:
-    return f"map_get({_ZONE_STYLE}, '{key}')"
+def _style_get(key: str) -> str:
+    return f"map_get({_STYLE}, '{key}')"
 
 
-_ZONE_PATTERN_EXPR = f"coalesce({_zone_style_get('pattern')}, 'voll')"
-_ZONE_FILL_EXPR = (
-    f"set_color_part({_zone_style_get('fill')}, 'alpha', "
-    f"round(255 * coalesce({_zone_style_get('opacity')}, {DEFAULT_OPACITY})))"
+
+
+@dataclass(frozen=True)
+class _AreaExpressions:
+    """Ausdrücke für Muster, Füllung und Rand einer Fläche – eines Gebiets oder des Radius-Kreises eines Punkts."""
+
+    pattern: str
+    fill: str
+    stroke_color: str
+    stroke_width: str
+    stroke_style: str
+
+
+def _area_expressions(
+    style_map: str,
+    filled: bool = True,
+    color_fallback: str | None = None,
+    opacity: float = DEFAULT_OPACITY,
+    stroke_width: float = DEFAULT_STROKE_WIDTH,
+) -> _AreaExpressions:
+    """``style_map``: Ausdruck der Gestaltung als Map (Schlüssel wie ``ZoneStyle``).
+
+    Ohne eigene Gestaltung entscheidet der Typ: gefüllt („voll“) oder nur der Rand („ohne“).
+    ``color_fallback``: Farbe, der Füllung und Rand folgen, solange die Fläche keine eigene hat
+    (der Kreis eines Punkts folgt dessen Farbe).
+    """
+
+    def get(key: str) -> str:
+        return f"map_get({style_map}, '{key}')"
+
+    fill = get("fill") if color_fallback is None else f"coalesce({get('fill')}, {color_fallback})"
+    stroke = f"nullif({get('stroke')}, '')"
+    if color_fallback is not None:
+        stroke = f"if({style_map} IS NULL, {color_fallback}, {stroke})"
+    return _AreaExpressions(
+        pattern=f"coalesce({get('pattern')}, '{'voll' if filled else 'ohne'}')",
+        fill=f"set_color_part({fill}, 'alpha', round(255 * coalesce({get('opacity')}, {opacity})))",
+        stroke_color=stroke,
+        stroke_width=f"coalesce({get('stroke_width')}, {stroke_width})",
+        stroke_style=f"if({get('stroke')} = '', 'no', coalesce({get('stroke_style')}, 'solid'))",
+    )
+
+# Gestaltung je Pfeil, Punkt und Text (JSON im Feld ``gestaltung``, siehe object_style); leer = nach Typ
+_OBJECT_COLOR_EXPR = (
+    f"set_color_part({_style_get('color')}, 'alpha', round(255 * coalesce({_style_get('opacity')}, 1)))"
 )
-_ZONE_STROKE_COLOR_EXPR = f"nullif({_zone_style_get('stroke')}, '')"
-_ZONE_STROKE_WIDTH_EXPR = f"coalesce({_zone_style_get('stroke_width')}, {DEFAULT_STROKE_WIDTH})"
-_ZONE_STROKE_STYLE_EXPR = (
-    f"if({_zone_style_get('stroke')} = '', 'no', coalesce({_zone_style_get('stroke_style')}, 'solid'))"
+# Radius-Kreis eines Punkts: gestaltet wie ein Gebiet (Schlüssel ``circle``), ohne eigene Angabe in der Punktfarbe
+_CIRCLE_EXPRESSIONS = _area_expressions(
+    _style_get("circle"),
+    color_fallback=_style_get("color"),
+    opacity=CIRCLE_OPACITY,
+    stroke_width=CIRCLE_STROKE_WIDTH,
 )
+_LINE_WIDTH_EXPR = f"coalesce({_style_get('width')}, {DEFAULT_LINE_WIDTH})"
+_ARROWS_EXPR = f"coalesce({_style_get('arrows')}, '{ARROWS_END}')"
+# Wie object_style.arrow_size_for: gewählte Größe oder automatisch nach der Linienbreite
+_ARROW_SIZE_EXPR = (
+    f"if(coalesce({_style_get('arrow_size')}, 0) > 0, {_style_get('arrow_size')}, max(3, {_LINE_WIDTH_EXPR} * 4))"
+)
+
+
+def _arrow_trim_expr(modes) -> str:
+    """Linie unter der Spitze um eine Linienbreite kürzen, sonst ragt ihr rundes Ende vorn heraus."""
+    listed = ", ".join(f"'{m}'" for m in modes)
+    return f"if({_ARROWS_EXPR} IN ({listed}), min({_LINE_WIDTH_EXPR}, 0.9 * {_ARROW_SIZE_EXPR} / 2), 0)"
+
+
+# Stand der Darstellung von Gebieten, Linien und Punkten; ältere Layer werden beim Öffnen einmal neu aufgebaut
+_STYLE_VERSION_PROPERTY = "thw_toolbox/objektplanung_darstellung"
+_STYLE_VERSION = 2
+_VERSIONED_ROLES = (ROLE_ZONES, ROLE_ARROWS, ROLE_POINTS)
+
+# Gebiete tragen nur ihre eigene Bezeichnung; frühere Versionen zeigten ohne sie den Typ
+_ZONE_LABEL_EXPR = "nullif(\"bezeichnung\", '')"
+_LEGACY_ZONE_LABEL_EXPR = 'coalesce(nullif("bezeichnung", \'\'), "typ")'
+
 # Schraffur-Abstand und Linienstärke (mm)
 _HATCH_DISTANCE_MM = 2.5
 _HATCH_WIDTH_MM = 0.35
@@ -175,9 +254,20 @@ _LAYER_SPECS = {
     },
     ROLE_ZONES: {"title": "Gebiete", "geometry": "Polygon", "fields": _SHAPE_FIELDS},
     ROLE_ARROWS: {"title": "Pfeile", "geometry": "LineString", "fields": _SHAPE_FIELDS},
+    ROLE_POINTS: {"title": "Punkte", "geometry": "Point", "fields": [*_SHAPE_FIELDS, ("radius", _T_DOUBLE)]},
+    ROLE_TEXTS: {"title": "Texte", "geometry": "Point", "fields": _SHAPE_FIELDS},
 }
+# Rollen mit eigener Gestaltung je Objekt (Feld ``gestaltung``): Gebiete (zone_style), die übrigen object_style
+STYLE_ROLES = (ROLE_ZONES, ROLE_ARROWS, ROLE_POINTS, ROLE_TEXTS)
+OBJECT_STYLE_ROLES = (ROLE_ARROWS, ROLE_POINTS, ROLE_TEXTS)
+# Punkte und Texte: per Klick gesetzt, beschrieben über die Bezeichnung (auch mehrzeilig)
+NOTE_ROLES = (ROLE_POINTS, ROLE_TEXTS)
+# Schriftgröße neuer Texte (pt) – größer als die Beschriftung der Objekte
+TEXT_SIZE_DEFAULT_PT = 10.0
 # Reihenfolge im Layerbaum: Punkte oben, Flächen unten
 _ROLE_ORDER = (
+    ROLE_TEXTS,
+    ROLE_POINTS,
     ROLE_GENERATORS,
     ROLE_DISTRIBUTORS,
     ROLE_LIGHTS,
@@ -198,7 +288,7 @@ def build_fields(role: str) -> QgsFields:
     fields.append(QgsField(LABEL_SIZE_FIELD, _T_DOUBLE))
     if role in SIGN_ROLES:
         fields.append(QgsField(SIGN_FIELD, _T_BOOL))
-    if role == ROLE_ZONES:
+    if role in STYLE_ROLES:
         fields.append(QgsField(STYLE_FIELD, _T_STRING))
     return fields
 
@@ -315,7 +405,7 @@ class PlanningLayers(QObject):
                 lyr.setCustomProperty(ROLE_PROPERTY, role)
                 _ensure_label_switch(lyr)
                 self._ensure_sign_switch(lyr, role)
-                self._ensure_zone_style(lyr, role)
+                self._ensure_style(lyr, role)
                 self._layers[role] = lyr
                 self._connect(lyr)
 
@@ -363,7 +453,7 @@ class PlanningLayers(QObject):
         self.apply_style(lyr, role)
         _ensure_label_switch(lyr)
         self._ensure_sign_switch(lyr, role)
-        self._ensure_zone_style(lyr, role)
+        self._ensure_style(lyr, role)
 
         proj = QgsProject.instance()
         proj.addMapLayer(lyr, False)
@@ -533,6 +623,8 @@ class PlanningLayers(QObject):
     # ------------------------------------------------------------------
 
     def apply_style(self, lyr: QgsVectorLayer, role: str) -> None:
+        if role in _VERSIONED_ROLES:
+            lyr.setCustomProperty(_STYLE_VERSION_PROPERTY, _STYLE_VERSION)
         if role in (ROLE_GENERATORS, ROLE_LIGHTS):
             lyr.setRenderer(QgsSingleSymbolRenderer(self._sign_symbol(role)))
             _set_labels(lyr, 'coalesce(nullif("bezeichnung", \'\'), "typ")')
@@ -561,36 +653,66 @@ class PlanningLayers(QObject):
             lyr.setRenderer(QgsSingleSymbolRenderer(_distributor_symbol()))
             _set_labels(lyr, 'coalesce(nullif("bezeichnung", \'\'), "typ")')
         elif role == ROLE_ZONES:
-            lyr.setRenderer(self._zone_renderer())
-            # Gebiete sind groß – ihre Namen sollen auch in der Übersicht lesbar sein
-            _set_labels(lyr, 'coalesce(nullif("bezeichnung", \'\'), "typ")', polygon=True, min_scale=50000)
+            lyr.setRenderer(self._renderer(role))
+            # Gebiete sind groß – ihre Namen sollen auch in der Übersicht lesbar sein.
+            # Nur eine eigene Bezeichnung: der Typ („Gebiet rot (gefüllt)“) steckt schon in der Darstellung
+            _set_labels(lyr, _ZONE_LABEL_EXPR, polygon=True, min_scale=50000)
         elif role == ROLE_ARROWS:
-            renderer = QgsCategorizedSymbolRenderer(
-                "typ_id", [QgsRendererCategory(t.id, _arrow_symbol(t.farbe), t.name) for t in self.catalog.pfeile]
-            )
-            renderer.setSourceSymbol(_arrow_symbol("#c62828"))
-            lyr.setRenderer(renderer)
+            lyr.setRenderer(self._renderer(role))
             _set_labels(lyr, "nullif(\"bezeichnung\", '')", line=True, min_scale=50000)
+        elif role == ROLE_POINTS:
+            lyr.setRenderer(self._renderer(role))
+            # Die Beschreibung gehört zum Punkt: immer zeigen, auch weit herausgezoomt
+            _set_labels(lyr, "nullif(\"bezeichnung\", '')", dist_mm=1.5, min_scale=0)
+        elif role == ROLE_TEXTS:
+            lyr.setRenderer(QgsSingleSymbolRenderer(_text_anchor_symbol()))
+            type_color = _type_color_expr(self.catalog.texte, "#212121")
+            _set_labels(
+                lyr,
+                "nullif(\"bezeichnung\", '')",
+                over_point=True,
+                min_scale=0,
+                color_expr=f"coalesce({_OBJECT_COLOR_EXPR}, {type_color})",
+            )
         lyr.triggerRepaint()
 
     def _zone_renderer(self) -> QgsCategorizedSymbolRenderer:
         renderer = QgsCategorizedSymbolRenderer(
-            "typ_id", [QgsRendererCategory(t.id, _zone_symbol(t.farbe), t.name) for t in self.catalog.gebiete]
+            "typ_id",
+            [QgsRendererCategory(t.id, _zone_symbol(t.farbe, t.gefuellt), t.name) for t in self.catalog.zone_types()],
         )
         renderer.setSourceSymbol(_zone_symbol("#1565c0"))
         return renderer
 
-    def _ensure_zone_style(self, lyr: QgsVectorLayer, role: str) -> None:
-        """Ältere Gebiete-Layer nachrüsten: Feld ``gestaltung`` ergänzen und die Darstellung daran knüpfen."""
-        if role != ROLE_ZONES or not _ensure_field(lyr, STYLE_FIELD, _T_STRING):
+    def _ensure_style(self, lyr: QgsVectorLayer, role: str) -> None:
+        """Gebiete, Linien und Punkte früherer Versionen nachrüsten: Feld ``gestaltung``, aktuelle Darstellung."""
+        if role not in _VERSIONED_ROLES or not _ensure_field(lyr, STYLE_FIELD, _T_STRING):
             return
+        if role == ROLE_ZONES:
+            _replace_label_expression(lyr, _LEGACY_ZONE_LABEL_EXPR, _ZONE_LABEL_EXPR)
         renderer = lyr.renderer()
-        source = renderer.sourceSymbol() if isinstance(renderer, QgsCategorizedSymbolRenderer) else None
-        if source is not None and _has_sign_switch(source):
+        current = str(lyr.customProperty(_STYLE_VERSION_PROPERTY, "")) == str(_STYLE_VERSION)
+        # Aktuell und alle Typen des Katalogs da (neue Typen hätten sonst kein Symbol und blieben unsichtbar)
+        categorized = isinstance(renderer, QgsCategorizedSymbolRenderer)
+        if current and categorized and _covers_types(renderer, self._types(role)):
             return
-        # Darstellung aus einer Version ohne Gestaltung – neu aufbauen, die Beschriftung bleibt
-        lyr.setRenderer(self._zone_renderer())
+        # Darstellung einer früheren Version – neu aufbauen, die Beschriftung bleibt
+        lyr.setRenderer(self._renderer(role))
+        lyr.setCustomProperty(_STYLE_VERSION_PROPERTY, _STYLE_VERSION)
         lyr.triggerRepaint()
+
+    def _types(self, role: str):
+        if role == ROLE_ZONES:
+            return self.catalog.zone_types()
+        return self.catalog.pfeile if role == ROLE_ARROWS else self.catalog.punkte
+
+    def _renderer(self, role: str) -> QgsCategorizedSymbolRenderer:
+        """Darstellung je Typ für Gebiete, Linien und Punkte."""
+        if role == ROLE_ZONES:
+            return self._zone_renderer()
+        if role == ROLE_ARROWS:
+            return _typed_renderer(self.catalog.pfeile, _arrow_symbol, "#c62828")
+        return _typed_renderer(self.catalog.punkte, _point_symbol, "#c62828")
 
     def _sign_symbol(self, role: str):
         """Symbol der Objekte mit taktischem Zeichen (Fahrzeuge, Stromerzeuger, Leuchten)."""
@@ -829,16 +951,24 @@ def _rgba(color: str, alpha: int = 255) -> str:
     return f"{c.red()},{c.green()},{c.blue()},{alpha}"
 
 
-def _zone_symbol(color: str) -> QgsFillSymbol:
+def _zone_symbol(
+    color: str,
+    filled: bool = True,
+    expressions: _AreaExpressions | None = None,
+    opacity: float = DEFAULT_OPACITY,
+    stroke_width: float = DEFAULT_STROKE_WIDTH,
+) -> QgsFillSymbol:
     """Gebiet in der Typfarbe; die Gestaltung des Gebiets (Feld ``gestaltung``) überschreibt Füllung und Rand.
 
     Ebenen: Flächenfüllung, je eine Linienschraffur pro Winkel, Punktraster und zuletzt der Rand –
-    welche Füllung zu sehen ist, entscheidet das Muster.
+    welche Füllung zu sehen ist, entscheidet das Muster. ``expressions``: woher die Gestaltung kommt
+    (Standard: das Gebiet selbst; der Radius-Kreis eines Punkts liest seine eigene).
     """
-    symbol = QgsFillSymbol.createSimple({"color": _rgba(color, 45), "outline_style": "no"})
+    ex = expressions or _area_expressions(_STYLE, filled)
+    symbol = QgsFillSymbol.createSimple({"color": _rgba(color, round(255 * opacity)), "outline_style": "no"})
     fill = symbol.symbolLayer(0)
-    fill.setDataDefinedProperty(QgsSymbolLayer.Property.FillColor, QgsProperty.fromExpression(_ZONE_FILL_EXPR))
-    _enable_for_patterns(fill, ("voll",))
+    fill.setDataDefinedProperty(QgsSymbolLayer.Property.FillColor, QgsProperty.fromExpression(ex.fill))
+    _enable_for_patterns(fill, ("voll",), ex.pattern)
 
     for angle, patterns in HATCH_LINES:
         hatch = QgsLinePatternFillSymbolLayer()
@@ -848,9 +978,9 @@ def _zone_symbol(color: str) -> QgsFillSymbol:
         hatch.setLineWidth(_HATCH_WIDTH_MM)
         hatch.setColor(QColor(color))
         hatch.subSymbol().symbolLayer(0).setDataDefinedProperty(
-            QgsSymbolLayer.Property.StrokeColor, QgsProperty.fromExpression(_ZONE_FILL_EXPR)
+            QgsSymbolLayer.Property.StrokeColor, QgsProperty.fromExpression(ex.fill)
         )
-        _enable_for_patterns(hatch, patterns)
+        _enable_for_patterns(hatch, patterns, ex.pattern)
         symbol.appendSymbolLayer(hatch)
 
     dots = QgsPointPatternFillSymbolLayer()
@@ -864,65 +994,149 @@ def _zone_symbol(color: str) -> QgsFillSymbol:
     dot = QgsMarkerSymbol.createSimple({"name": "circle", "size": "0.7", "size_unit": "MM", "outline_style": "no"})
     dot.setColor(QColor(color))
     dot.symbolLayer(0).setDataDefinedProperty(
-        QgsSymbolLayer.Property.FillColor, QgsProperty.fromExpression(_ZONE_FILL_EXPR)
+        QgsSymbolLayer.Property.FillColor, QgsProperty.fromExpression(ex.fill)
     )
     dots.setSubSymbol(dot)
-    _enable_for_patterns(dots, DOT_PATTERNS)
+    _enable_for_patterns(dots, DOT_PATTERNS, ex.pattern)
     symbol.appendSymbolLayer(dots)
 
     outline = QgsSimpleFillSymbolLayer()
     outline.setBrushStyle(Qt.BrushStyle.NoBrush)
     outline.setStrokeColor(QColor(color))
-    outline.setStrokeWidth(DEFAULT_STROKE_WIDTH)
+    outline.setStrokeWidth(stroke_width)
     outline.setStrokeWidthUnit(Qgis.RenderUnit.Millimeters)
     outline.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
     for prop, expression in (
-        (QgsSymbolLayer.Property.StrokeColor, _ZONE_STROKE_COLOR_EXPR),
-        (QgsSymbolLayer.Property.StrokeWidth, _ZONE_STROKE_WIDTH_EXPR),
-        (QgsSymbolLayer.Property.StrokeStyle, _ZONE_STROKE_STYLE_EXPR),
+        (QgsSymbolLayer.Property.StrokeColor, ex.stroke_color),
+        (QgsSymbolLayer.Property.StrokeWidth, ex.stroke_width),
+        (QgsSymbolLayer.Property.StrokeStyle, ex.stroke_style),
     ):
         outline.setDataDefinedProperty(prop, QgsProperty.fromExpression(expression))
     symbol.appendSymbolLayer(outline)
     return symbol
 
 
-def _enable_for_patterns(layer: QgsSymbolLayer, patterns) -> None:
-    """Füllebene nur zeichnen, wenn das Gebiet eines dieser Muster hat."""
+def _enable_for_patterns(layer: QgsSymbolLayer, patterns, pattern_expr: str) -> None:
+    """Füllebene nur zeichnen, wenn die Fläche eines dieser Muster hat."""
     listed = ", ".join(f"'{p}'" for p in patterns)
-    layer.setDataDefinedProperty(_LAYER_ENABLED, QgsProperty.fromExpression(f"{_ZONE_PATTERN_EXPR} IN ({listed})"))
+    expression = f"{pattern_expr} IN ({listed})"
+    layer.setDataDefinedProperty(_LAYER_ENABLED, QgsProperty.fromExpression(expression))
+
+
+def _typed_renderer(types, symbol_factory, default_color: str) -> QgsCategorizedSymbolRenderer:
+    """Je Typ (``typ_id``) ein Symbol in der Typfarbe; die Gestaltung des Objekts überschreibt sie."""
+    renderer = QgsCategorizedSymbolRenderer(
+        "typ_id", [QgsRendererCategory(t.id, symbol_factory(t.farbe), t.name) for t in types]
+    )
+    renderer.setSourceSymbol(symbol_factory(default_color))
+    return renderer
+
+
+def _replace_label_expression(lyr: QgsVectorLayer, old: str, new: str) -> None:
+    """Beschriftung einer früheren Version auf den neuen Ausdruck umstellen; eigene Ausdrücke bleiben."""
+    labeling = lyr.labeling()
+    if not isinstance(labeling, QgsVectorLayerSimpleLabeling):
+        return
+    settings = labeling.settings()
+    if settings.fieldName != old:
+        return
+    settings.fieldName = new
+    lyr.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+
+
+def _covers_types(renderer: QgsCategorizedSymbolRenderer, types) -> bool:
+    """Hat die kategorisierte Darstellung für jeden Typ eine Kategorie?"""
+    values = {str(category.value()) for category in renderer.categories()}
+    return all(t.id in values for t in types)
+
+
+def _type_color_expr(types, default: str) -> str:
+    """Ausdruck: Typfarbe je ``typ_id`` aus dem Katalog."""
+    pairs = ", ".join(f"'{t.id}', '{QColor(t.farbe).name()}'" for t in types)
+    lookup = f'map_get(map({pairs}), "typ_id")' if pairs else "NULL"
+    return f"coalesce({lookup}, '{default}')"
 
 
 def _arrow_symbol(color: str) -> QgsLineSymbol:
+    """Pfeil bzw. Linie in der Typfarbe; die Gestaltung (Feld ``gestaltung``) überschreibt Farbe, Breite und Spitzen.
+
+    Die Spitze ist ein Dreieck, dessen Spitze genau auf dem letzten (bzw. ersten) Punkt sitzt
+    und das mit dem Abschnitt dreht. Ohne eigene Gestaltung: Spitze am Ende, wie bisher.
+    """
     symbol = QgsLineSymbol.createSimple(
         {
             "line_color": _rgba(color),
-            "line_width": "1.2",
+            "line_width": str(DEFAULT_LINE_WIDTH),
             "line_width_unit": "MM",
-            "capstyle": "flat",
+            "capstyle": "round",
             "joinstyle": "round",
-            # Die Spitze des Pfeilkopfs sitzt genau auf dem letzten Punkt – die Linie endet schon
-            # im Kopf, sonst ragt ihr Ende als Punkt über die Spitze hinaus
-            "trim_distance_end": "2",
-            "trim_distance_end_unit": "MM",
         }
     )
-    # Pfeilspitze am Ende, dreht mit dem letzten Abschnitt
-    head = QgsMarkerSymbol.createSimple(
-        {
-            "name": "filled_arrowhead",
-            "color": _rgba(color),
-            "outline_style": "no",
-            "size": "5",
-        }
-    )
-    try:
-        end = QgsMarkerLineSymbolLayer()
-        end.setPlacements(Qgis.MarkerLinePlacement.LastVertex)
-        end.setSubSymbol(head)
-        symbol.appendSymbolLayer(end)
-    except Exception:
-        logger.debug("Pfeilspitze nicht verfügbar", exc_info=True)
+    line = symbol.symbolLayer(0)
+    line.setTrimDistanceStartUnit(Qgis.RenderUnit.Millimeters)
+    line.setTrimDistanceEndUnit(Qgis.RenderUnit.Millimeters)
+    for prop, expression in (
+        (QgsSymbolLayer.Property.StrokeColor, _OBJECT_COLOR_EXPR),
+        (QgsSymbolLayer.Property.StrokeWidth, _LINE_WIDTH_EXPR),
+        (QgsSymbolLayer.Property.TrimEnd, _arrow_trim_expr((ARROWS_END, ARROWS_BOTH))),
+        (QgsSymbolLayer.Property.TrimStart, _arrow_trim_expr((ARROWS_START, ARROWS_BOTH))),
+    ):
+        line.setDataDefinedProperty(prop, QgsProperty.fromExpression(expression))
+
+    for placement, angle, modes in (
+        (Qgis.MarkerLinePlacement.LastVertex, 0.0, (ARROWS_END, ARROWS_BOTH)),
+        # Die Spitze dreht mit dem Abschnitt – am Anfang zeigt sie zurück
+        (Qgis.MarkerLinePlacement.FirstVertex, 180.0, (ARROWS_START, ARROWS_BOTH)),
+    ):
+        head = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.ArrowHeadFilled, 4.8)
+        head.setColor(QColor(color))
+        head.setStrokeStyle(Qt.PenStyle.NoPen)
+        head.setAngle(angle)
+        head.setDataDefinedProperty(QgsSymbolLayer.Property.FillColor, QgsProperty.fromExpression(_OBJECT_COLOR_EXPR))
+        head.setDataDefinedProperty(QgsSymbolLayer.Property.Size, QgsProperty.fromExpression(_ARROW_SIZE_EXPR))
+        marker_line = QgsMarkerLineSymbolLayer(True)
+        marker_line.setPlacements(placement)
+        marker_line.setSubSymbol(QgsMarkerSymbol([head]))
+        listed = ", ".join(f"'{m}'" for m in modes)
+        marker_line.setDataDefinedProperty(_LAYER_ENABLED, QgsProperty.fromExpression(f"{_ARROWS_EXPR} IN ({listed})"))
+        symbol.appendSymbolLayer(marker_line)
     return symbol
+
+
+def _point_symbol(color: str) -> QgsMarkerSymbol:
+    """Punkt in der Typfarbe, mit Radius (Feld ``radius``, Meter) zusätzlich ein maßstabsgetreuer Kreis."""
+    symbol = QgsMarkerSymbol.createSimple(
+        {
+            "name": "circle",
+            "color": _rgba(color),
+            "outline_color": "255,255,255,255",
+            "outline_width": "0.4",
+            "size": "3",
+        }
+    )
+    symbol.symbolLayer(0).setDataDefinedProperty(
+        QgsSymbolLayer.Property.FillColor, QgsProperty.fromExpression(_OBJECT_COLOR_EXPR)
+    )
+    generator = QgsGeometryGeneratorSymbolLayer.create(
+        {"geometryModifier": _metric_buffer_expr('coalesce("radius", 0)', 36), "SymbolType": "Fill"}
+    )
+    if generator is not None:
+        generator.setSymbolType(Qgis.SymbolType.Fill)
+        # Muster, Füllung und Rand wie bei einem Gebiet
+        circle = _zone_symbol(
+            color, expressions=_CIRCLE_EXPRESSIONS, opacity=CIRCLE_OPACITY, stroke_width=CIRCLE_STROKE_WIDTH
+        )
+        generator.setSubSymbol(circle)
+        generator.setDataDefinedProperty(_LAYER_ENABLED, QgsProperty.fromExpression('coalesce("radius", 0) > 0'))
+        symbol.insertSymbolLayer(0, generator)
+    return symbol
+
+
+def _text_anchor_symbol() -> QgsMarkerSymbol:
+    """Texte bestehen nur aus ihrer Beschriftung – der Punkt darunter bleibt unsichtbar."""
+    return QgsMarkerSymbol.createSimple(
+        {"name": "circle", "color": "0,0,0,0", "outline_style": "no", "size": "1"}
+    )
 
 
 def _metric_buffer_expr(distance_expr: str, segments: int) -> str:
@@ -995,7 +1209,11 @@ def _set_labels(
     line: bool = False,
     y_offset_mm: float = 0.0,
     min_scale: float = 2500,
+    over_point: bool = False,
+    dist_mm: float = 3.0,
+    color_expr: str | None = None,
 ) -> None:
+    """Beschriftung nach ``expression``; ``min_scale=0``: in jedem Maßstab und auch bei Überlappung zeigen."""
     settings = QgsPalLayerSettings()
     settings.fieldName = expression
     settings.isExpression = True
@@ -1013,32 +1231,43 @@ def _set_labels(
     settings.setFormat(fmt)
 
     try:
-        if polygon:
+        if polygon or over_point:
             settings.placement = Qgis.LabelPlacement.OverPoint
             settings.yOffset = y_offset_mm
         elif line:
             settings.placement = Qgis.LabelPlacement.Line
         else:
             settings.placement = Qgis.LabelPlacement.OrderedPositionsAroundPoint
-            # Abstand zum taktischen Zeichen (Ø 8–9 mm)
-            settings.dist = 3.0
+            # Abstand zum taktischen Zeichen (Ø 8–9 mm) bzw. zum Punkt
+            settings.dist = dist_mm
+        # Mehrzeilige Texte und Beschreibungen mittig
+        settings.multilineAlign = Qgis.LabelMultiLineAlignment.Center
     except AttributeError:
         logger.debug("Label-Platzierung nicht gesetzt", exc_info=True)
-    # Beschriftungen nur bei nahem Zoom, sonst wird es unübersichtlich
-    settings.scaleVisibility = True
-    settings.maximumScale = 1
-    settings.minimumScale = min_scale
+    if min_scale:
+        # Beschriftungen nur bei nahem Zoom, sonst wird es unübersichtlich
+        settings.scaleVisibility = True
+        settings.maximumScale = 1
+        settings.minimumScale = min_scale
+    else:
+        # Texte und Beschreibungen sind der Inhalt selbst: nie wegen Überlappung weglassen
+        settings.displayAll = True
 
-    _set_label_switch(settings)
+    _set_label_switch(settings, color_expr)
     lyr.setLabeling(QgsVectorLayerSimpleLabeling(settings))
     lyr.setLabelsEnabled(True)
 
 
-def _set_label_switch(settings: QgsPalLayerSettings) -> None:
-    """Beschriftung nur zeigen, solange ``beschriftung`` des Objekts nicht aus ist; Größe aus ``schriftgroesse``."""
+def _set_label_switch(settings: QgsPalLayerSettings, color_expr: str | None = None) -> None:
+    """Beschriftung nur zeigen, solange ``beschriftung`` des Objekts nicht aus ist; Größe aus ``schriftgroesse``.
+
+    ``color_expr``: Schriftfarbe je Objekt (Texte), sonst bleibt sie schwarz.
+    """
     properties = settings.dataDefinedProperties()
     properties.setProperty(_SHOW_PROPERTY, QgsProperty.fromExpression(_LABEL_SHOW_EXPR))
     properties.setProperty(_SIZE_PROPERTY, QgsProperty.fromExpression(_LABEL_SIZE_EXPR))
+    if color_expr:
+        properties.setProperty(_COLOR_PROPERTY, QgsProperty.fromExpression(color_expr))
     settings.setDataDefinedProperties(properties)
 
 

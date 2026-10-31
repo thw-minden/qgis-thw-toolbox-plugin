@@ -33,7 +33,7 @@ from ..planning.zone_style import (
 )
 from .theme import muted_color, muted_style
 
-_COLORS = (
+COLORS = (
     ("Rot", "#c62828"),
     ("Orange", "#ef6c00"),
     ("Gelb", "#fbc02d"),
@@ -43,6 +43,8 @@ _COLORS = (
     ("Grau", "#616161"),
     ("Schwarz", "#000000"),
 )
+# Weitere Farben mit Namen: das Schwarz der Typen im Katalog (#212121) heißt wie das der Palette
+_COLOR_ALIASES = (("Schwarz", "#212121"),)
 _ICON_PX = 20
 # Vorschau des Musters: Qt-Pinsel, die der Darstellung auf der Karte entsprechen
 _BRUSHES = {
@@ -78,7 +80,7 @@ def zone_style_icon(style: ZoneStyle, px: int = _ICON_PX) -> QIcon:
     return QIcon(pixmap)
 
 
-def _swatch_icon(color: str, px: int = _ICON_PX) -> QIcon:
+def swatch_icon(color: str, px: int = _ICON_PX) -> QIcon:
     if not color:
         # „Ohne Rand“: durchgestrichener, gestrichelter Rahmen
         return zone_style_icon(ZoneStyle("#ffffff", pattern=PATTERN_NONE), px)
@@ -103,10 +105,15 @@ def _line_icon(stroke_style: str, px: int = _ICON_PX) -> QIcon:
     return QIcon(pixmap)
 
 
+def color_name(color: str) -> str:
+    """Name einer Farbe der Palette (oder eines ihrer Aliase); sonst der Hex-Wert."""
+    wanted = QColor(color)
+    return next((label for label, hex_color in COLORS + _COLOR_ALIASES if QColor(hex_color) == wanted), color)
+
+
 def describe(style: ZoneStyle) -> str:
     """Kurzer Text für die Schaltfläche, z. B. „Schraffur ╱, Rot“."""
-    color = QColor(style.fill)
-    name = next((label for label, hex_color in _COLORS if QColor(hex_color) == color), style.fill)
+    name = color_name(style.fill)
     if style.pattern == PATTERN_NONE:
         return "Nur Rand" if style.stroke else "Unsichtbar"
     return f"{PATTERNS[style.pattern]}, {name}"
@@ -129,12 +136,12 @@ class _ZoneStyleEditor(QWidget):
     reset_requested = pyqtSignal()
     custom_color_requested = pyqtSignal(str)  # "fill" oder "stroke"
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, title: str = "Gestaltung des Gebiets", reset_tooltip: str = ""):
         super().__init__(parent)
         self._style = ZoneStyle("#1565c0")
         grid = QGridLayout(self)
         grid.setContentsMargins(10, 8, 10, 8)
-        grid.addWidget(QLabel("<b>Gestaltung des Gebiets</b>"), 0, 0, 1, 2)
+        grid.addWidget(QLabel(f"<b>{title}</b>"), 0, 0, 1, 2)
 
         self._patterns = self._button_row(
             grid,
@@ -144,7 +151,7 @@ class _ZoneStyleEditor(QWidget):
             "pattern",
         )
         self._fills = self._button_row(
-            grid, 2, "Farbe", [(h, n, _swatch_icon(h)) for n, h in _COLORS], "fill", custom="fill"
+            grid, 2, "Farbe", [(h, n, swatch_icon(h)) for n, h in COLORS], "fill", custom="fill"
         )
 
         opacity_row = QHBoxLayout()
@@ -167,7 +174,7 @@ class _ZoneStyleEditor(QWidget):
             grid,
             4,
             "Rand",
-            [("", "Ohne Rand", _swatch_icon(""))] + [(h, n, _swatch_icon(h)) for n, h in _COLORS],
+            [("", "Ohne Rand", swatch_icon(""))] + [(h, n, swatch_icon(h)) for n, h in COLORS],
             "stroke",
             custom="stroke",
         )
@@ -194,7 +201,7 @@ class _ZoneStyleEditor(QWidget):
         grid.addLayout(line_row, 5, 1)
 
         reset = QPushButton("Wie Typ")
-        reset.setToolTip("Eigene Gestaltung entfernen: wieder Farbe und Darstellung des Gebietstyps")
+        reset.setToolTip(reset_tooltip or "Eigene Gestaltung entfernen: wieder Farbe und Darstellung des Gebietstyps")
         reset.clicked.connect(self.reset_requested)
         grid.addWidget(reset, 6, 1, Qt.AlignmentFlag.AlignLeft)
 
@@ -264,7 +271,7 @@ class ZoneStyleButton(QToolButton):
     changed = pyqtSignal(dict)
     reset = pyqtSignal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, title: str = "Gestaltung des Gebiets", reset_tooltip: str = ""):
         super().__init__(parent)
         self._style = ZoneStyle("#1565c0")
         self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -273,7 +280,7 @@ class ZoneStyleButton(QToolButton):
         self.setToolTip("Gestaltung: Muster bzw. Schraffur, Farbe, Deckkraft und Rand")
 
         self._menu = QMenu(self)
-        self._editor = _ZoneStyleEditor(self._menu)
+        self._editor = _ZoneStyleEditor(self._menu, title, reset_tooltip)
         self._editor.changed.connect(self._apply)
         self._editor.reset_requested.connect(self._on_reset)
         self._editor.custom_color_requested.connect(self._on_custom_color)

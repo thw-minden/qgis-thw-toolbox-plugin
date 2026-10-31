@@ -1,10 +1,11 @@
-"""Dock der Objektplanung: Zelte, Fahrzeuge, Strom, Beleuchtung, Gebiete und Pfeile, Auswahl, Bilanz."""
+"""Dock der Objektplanung: Zelte, Fahrzeuge, Strom, Beleuchtung, Gebiete, Pfeile, Punkte und Texte, Auswahl, Bilanz."""
 
 from dataclasses import dataclass
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QBrush, QColor, QDrag
 from qgis.PyQt.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDockWidget,
     QDoubleSpinBox,
@@ -27,7 +28,9 @@ from .layers import (
     ROLE_ARROWS,
     ROLE_GENERATORS,
     ROLE_LIGHTS,
+    ROLE_POINTS,
     ROLE_TENTS,
+    ROLE_TEXTS,
     ROLE_VEHICLES,
     ROLE_ZONES,
 )
@@ -48,13 +51,18 @@ _HINTS = {
     "light": "Klick setzt Leuchte (Kreis = ausgeleuchteter Bereich) · Esc zurück zur Auswahl",
     "zone": "Eckpunkte des Gebiets anklicken · Rechtsklick / Enter / Doppelklick schließt ab · "
     "Rücktaste entfernt Punkt · Esc verwirft",
-    "arrow": "Start anklicken, dann den Verlauf · Rechtsklick / Enter / Doppelklick setzt die Spitze · "
-    "Rücktaste entfernt Punkt · Esc verwirft",
+    "arrow": "Start anklicken, dann den Verlauf · Rechtsklick / Enter / Doppelklick beendet die Linie · "
+    "Rücktaste entfernt Punkt · Esc verwirft · Pfeilspitzen am Anfang / Ende im ▾ bzw. hier umschalten; "
+    "Spitzen, Breite und Farbe je Linie in den Details unter „Gestaltung“",
+    "point": "Klick setzt den Punkt, danach Beschreibung und Radius in den Details · Shift+Klick: mehrere · "
+    "Esc zurück zur Auswahl",
+    "text": "Klick setzt den Text, danach den Text in den Details schreiben (Enter: neue Zeile, "
+    "Strg+Enter übernimmt) · Shift+Klick: mehrere · Esc zurück zur Auswahl",
     "select": "Klick wählt aus – auch taktische Zeichen · Shift+Klick ergänzt · Rahmen aufziehen wählt mehrere "
     "(Karte verschieben: mittlere Maustaste oder Leertaste) · Ziehen verschiebt "
     "(Alt+Ziehen kopiert) · an den Ecken ziehen dreht (Shift: 15°) · Pfeiltasten schieben 0,5 m (Shift: 5 m) · "
-    "Entf löscht · D dupliziert · Doppelklick / Enter: Bezeichnung · ein Gebiet auswählen bzw. Doppelklick "
-    "auf einen Pfeil: Punkte bearbeiten · Rechtsklick: Menü",
+    "Entf löscht · D dupliziert · Doppelklick / Enter: Bezeichnung · ein Gebiet bzw. eine Linie auswählen: "
+    "Punkte bearbeiten · Rechtsklick: Menü",
     "edit": "Eckpunkte (□) ziehen verschiebt · kleine Punkte (○) auf den Kanten ziehen fügt einen Eckpunkt ein · "
     "Rechtsklick / Entf löscht einen Eckpunkt (ohne angefassten Punkt: das Ganze) · im Gebiet ziehen verschiebt "
     "es · Klick daneben wählt dort aus · Enter / Esc beendet",
@@ -259,11 +267,30 @@ class PlanningDock(QDockWidget):
         return box
 
     def _build_shapes(self) -> QGroupBox:
-        box = QGroupBox("Gebiete und Pfeile")
+        box = QGroupBox("Texte, Punkte, Linien und Gebiete")
         layout = QVBoxLayout(box)
+        layout.addLayout(self._point_row(ROLE_TEXTS, "text", "Text setzen", drag=False))
+        layout.addLayout(self._point_row(ROLE_POINTS, "point", "Punkt setzen", drag=False))
+        layout.addLayout(self._point_row(ROLE_ARROWS, "arrow", "Linie zeichnen", drag=False))
+        arrows_row = QHBoxLayout()
+        arrows_row.addWidget(QLabel("Neue Linien mit Pfeilspitze:"))
+        self._arrow_start = QCheckBox("am Anfang")
+        self._arrow_start.setChecked(self.controller.arrow_start)
+        self._arrow_start.toggled.connect(self.controller.set_arrow_start)
+        arrows_row.addWidget(self._arrow_start)
+        self._arrow_heads = QCheckBox("am Ende")
+        self._arrow_heads.setChecked(self.controller.arrow_heads)
+        self._arrow_heads.toggled.connect(self.controller.set_arrow_heads)
+        arrows_row.addWidget(self._arrow_heads)
+        arrows_row.addStretch()
+        layout.addLayout(arrows_row)
         layout.addLayout(self._point_row(ROLE_ZONES, "zone", "Gebiet zeichnen", drag=False))
-        layout.addLayout(self._point_row(ROLE_ARROWS, "arrow", "Pfeil zeichnen", drag=False))
-        layout.addWidget(_muted("Der Typ bestimmt die Farbe; der Name kommt aus der Bezeichnung in den Details."))
+        layout.addWidget(
+            _muted(
+                "Der Typ bestimmt die Farbe; unter „Gestaltung“ in den Details lässt sie sich je Objekt anpassen. "
+                "Der Name bzw. Text kommt aus der Bezeichnung in den Details."
+            )
+        )
         return box
 
     def _point_row(self, role: str, kind: str, text: str, drag: bool = True) -> QHBoxLayout:
@@ -343,6 +370,12 @@ class PlanningDock(QDockWidget):
                 w.rotation.blockSignals(False)
             if w.combo.itemData(w.combo.currentIndex()) != self.controller.selected_ids.get(role):
                 self._load_footprint(role)
+        c = self.controller
+        for box, value in ((self._arrow_heads, c.arrow_heads), (self._arrow_start, c.arrow_start)):
+            if box.isChecked() != value:
+                box.blockSignals(True)
+                box.setChecked(value)
+                box.blockSignals(False)
         for role, combo in self._point_combos.items():
             index = combo.findData(self.controller.point_ids.get(role))
             if index >= 0 and index != combo.currentIndex():

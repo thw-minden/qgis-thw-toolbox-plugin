@@ -30,10 +30,13 @@ from .layers import (
     ROLE_DISTRIBUTORS,
     ROLE_GENERATORS,
     ROLE_LIGHTS,
+    ROLE_POINTS,
     ROLE_TENTS,
+    ROLE_TEXTS,
     ROLE_VEHICLES,
     ROLE_ZONES,
 )
+from .object_style import arrow_mode
 
 _ICON_PX = 22
 _BUTTON_PX = 36
@@ -41,6 +44,9 @@ _MARKER_ICON_PX = 28
 _MARGIN_BOTTOM_PX = 16
 # Mindestabstand der Hotbar zum linken/rechten Kartenrand
 _MARGIN_SIDE_PX = 16
+# Werkzeuge, deren Icon den gewählten Typ zeigt (bei Linien auch die Pfeilspitzen):
+# Unterordner in icons/planning, erzeugt von scripts/build_planning_icons.py
+_VARIANT_DIRS = {"text": "text", "point": "point", "arrow": "line", "zone": "zone"}
 _GRID_PRESETS = ((1, 2), (2, 2), (2, 3), (3, 3), (2, 5), (4, 4))
 
 _STYLE = """
@@ -84,6 +90,8 @@ class _ToolEntry:
     shortcut: str
     button: QToolButton
     menu: QMenu | None
+    # Allgemeines Icon; Text, Punkt, Linie und Gebiet zeigen stattdessen das des gewählten Typs
+    icon: str = ""
 
 
 def _event_pos(event) -> QPoint:
@@ -182,6 +190,7 @@ class PlanningHotbar(QFrame):
         self._tools: list[_ToolEntry] = []
         self._marker_buttons: list[_MarkerButton] = []
         self._prefs = symbol_prefs(plugin_dir)
+        self._variant_icons: dict[str, QIcon] = {}
 
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(24)
@@ -215,8 +224,14 @@ class PlanningHotbar(QFrame):
         )
         self._add_tool("light", "light.svg", "Beleuchtung setzen", "", [(li.id, li.name) for li in catalog.beleuchtung])
         self._separator()
+        self._add_tool("text", "text.svg", "Text setzen", "", [(t.id, t.name) for t in catalog.texte])
+        self._add_tool("point", "point.svg", "Punkt setzen", "", [(p.id, p.name) for p in catalog.punkte])
+        self._add_tool("arrow", "arrow.svg", "Linie / Pfeil zeichnen", "", [(a.id, a.name) for a in catalog.pfeile])
+        self._arrow_start = self._add_menu_toggle("arrow", "Mit Pfeilspitze am Anfang", controller.set_arrow_start)
+        self._arrow_heads = self._add_menu_toggle(
+            "arrow", "Mit Pfeilspitze am Ende", controller.set_arrow_heads, separator=False
+        )
         self._add_tool("zone", "zone.svg", "Gebiet zeichnen", "", [(z.id, z.name) for z in catalog.gebiete])
-        self._add_tool("arrow", "arrow.svg", "Pfeil zeichnen", "", [(a.id, a.name) for a in catalog.pfeile])
         self._separator()
         self._guides = self._button("guides.svg", "Hilfslinien: an Nachbarn ausrichten (Strg beim Ziehen hält an)")
         self._guides.setCheckable(True)
@@ -225,9 +240,6 @@ class PlanningHotbar(QFrame):
 
         # Kontext-Aktionen für die Auswahl
         self._selection_sep = self._separator()
-        self._vertices = self._button("vertices.svg", "Punkte bearbeiten: Pfeil umformen und ergänzen (Doppelklick)")
-        self._vertices.setCheckable(True)
-        self._vertices.clicked.connect(self._on_vertices)
         self._duplicate = self._button("duplicate.svg", "Duplizieren (D, Alt+Ziehen)", controller.duplicate_selection)
         self._rotate = self._button(
             "rotate.svg", "Um 15° drehen (R, Shift+R zurück)", lambda: controller.rotate_selection(15)
@@ -294,7 +306,21 @@ class PlanningHotbar(QFrame):
             # Kein Standard-Menüpfeil, das ▾ ist der Pfeil
             chevron.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0px; }")
             self._layout.addWidget(chevron)
-        self._tools.append(_ToolEntry(kind, title, shortcut, button, menu))
+        self._tools.append(_ToolEntry(kind, title, shortcut, button, menu, icon))
+
+    def _add_menu_toggle(self, kind: str, text: str, slot, separator: bool = True):
+        """Schalter unten im ▾-Menü eines Werkzeugs (z. B. Pfeilspitze für neue Linien)."""
+        entry = next(e for e in self._tools if e.kind == kind)
+        if entry.menu is None:
+            return None
+        if separator:
+            entry.menu.addSeparator()
+        action = entry.menu.addAction(text)
+        action.setCheckable(True)
+        # Kein Typ: sync_tool_buttons markiert sonst danach
+        action.setData(None)
+        action.toggled.connect(slot)
+        return action
 
     def _add_grid(self):
         button = QToolButton(self)
@@ -459,12 +485,18 @@ class PlanningHotbar(QFrame):
             self.controller.activate_tool("marker", path)
         self.sync_tool_buttons()
 
-    def _on_vertices(self, checked: bool):
-        if checked:
-            self.controller.edit_vertices()
-        else:
-            self.controller.back_to_select()
-        self.sync_tool_buttons()
+    def _variant_icon(self, kind: str, type_id: str | None) -> QIcon | None:
+        """Icon des Typs ``type_id`` (Linien: mit den Pfeilspitzen für neue Linien); None, wenn es keins gibt."""
+        if not type_id:
+            return None
+        name = type_id
+        if kind == "arrow":
+            name += "_" + arrow_mode(self.controller.arrow_start, self.controller.arrow_heads)
+        path = os.path.join(self._icon_dir, _VARIANT_DIRS[kind], name + ".svg")
+        icon = self._variant_icons.get(path)
+        if icon is None and os.path.exists(path):
+            icon = self._variant_icons[path] = QIcon(path)
+        return icon
 
     def _current_type(self, kind: str) -> str | None:
         c = self.controller
@@ -477,6 +509,8 @@ class PlanningHotbar(QFrame):
             "light": c.point_ids.get(ROLE_LIGHTS),
             "zone": c.point_ids.get(ROLE_ZONES),
             "arrow": c.point_ids.get(ROLE_ARROWS),
+            "point": c.point_ids.get(ROLE_POINTS),
+            "text": c.point_ids.get(ROLE_TEXTS),
         }.get(kind)
 
     def sync_tool_buttons(self):
@@ -486,12 +520,18 @@ class PlanningHotbar(QFrame):
             entry.button.setChecked(entry.kind == active)
             entry.button.blockSignals(False)
             name = None
+            current = self._current_type(entry.kind)
+            if entry.kind in _VARIANT_DIRS:
+                entry.button.setIcon(self._variant_icon(entry.kind, current) or self._icon(entry.icon))
             if entry.menu is not None:
-                current = self._current_type(entry.kind)
                 for item in entry.menu.actions():
+                    if item.isSeparator() or item.data() is None:
+                        continue
                     item.setChecked(item.data() == current)
                     if item.data() == current:
                         name = item.text()
+                    if entry.kind in _VARIANT_DIRS:
+                        item.setIcon(self._variant_icon(entry.kind, item.data()) or QIcon())
             tip = f"{entry.title}: {name}" if name else entry.title
             entry.button.setToolTip(f"{tip} ({entry.shortcut})" if entry.shortcut else tip)
         # Zeichen in der Hand: sein Button – oder „Alle Zeichen …“, wenn es dort gewählt wurde
@@ -506,9 +546,6 @@ class PlanningHotbar(QFrame):
         self._all_symbols.setChecked(holding is not None and not in_bar)
         self._all_symbols.blockSignals(False)
         rows, cols = self.controller.grid_rows, self.controller.grid_cols
-        self._vertices.blockSignals(True)
-        self._vertices.setChecked(active == "edit")
-        self._vertices.blockSignals(False)
         # Das Raster gehört zu Zelt und Fahrzeug – nur dort zeigen; blau, solange es scharf ist
         multiple = rows * cols > 1
         self._grid_button.setVisible(active in ("tent", "vehicle"))
@@ -522,6 +559,12 @@ class PlanningHotbar(QFrame):
                 spin.blockSignals(True)
                 spin.setValue(value)
                 spin.blockSignals(False)
+        c = self.controller
+        for toggle, value in ((self._arrow_heads, c.arrow_heads), (self._arrow_start, c.arrow_start)):
+            if toggle is not None and toggle.isChecked() != value:
+                toggle.blockSignals(True)
+                toggle.setChecked(value)
+                toggle.blockSignals(False)
         if self._guides.isChecked() != self.controller.align_enabled:
             self._guides.blockSignals(True)
             self._guides.setChecked(self.controller.align_enabled)
@@ -533,8 +576,6 @@ class PlanningHotbar(QFrame):
         has_selection = any(self.controller.selection_ids().values())
         for widget in self._selection_widgets:
             widget.setVisible(has_selection)
-        # Ein Gebiet ist ausgewählt immer in der Punktbearbeitung – der Schalter gilt nur noch für Pfeile
-        shape = self.controller.editable_shape()
-        self._vertices.setVisible(shape is not None and shape[0] == ROLE_ARROWS)
+        # Ein einzelnes Gebiet bzw. eine Linie ist ausgewählt immer in der Punktbearbeitung – ohne eigenen Schalter
         if self.isVisible():
             self._reposition()

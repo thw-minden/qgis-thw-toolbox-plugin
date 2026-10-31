@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Hinzugefügt
+- **Texte und Punkte** in der Hotbar (Reihenfolge: Text, Punkt, Linie, Gebiet); Punkte optional mit Radius-Kreis
+- **Gestaltung je Linie, Punkt und Text** in den Details: Farbe, Deckkraft, Linienbreite; Radius-Kreis wie ein Gebiet
+- **Linien** mit Pfeilspitze am Anfang und/oder Ende, Punkte bearbeiten wie bei Gebieten
+- **Hotbar-Icons** zeigen den gewählten Typ (erzeugt mit `scripts/build_planning_icons.py`)
+
+### Geändert
+- Gebietstypen: rot, gelb, blau – gefüllt oder ohne Füllung; Pfeiltypen heißen jetzt „Linie …“
+- Gebiete ohne Bezeichnung tragen keine Beschriftung mehr
+- Schriftgröße in den Details kompakter
+
 ## [2.2.2]
 
 ### Behoben

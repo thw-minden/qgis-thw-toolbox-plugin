@@ -55,9 +55,10 @@ class ZoneStyle:
     stroke_style: str = "solid"
 
     @classmethod
-    def default(cls, color: str) -> "ZoneStyle":
-        """Darstellung nach Typ: Füllung und Rand in der Typfarbe."""
-        return cls(fill=QColor(color).name(), stroke=QColor(color).name())
+    def default(cls, color: str, filled: bool = True) -> "ZoneStyle":
+        """Darstellung nach Typ: Füllung (bei Typen ohne Füllung keine) und Rand in der Typfarbe."""
+        pattern = PATTERN_SOLID if filled else PATTERN_NONE
+        return cls(fill=QColor(color).name(), pattern=pattern, stroke=QColor(color).name())
 
     @property
     def hatched(self) -> bool:
@@ -86,6 +87,11 @@ def parse_zone_style(text) -> ZoneStyle | None:
         data = json.loads(text)
     except ValueError:
         return None
+    return zone_style_from_dict(data)
+
+
+def zone_style_from_dict(data) -> ZoneStyle | None:
+    """``ZoneStyle`` aus einer bereits gelesenen Map (auch verschachtelt, z. B. der Radius-Kreis eines Punkts)."""
     if not isinstance(data, dict):
         return None
     fill = QColor(str(data.get("fill", "")))
@@ -109,10 +115,10 @@ def parse_zone_style(text) -> ZoneStyle | None:
     )
 
 
-def zone_style_of(feature, type_color: str) -> ZoneStyle:
+def zone_style_of(feature, type_color: str, filled: bool = True) -> ZoneStyle:
     """Gestaltung eines Gebiets; ohne eigene Angabe die Darstellung nach Typ."""
     if feature.fields().indexFromName(STYLE_FIELD) >= 0:
         parsed = parse_zone_style(feature.attribute(STYLE_FIELD))
         if parsed is not None:
             return parsed
-    return ZoneStyle.default(type_color)
+    return ZoneStyle.default(type_color, filled)
