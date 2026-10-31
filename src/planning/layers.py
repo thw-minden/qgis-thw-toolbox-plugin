@@ -111,6 +111,25 @@ LABEL_DX_FIELD = "beschriftung_dx"
 LABEL_DY_FIELD = "beschriftung_dy"
 LABEL_ANGLE_FIELD = "beschriftung_winkel"
 LABEL_EDIT_ROLES = (ROLE_TEXTS, ROLE_POINTS, ROLE_ARROWS, ROLE_ZONES)
+# Einteilung der Darstellung von Punkten, Linien und Gebieten: nach Typ – außer bei Objekten, deren Name nicht auf
+# der Karte steht. Die bekommen eine eigene Kategorie mit ihrem Namen, damit die Legende ihn zeigt
+OBJECT_KEY_PREFIX = "obj:"
+_LEGEND_FIELDS = {LABEL_FIELD, "bezeichnung", "typ_id"}
+LEGEND_KEY_EXPR = (
+    f'if(coalesce("{LABEL_FIELD}", true) OR coalesce("bezeichnung", \'\') = \'\', '
+    f'"typ_id", \'{OBJECT_KEY_PREFIX}\' || to_string($id))'
+)
+
+
+def legend_key(role: str, feature) -> tuple[str, str]:
+    """(Kategorie, Bezeichnung) eines Objekts wie ``LEGEND_KEY_EXPR``; die Bezeichnung nur bei eigener Kategorie."""
+    name = (feature.attribute("bezeichnung") or "").strip()
+    if not name or label_visible(role, feature):
+        return str(feature.attribute("typ_id") or ""), ""
+    lines = [line.strip() for line in name.splitlines() if line.strip()]
+    return f"{OBJECT_KEY_PREFIX}{feature.id()}", " / ".join(lines)
+
+
 # Maße auf der Karte je Objekt (leer = aus): Radius eines Punkts, Segmentlängen einer Linie bzw. eines Gebiets
 MEASURE_FIELD = "masse"
 MEASURE_ROLES = (ROLE_POINTS, ROLE_ARROWS, ROLE_ZONES)
@@ -628,6 +647,8 @@ class PlanningLayers(QObject):
             if ok:
                 self.history.record_add(role, added)
             lyr.updateExtents()
+        # Kopien von Objekten mit verborgenem Namen brauchen ihre eigene Kategorie (Legende)
+        self._ensure_type_categories(lyr, role)
         self._hold_preview()
         lyr.triggerRepaint()
         self.notify_changed()
@@ -642,6 +663,7 @@ class PlanningLayers(QObject):
         else:
             self.history.record_delete(role, _features(lyr, [fid]))
             ok = lyr.dataProvider().deleteFeatures([fid])
+        self._ensure_type_categories(lyr, role)
         self._hold_preview()
         lyr.triggerRepaint()
         self.notify_changed()
@@ -657,6 +679,8 @@ class PlanningLayers(QObject):
         else:
             self.history.record_delete(role, _features(lyr, fids))
             ok = lyr.dataProvider().deleteFeatures(fids)
+        # Eigene Kategorien gelöschter Objekte verschwinden aus Darstellung und Legende
+        self._ensure_type_categories(lyr, role)
         self._hold_preview()
         lyr.triggerRepaint()
         self.notify_changed()
@@ -683,6 +707,9 @@ class PlanningLayers(QObject):
             if attr_map:
                 ok = provider.changeAttributeValues(attr_map) and ok
             lyr.updateExtents()
+        # Name bzw. Beschriftung geändert: entscheidet, ob das Objekt eine eigene Kategorie (Legende) hat
+        if any(_LEGEND_FIELDS & set(values) for values in (attributes or {}).values()):
+            self._ensure_type_categories(lyr, role)
         self._hold_preview()
         lyr.triggerRepaint()
         self.notify_changed()
@@ -783,15 +810,15 @@ class PlanningLayers(QObject):
             lyr.setRenderer(QgsSingleSymbolRenderer(_distributor_symbol()))
             _set_labels(lyr, 'coalesce(nullif("bezeichnung", \'\'), "typ")')
         elif role == ROLE_ZONES:
-            self._set_renderer(lyr, role, _used_type_ids(lyr), _dimensions_used(lyr))
+            self._set_renderer(lyr, role, self._legend_entries(lyr, role), _dimensions_used(lyr))
             # Gebiete sind groß – ihre Namen sollen auch in der Übersicht lesbar sein.
             # Nur eine eigene Bezeichnung: der Typ („Gebiet rot (gefüllt)“) steckt schon in der Darstellung
             _set_labels(lyr, _ZONE_LABEL_EXPR, polygon=True, min_scale=50000)
         elif role == ROLE_ARROWS:
-            self._set_renderer(lyr, role, _used_type_ids(lyr), _dimensions_used(lyr))
+            self._set_renderer(lyr, role, self._legend_entries(lyr, role), _dimensions_used(lyr))
             _set_labels(lyr, "nullif(\"bezeichnung\", '')", line=True, min_scale=50000)
         elif role == ROLE_POINTS:
-            self._set_renderer(lyr, role, _used_type_ids(lyr), _dimensions_used(lyr))
+            self._set_renderer(lyr, role, self._legend_entries(lyr, role), _dimensions_used(lyr))
             # Die Beschreibung gehört zum Punkt: immer zeigen, auch weit herausgezoomt
             _set_labels(lyr, note_label_expr(), dist_mm=1.5, min_scale=0)
         elif role == ROLE_TEXTS:
@@ -805,17 +832,6 @@ class PlanningLayers(QObject):
                 color_expr=f"coalesce({_OBJECT_COLOR_EXPR}, {type_color})",
             )
         lyr.triggerRepaint()
-
-    def _zone_renderer(self, types, dimensions: bool) -> QgsCategorizedSymbolRenderer:
-        def symbol(color: str, filled: bool = True):
-            zone = _zone_symbol(color, filled)
-            return _with_segment_dimensions(zone) if dimensions else zone
-
-        renderer = QgsCategorizedSymbolRenderer(
-            "typ_id", [QgsRendererCategory(t.id, symbol(t.farbe, t.gefuellt), t.name) for t in types]
-        )
-        renderer.setSourceSymbol(symbol("#1565c0"))
-        return renderer
 
     def _ensure_style(self, lyr: QgsVectorLayer, role: str) -> None:
         """Gebiete, Linien und Punkte früherer Versionen nachrüsten: Feld ``gestaltung``, aktuelle Darstellung."""
@@ -836,34 +852,50 @@ class PlanningLayers(QObject):
             self._ensure_type_categories(lyr, role)
             return
         # Darstellung einer früheren Version – neu aufbauen, die Beschriftung bleibt
-        self._set_renderer(lyr, role, _used_type_ids(lyr), _dimensions_used(lyr))
+        self._set_renderer(lyr, role, self._legend_entries(lyr, role), _dimensions_used(lyr))
         lyr.setCustomProperty(_STYLE_VERSION_PROPERTY, _STYLE_VERSION)
         lyr.triggerRepaint()
 
     def _ensure_type_categories(
         self, lyr: QgsVectorLayer, role: str, extra_ids=(), extra_dimensions: bool = False
     ) -> None:
-        """Kategorien für alle verwendeten Typen (und ``extra_ids``) – sonst blieben deren Objekte unsichtbar.
+        """Kategorien so, wie die Objekte sie brauchen – sonst blieben Objekte unsichtbar bzw. die Legende veraltet.
 
         Die Darstellung enthält bewusst nur, was gebraucht wird: QGIS bereitet bei jedem Neuzeichnen alle
-        Ausdrücke aller Kategorien vor, auch ungenutzter, und jede Schrift der Maße. Mit allen Typen
-        des Katalogs und stets vorhandenen Maß-Ebenen kostete das je Layer spürbar Zeit. Deshalb nur
-        verwendete Typen (die Legende zeigt so auch nur, was auf der Karte ist) und Maß-Ebenen nur,
+        Ausdrücke aller Kategorien vor, auch ungenutzter, und jede Schrift der Maße. Deshalb je verwendetem
+        Typ eine Kategorie (``extra_ids``: gleich hinzukommende), dazu eine je Objekt, dessen Name nicht auf
+        der Karte steht – sie trägt den Namen in die Legende (siehe ``LEGEND_KEY_EXPR``). Maß-Ebenen nur,
         solange ein Objekt seine Maße zeigt (bzw. ``extra_dimensions``).
         """
         if role not in _VERSIONED_ROLES:
             return
-        wanted = _used_type_ids(lyr) | set(extra_ids)
+        entries = self._legend_entries(lyr, role, extra_ids)
         dimensions = extra_dimensions or _dimensions_used(lyr)
         renderer = lyr.renderer()
-        categorized = isinstance(renderer, QgsCategorizedSymbolRenderer)
-        if categorized and wanted <= _category_values(renderer) and dimensions == _has_dimensions(lyr):
+        current = (
+            {(str(c.value()), c.label()) for c in renderer.categories()}
+            if isinstance(renderer, QgsCategorizedSymbolRenderer) and renderer.classAttribute() == LEGEND_KEY_EXPR
+            else None
+        )
+        if current == {(key, label) for key, _type, label in entries} and dimensions == _has_dimensions(lyr):
             return
-        # Bisherige Kategorien behalten (Typen, deren Objekte gerade gelöscht wurden, schaden nicht)
-        if categorized:
-            wanted |= _category_values(renderer)
-        self._set_renderer(lyr, role, wanted, dimensions)
+        self._set_renderer(lyr, role, entries, dimensions)
         lyr.triggerRepaint()
+
+    def _legend_entries(self, lyr: QgsVectorLayer, role: str, extra_ids=()) -> list[tuple[str, str, str]]:
+        """(Kategorie, Typ, Bezeichnung): je verwendetem Typ eine, dazu je Objekt mit verborgenem Namen."""
+        names = {t.id: t.name for t in self._types(role)}
+        type_ids = {str(i) for i in extra_ids}
+        objects = []
+        for feature in lyr.getFeatures():
+            type_id = str(feature.attribute("typ_id") or "")
+            key, label = legend_key(role, feature)
+            if key.startswith(OBJECT_KEY_PREFIX):
+                objects.append((key, type_id, label))
+            else:
+                type_ids.add(type_id)
+        typed = [(t, t, names[t]) for t in sorted(type_ids) if t in names]
+        return typed + [(key, t, label) for key, t, label in objects if t in names]
 
     def refresh_dimensions(self, role: str) -> None:
         """Nach dem Ein- bzw. Ausschalten der Maße: Maß-Ebenen nur, solange ein Objekt sie zeigt."""
@@ -871,8 +903,8 @@ class PlanningLayers(QObject):
         if lyr is not None:
             self._ensure_type_categories(lyr, role)
 
-    def _set_renderer(self, lyr: QgsVectorLayer, role: str, type_ids: set[str], dimensions: bool) -> None:
-        lyr.setRenderer(self._renderer(role, type_ids, dimensions))
+    def _set_renderer(self, lyr: QgsVectorLayer, role: str, entries, dimensions: bool) -> None:
+        lyr.setRenderer(self._renderer(role, entries, dimensions))
         lyr.setCustomProperty(_DIMENSIONS_PROPERTY, int(dimensions))
 
     def _types(self, role: str):
@@ -880,13 +912,22 @@ class PlanningLayers(QObject):
             return self.catalog.zone_types()
         return self.catalog.pfeile if role == ROLE_ARROWS else self.catalog.punkte
 
-    def _renderer(self, role: str, type_ids: set[str], dimensions: bool) -> QgsCategorizedSymbolRenderer:
-        """Darstellung je Typ für Gebiete, Linien und Punkte – nur für die Typen ``type_ids``."""
-        types = [t for t in self._types(role) if t.id in type_ids]
-        if role == ROLE_ZONES:
-            return self._zone_renderer(types, dimensions)
-        factory = _arrow_symbol if role == ROLE_ARROWS else _point_symbol
-        return _typed_renderer(types, lambda color: factory(color, dimensions), "#c62828")
+    def _renderer(self, role: str, entries, dimensions: bool) -> QgsCategorizedSymbolRenderer:
+        """Darstellung für Gebiete, Linien und Punkte: Symbol nach Typ, eingeteilt nach ``LEGEND_KEY_EXPR``."""
+        types = {t.id: t for t in self._types(role)}
+
+        def symbol(color: str, filled: bool = True):
+            if role == ROLE_ZONES:
+                zone = _zone_symbol(color, filled)
+                return _with_segment_dimensions(zone) if dimensions else zone
+            return (_arrow_symbol if role == ROLE_ARROWS else _point_symbol)(color, dimensions)
+
+        categories = [
+            QgsRendererCategory(key, symbol(types[t].farbe, types[t].gefuellt), label) for key, t, label in entries
+        ]
+        renderer = QgsCategorizedSymbolRenderer(LEGEND_KEY_EXPR, categories)
+        renderer.setSourceSymbol(symbol("#1565c0" if role == ROLE_ZONES else "#c62828"))
+        return renderer
 
     def _sign_symbol(self, role: str):
         """Symbol der Objekte mit taktischem Zeichen (Fahrzeuge, Stromerzeuger, Leuchten)."""
@@ -1197,15 +1238,6 @@ def _enable_for_patterns(layer: QgsSymbolLayer, patterns, pattern_expr: str) -> 
     layer.setDataDefinedProperty(_LAYER_ENABLED, QgsProperty.fromExpression(expression))
 
 
-def _typed_renderer(types, symbol_factory, default_color: str) -> QgsCategorizedSymbolRenderer:
-    """Je Typ (``typ_id``) ein Symbol in der Typfarbe; die Gestaltung des Objekts überschreibt sie."""
-    renderer = QgsCategorizedSymbolRenderer(
-        "typ_id", [QgsRendererCategory(t.id, symbol_factory(t.farbe), t.name) for t in types]
-    )
-    renderer.setSourceSymbol(symbol_factory(default_color))
-    return renderer
-
-
 def _replace_label_expression(lyr: QgsVectorLayer, old: str, new: str) -> None:
     """Beschriftung einer früheren Version auf den neuen Ausdruck umstellen; eigene Ausdrücke bleiben."""
     labeling = lyr.labeling()
@@ -1238,18 +1270,6 @@ def _has_dimensions(lyr: QgsVectorLayer) -> bool:
 
 def _features(lyr: QgsVectorLayer, fids) -> list[QgsFeature]:
     return list(lyr.getFeatures(QgsFeatureRequest().setFilterFids(list(fids))))
-
-
-def _category_values(renderer: QgsCategorizedSymbolRenderer) -> set[str]:
-    return {str(category.value()) for category in renderer.categories()}
-
-
-def _used_type_ids(lyr: QgsVectorLayer) -> set[str]:
-    """Typen (``typ_id``), die im Layer vorkommen."""
-    index = lyr.fields().indexFromName("typ_id")
-    if index < 0:
-        return set()
-    return {str(v) for v in lyr.uniqueValues(index) if v is not None and not (hasattr(v, "isNull") and v.isNull())}
 
 
 def _type_color_expr(types, default: str) -> str:

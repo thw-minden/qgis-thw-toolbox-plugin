@@ -26,6 +26,7 @@
 - MBTiles-Zoomstufen-Dialog breit genug für Titel und Hinweis
 - Gebietstypen: rot, gelb, blau – gefüllt oder ohne Füllung; Pfeiltypen heißen jetzt „Linie …“
 - Gebiete ohne Bezeichnung tragen keine Beschriftung mehr
+- **Legende der Objektplanung**: Punkte, Linien und Gebiete stehen mit ihrem Namen in der Zeichenerklärung, wenn er nicht auf der Karte steht (Beschriftung aus) – mit einem Symbol wie auf der Karte; Typnamen wie „Punkt rot“ entfallen
 - Schriftgröße in den Details kompakter
 
 ### Entfernt
