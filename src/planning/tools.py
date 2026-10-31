@@ -5,6 +5,7 @@ import math
 from qgis.core import (
     Qgis,
     QgsCoordinateTransform,
+    QgsCsException,
     QgsFeature,
     QgsFeatureRequest,
     QgsGeometry,
@@ -20,9 +21,11 @@ from qgis.PyQt.QtWidgets import QMenu, QToolTip
 from ..layer.feature_ops import default_origin
 from ..logging_utils import get_logger
 from ..tools.selection_frame import rotate_cursor
+from ..util.coordinates import WGS84, to_mgrs
 from .catalog import fmt_m
 from .geometry import MetricFrame, circle_polygon, split_line
 from .layers import (
+    DIMENSION_ADJUST_FIELD,
     FOOTPRINT_ROLES,
     NOTE_ROLES,
     ROLE_ARROWS,
@@ -37,6 +40,7 @@ from .layers import (
     ROLE_VEHICLES,
     ROLE_ZONES,
 )
+from .dimension_handles import DimensionHandles
 from .label_handles import LabelHandles
 from .selection_overlay import HANDLE_PX, SelectionOverlay
 
@@ -77,6 +81,24 @@ _PICK_ORDER = (
     ROLE_TENTS,
     ROLE_ZONES,
 )
+
+
+def _utmref_at(canvas, point: QgsPointXY) -> str:
+    """UTMREF eines Punkts im Canvas-CRS; außerhalb des UTM-Bereichs leer."""
+    transform = QgsCoordinateTransform(canvas.mapSettings().destinationCrs(), WGS84, QgsProject.instance())
+    try:
+        wgs = transform.transform(point)
+        return to_mgrs(wgs.y(), wgs.x())
+    except (QgsCsException, ValueError):
+        return ""
+
+
+def _meters(value: float) -> str:
+    return f"{fmt_m(round(value / 1000, 2))} km" if value >= 1000 else f"{fmt_m(round(value, 1))} m"
+
+
+def _square_meters(value: float) -> str:
+    return f"{fmt_m(round(value / 10000, 2))} ha" if value >= 10000 else f"{fmt_m(round(value))} m²"
 
 
 def _polygon_type():
@@ -658,13 +680,24 @@ class _DrawTool(_PlanningTool):
             return
         geom = self._geometry(event.mapPoint())
         self._band.setToGeometry(geom, None)
+        self._tooltip(event, self._measure_text(QgsPointXY(event.mapPoint())))
+
+    def _measure_text(self, cursor: QgsPointXY) -> str:
+        """Segment bis zum Mauszeiger, dazu Gesamtlänge (Linie) bzw. Umfang und Fläche – in echten Metern."""
         crs = self.canvas.mapSettings().destinationCrs()
-        if geom.type() == _polygon_type():
-            area = self.controller.area_m2(geom, crs)
-            self._tooltip(event, f"{area:,.0f} m²".replace(",", "."))
-        elif not self.polygon:
-            length = MetricFrame(crs, self._points[0]).geom_to_m(geom).length()
-            self._tooltip(event, f"{fmt_m(round(length, 1))} m")
+        frame = MetricFrame(crs, self._points[0])
+        pts = [frame.point_to_m(p) for p in self._points + [cursor]]
+        segments = [math.hypot(b.x() - a.x(), b.y() - a.y()) for a, b in zip(pts, pts[1:])]
+        lines = [f"Segment: {_meters(segments[-1])}"]
+        if not self.polygon:
+            if len(segments) > 1:
+                lines.append(f"Gesamt: {_meters(sum(segments))}")
+        elif len(pts) >= 3:
+            closing = math.hypot(pts[0].x() - pts[-1].x(), pts[0].y() - pts[-1].y())
+            lines.append(f"Umfang: {_meters(sum(segments) + closing)}")
+            area = QgsGeometry.fromPolygonXY([pts + [pts[0]]]).area()
+            lines.append(f"Fläche: {_square_meters(area)}")
+        return "\n".join(lines)
 
     def canvasReleaseEvent(self, event):
         if self._skip_release:
@@ -793,8 +826,11 @@ class VertexTool(_PlanningTool):
         self._active: int | None = None  # zuletzt angefasster Eckpunkt (Entf löscht ihn)
         self._drag: int | None = None
         self._moved = False
-        # Beschriftung verschieben, skalieren, drehen – auch während der Punktbearbeitung
+        # Beschriftung verschieben, skalieren, drehen – auch während der Punktbearbeitung; ebenso die Maße
         self.labels: LabelHandles | None = None
+        self.dims: DimensionHandles | None = None
+        # Punktzahl beim Laden: ändert sie sich, sind die Segmente neu nummeriert
+        self._loaded_count = 0
 
     # -- Lebenszyklus --------------------------------------------------------
 
@@ -802,23 +838,30 @@ class VertexTool(_PlanningTool):
         super().activate()
         self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
         self.labels = LabelHandles(self.canvas, self.controller)
+        self.dims = DimensionHandles(self.canvas, self.controller)
         self.controller.layers.changed.connect(self._reload)
-        self.canvas.mapCanvasRefreshed.connect(self.labels.refresh)
+        self.canvas.mapCanvasRefreshed.connect(self._refresh_handles)
         self._reload()
 
     def deactivate(self):
         for signal, slot in (
             (self.controller.layers.changed, self._reload),
-            (self.canvas.mapCanvasRefreshed, self.labels.refresh if self.labels else None),
+            (self.canvas.mapCanvasRefreshed, self._refresh_handles),
         ):
             try:
                 signal.disconnect(slot)
             except (TypeError, RuntimeError):
                 pass
-        if self.labels is not None:
-            self.labels.dispose()
-            self.labels = None
+        for handles in (self.labels, self.dims):
+            if handles is not None:
+                handles.dispose()
+        self.labels = self.dims = None
         super().deactivate()
+
+    def _refresh_handles(self):
+        for handles in (self.labels, self.dims):
+            if handles is not None:
+                handles.refresh()
 
     def _layer(self):
         return self.controller.layers.layer(self.role)
@@ -847,9 +890,9 @@ class VertexTool(_PlanningTool):
             self._points = [QgsPointXY(p) for p in (parts[0] if parts else [])]
         if self._active is not None and self._active >= len(self._points):
             self._active = None
+        self._loaded_count = len(self._points)
         self._redraw()
-        if self.labels is not None:
-            self.labels.refresh()
+        self._refresh_handles()
 
     # -- Darstellung ---------------------------------------------------------
 
@@ -913,7 +956,12 @@ class VertexTool(_PlanningTool):
         geom.transform(
             QgsCoordinateTransform(self.canvas.mapSettings().destinationCrs(), layer.crs(), QgsProject.instance())
         )
-        self.controller.layers.change_features(self.role, {self.fid: geom})
+        # Punkt eingefügt oder gelöscht: die Segmente sind neu nummeriert, angepasste Maße passen nicht mehr
+        attrs = None
+        if len(self._points) != self._loaded_count and layer.fields().indexFromName(DIMENSION_ADJUST_FIELD) >= 0:
+            attrs = {self.fid: {DIMENSION_ADJUST_FIELD: None}}
+        self._loaded_count = len(self._points)
+        self.controller.layers.change_features(self.role, {self.fid: geom}, attrs)
 
     def _remove(self, index: int):
         if len(self._points) <= self._min_points:
@@ -930,6 +978,8 @@ class VertexTool(_PlanningTool):
             return
         hit = self._hit(QPoint(event.pos()))
         if hit is None:
+            if self.dims is not None and self.dims.press(event):
+                return
             if self.labels is not None and self.labels.press(event):
                 return
             # Kein Punkt getroffen: das Auswahlwerkzeug übernimmt den Klick – anderes Objekt
@@ -945,6 +995,8 @@ class VertexTool(_PlanningTool):
         self._redraw()
 
     def canvasMoveEvent(self, event):
+        if self.dims is not None and self.dims.move(event):
+            return
         if self.labels is not None and self.labels.move(event):
             return
         if self._drag is not None:
@@ -952,10 +1004,16 @@ class VertexTool(_PlanningTool):
             self._moved = True
             self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
             self._redraw()
+            # Wohin der Punkt gerade fällt, als UTMREF
+            self._tooltip(event, _utmref_at(self.canvas, QgsPointXY(event.mapPoint())))
             return
         hit = self._hit(QPoint(event.pos()))
+        dim_hit = self.dims.hit(QPointF(event.pos())) if hit is None and self.dims is not None else None
         label_hit = self.labels.hit(QPointF(event.pos())) if hit is None and self.labels is not None else None
-        if label_hit is not None:
+        if dim_hit is not None:
+            self.setCursor(self.dims.cursor_for(dim_hit[1]))
+            QToolTip.hideText()
+        elif label_hit is not None:
             self.setCursor(self.labels.cursor_for(label_hit))
             QToolTip.hideText()
         elif hit is None:
@@ -969,8 +1027,11 @@ class VertexTool(_PlanningTool):
             self._tooltip(event, "Ziehen fügt hier einen Punkt ein")
 
     def canvasReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self.labels is not None and self.labels.release(event):
-            return
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self.dims is not None and self.dims.release(event):
+                return
+            if self.labels is not None and self.labels.release(event):
+                return
         if event.button() == Qt.MouseButton.RightButton:
             hit = self._hit(QPoint(event.pos()))
             if hit is not None and hit[0] == "corner":
@@ -1012,7 +1073,14 @@ class VertexTool(_PlanningTool):
     def keyPressEvent(self, event):
         key = event.key()
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        if key == Qt.Key.Key_Escape and self.dims is not None and self.dims.clear_active():
+            event.accept()
+            return
         if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            # Ausgewähltes Maß: nur dieses ausblenden
+            if self.dims is not None and self.dims.hide_active():
+                event.accept()
+                return
             if self._drag is None:
                 # Ohne angefassten Punkt löscht Entf das ganze Gebiet bzw. den Pfeil
                 if self._active is not None:
@@ -1064,7 +1132,8 @@ class SelectTool(_PlanningTool):
         self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
         self.overlay: SelectionOverlay | None = None
         self.labels: LabelHandles | None = None
-        self._gesture: str | None = None  # move | rotate | marquee | label
+        self.dims: DimensionHandles | None = None
+        self._gesture: str | None = None  # move | rotate | marquee | label | dimension
         self._started = False
         self._alt = False
         self._press_pos: QPoint | None = None
@@ -1086,6 +1155,7 @@ class SelectTool(_PlanningTool):
         super().activate()
         self.overlay = SelectionOverlay(self.canvas)
         self.labels = LabelHandles(self.canvas, self.controller)
+        self.dims = DimensionHandles(self.canvas, self.controller)
         self.controller.layers.selection_changed.connect(self._refresh_overlay)
         self.controller.layers.changed.connect(self._refresh_overlay)
         self.canvas.extentsChanged.connect(self._on_extent_changed)
@@ -1108,9 +1178,10 @@ class SelectTool(_PlanningTool):
         if self.overlay is not None:
             self.overlay.dispose()
             self.overlay = None
-        if self.labels is not None:
-            self.labels.dispose()
-            self.labels = None
+        for handles in (self.labels, self.dims):
+            if handles is not None:
+                handles.dispose()
+        self.labels = self.dims = None
         super().deactivate()
 
     def _refresh_overlay(self):
@@ -1129,6 +1200,8 @@ class SelectTool(_PlanningTool):
         self.overlay.show_handles = ROLE_MARKERS not in ids and not single_shape and not notes_only
         self.overlay.ghosts = []
         self.overlay.guides = []
+        if self.dims is not None:
+            self.dims.refresh()
         if self.labels is not None:
             self.labels.refresh()
             # Ein einzelner Text: sein Rahmen ist der der Beschriftung (mit Anfassern, mitgedreht)
@@ -1146,8 +1219,10 @@ class SelectTool(_PlanningTool):
         # Rahmen von Texten und Punkten folgt ihrer Beschriftung – deren Lage steht erst nach dem Zeichnen fest
         if any(role in NOTE_ROLES for role in self.controller.selection_ids()):
             self._refresh_overlay()
-        elif self.labels is not None:
-            self.labels.refresh()
+        else:
+            for handles in (self.labels, self.dims):
+                if handles is not None:
+                    handles.refresh()
 
     # -- Taktische Zeichen ----------------------------------------------------
 
@@ -1302,6 +1377,10 @@ class SelectTool(_PlanningTool):
         if markers is not None and not shift and markers.frame_hit(QPointF(event.pos())) is not None:
             self._delegate_press(markers, event)
             return
+        # Maße des einzeln ausgewählten Objekts: Auswählen, Verschieben, Skalieren
+        if not shift and self.dims is not None and self.dims.press(event):
+            self._gesture = "dimension"
+            return
         # Beschriftung des einzeln ausgewählten Objekts: Verschieben, Skalieren, Drehen
         if not shift and self.labels is not None and self.labels.press(event):
             self._gesture = "label"
@@ -1354,6 +1433,9 @@ class SelectTool(_PlanningTool):
         if self._gesture == "label":
             self.labels.move(event)
             return
+        if self._gesture == "dimension":
+            self.dims.move(event)
+            return
         pos = QPoint(event.pos())
         map_point = QgsPointXY(event.mapPoint())
         mods = event.modifiers()
@@ -1392,9 +1474,13 @@ class SelectTool(_PlanningTool):
                 self.overlay.refresh()
             return
 
-        label_hit = self.labels.hit(QPointF(pos)) if self.labels is not None else None
-        if label_hit is not None:
-            self.setCursor(self.labels.cursor_for(label_hit))
+        dim_hit = self.dims.hit(QPointF(pos)) if self.dims is not None else None
+        label_hit = self.labels.hit(QPointF(pos)) if self.labels is not None and dim_hit is None else None
+        if dim_hit is not None or label_hit is not None:
+            if dim_hit is not None:
+                self.setCursor(self.dims.cursor_for(dim_hit[1]))
+            else:
+                self.setCursor(self.labels.cursor_for(label_hit))
             if self.overlay.hovers:
                 self.overlay.hovers = []
                 self.overlay.refresh()
@@ -1506,9 +1592,9 @@ class SelectTool(_PlanningTool):
         self._show_ghosts(rotated, frame_m, badge)
 
     def canvasReleaseEvent(self, event):
-        if self._gesture == "label":
+        if self._gesture in ("label", "dimension"):
             if event.button() == Qt.MouseButton.LeftButton:
-                self.labels.release(event)
+                (self.labels if self._gesture == "label" else self.dims).release(event)
                 self._end_gesture()
             return
         if self._gesture == "marker":
@@ -1590,6 +1676,11 @@ class SelectTool(_PlanningTool):
             menu.addAction("Bezeichnung bearbeiten …\tEnter", self.controller.focus_label)
             if self.controller.selection_labels_placed():
                 menu.addAction("Beschriftung zurücksetzen", self.controller.reset_selection_label_placement)
+            if self.controller.selection_dimensions_adjusted():
+                menu.addAction(
+                    "Maße zurücksetzen (Lage, Größe, ausgeblendete)",
+                    self.controller.reset_selection_dimension_adjustments,
+                )
             # Texte bestehen nur aus ihrer Beschriftung – ausblenden ergäbe nichts Sichtbares mehr
             if set(self.controller.selection_ids()) != {ROLE_TEXTS}:
                 labels_shown = all(self.controller.selection_labels_visible())
@@ -1641,6 +1732,9 @@ class SelectTool(_PlanningTool):
         elif digit_slot(event) is not None and not self._gesture:
             # Taste n: n-tes Zeichen der Hotbar setzen (Favoriten, sonst zuletzt verwendet)
             self.controller.activate_marker_slot(digit_slot(event))
+        elif key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and self.dims is not None and self.dims.hide_active():
+            # Ausgewähltes Maß: nur dieses ausblenden
+            pass
         elif key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and (has_selection or single_marker):
             self.controller.delete_selection()
         elif key == Qt.Key.Key_R and not ctrl and has_selection:
@@ -1649,6 +1743,8 @@ class SelectTool(_PlanningTool):
             self.controller.duplicate_selection()
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and has_selection:
             self.controller.focus_label()
+        elif key == Qt.Key.Key_Escape and self.dims is not None and self.dims.clear_active():
+            pass
         elif key == Qt.Key.Key_Escape:
             if self._gesture == "label":
                 self.labels.cancel()

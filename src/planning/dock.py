@@ -146,6 +146,7 @@ class PlanningDock(QDockWidget):
         self._tool_buttons: list[tuple[QPushButton, str, str | None]] = []
         self._footprints: dict[str, _FootprintWidgets] = {}
         self._point_combos: dict[str, QComboBox] = {}
+        self._summary_stale = True
 
         content = QWidget()
         layout = QVBoxLayout(content)
@@ -435,7 +436,17 @@ class PlanningDock(QDockWidget):
     # Bilanz
     # ------------------------------------------------------------------
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._summary_stale:
+            self.refresh_summary()
+
     def refresh_summary(self):
+        # Bilanz und Objektliste kosten bei vielen Objekten spürbar Zeit: nur bauen, wenn man sie sieht
+        if not self.isVisible():
+            self._summary_stale = True
+            return
+        self._summary_stale = False
         self._refresh_objects()
         data = self.controller.summary()
         self._summary.clear()

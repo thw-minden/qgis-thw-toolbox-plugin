@@ -4,13 +4,13 @@ Liegt als Seite im Details-Dock (``ui.feature_dock.FeatureDock``). Ein einzelnes
 taktisches Zeichen zeigt das Dock mit seinen eigenen Einstellungen.
 """
 
+import math
 import os
 from collections import Counter
 
-from qgis.core import QgsCoordinateTransform, QgsProject
+from qgis.core import QgsCoordinateTransform, QgsPointXY, QgsProject
 from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtWidgets import (
-    QApplication,
     QCheckBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -26,6 +26,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from ..ui.coordinate_table import CoordinateTable
 from ..ui.font_size_box import FontSizeBox
 from ..ui.object_style_popup import KIND_ARROW, KIND_POINT, KIND_TEXT, ObjectStyleButton
 from ..ui.theme import muted_style
@@ -67,10 +68,12 @@ ROLE_TITLES = {
 }
 _LABEL_HINT = "z.B. Zelt 1, Küche, NEA Nord"
 _NOTE_HINTS = {
-    ROLE_POINTS: "Beschreibung auf der Karte, z.B. Sammelstelle – mehrzeilig möglich",
-    ROLE_TEXTS: "Text auf der Karte – mehrzeilig möglich",
+    ROLE_POINTS: "Beschreibung auf der Karte, z.B. „Sammelstelle $POS“ – $POS wird zur UTMREF, mehrzeilig möglich",
+    ROLE_TEXTS: "Text auf der Karte – $POS wird zur UTMREF, mehrzeilig möglich",
 }
 _STYLE_KINDS = {ROLE_ARROWS: KIND_ARROW, ROLE_POINTS: KIND_POINT, ROLE_TEXTS: KIND_TEXT}
+# Objekte mit Koordinaten-Tabelle in den Details
+COORDINATE_ROLES = (ROLE_TEXTS, ROLE_POINTS, ROLE_ARROWS, ROLE_ZONES)
 
 
 def _num(feature, field: str) -> float:
@@ -166,39 +169,36 @@ def properties(role: str, feature, crs) -> list[tuple[str, str]]:
         rows.append(("Umfang", f"{fmt_m(round(geom.constGet().perimeter()))} m"))
     elif role == ROLE_ARROWS:
         rows.append(("Länge", measure_text(role, [feature], crs)))
-    if feature.hasGeometry():
+    elif role == ROLE_POINTS and _num(feature, "radius") > 0:
+        radius = _num(feature, "radius")
+        rows.append(("Kreisfläche", _area(math.pi * radius * radius)))
+        rows.append(("Kreisumfang", f"{fmt_m(round(2 * math.pi * radius, 1))} m"))
+    # Punkte und Texte: ihre Koordinate steht in der Tabelle darunter
+    if feature.hasGeometry() and role not in NOTE_ROLES:
         # Wie bei den Zeichen: UTMREF und Breite/Länge (Mitte des Objekts)
         utmref, latlon = _coords(feature.geometry().centroid().asPoint(), crs)
         rows.append(("UTMREF", utmref))
         rows.append(("Breite/Länge", latlon))
-        if role == ROLE_ZONES:
-            for number, (utmref, latlon) in enumerate(zone_points(feature, crs), 1):
-                rows.append((f"Punkt {number}", f"{utmref}\n{latlon}"))
     return rows
 
 
-def zone_points(feature, crs) -> list[tuple[str, str]]:
-    """Eckpunkte eines Gebiets (Außenrand, ohne den schließenden Punkt) als (UTMREF, „Breite Länge“)."""
+def vertex_points(role: str, feature, crs) -> list[QgsPointXY]:
+    """Punkte des Objekts in WGS 84: Gebiet ohne den schließenden Punkt, Linie in Zeichenrichtung."""
     geom = feature.geometry()
     if geom is None or geom.isEmpty():
         return []
-    polygons = geom.asMultiPolygon() if geom.isMultipart() else [geom.asPolygon()]
-    points = []
-    for polygon in polygons:
-        if not polygon:
-            continue
-        ring = list(polygon[0])
+    if role == ROLE_ZONES:
+        polygons = geom.asMultiPolygon() if geom.isMultipart() else [geom.asPolygon()]
+        ring = list(polygons[0][0]) if polygons and polygons[0] else []
         if len(ring) > 1 and ring[0] == ring[-1]:
             ring.pop()
-        points.extend(_coords(point, crs) for point in ring)
-    return points
-
-
-def zone_points_text(feature, crs) -> str:
-    """Eckpunkte zum Kopieren: je Zeile Nummer, UTMREF und Breite/Länge, durch Tabulator getrennt."""
-    return "\n".join(
-        f"{number}\t{utmref}\t{latlon}" for number, (utmref, latlon) in enumerate(zone_points(feature, crs), 1)
-    )
+    elif role == ROLE_ARROWS:
+        parts = geom.asMultiPolyline() if geom.isMultipart() else [geom.asPolyline()]
+        ring = list(parts[0]) if parts else []
+    else:
+        ring = [geom.asPoint()]
+    transform = QgsCoordinateTransform(crs, WGS84, QgsProject.instance())
+    return [transform.transform(QgsPointXY(p)) for p in ring]
 
 
 def _coords(point, crs) -> tuple[str, str]:
@@ -383,6 +383,12 @@ class SelectionDetails(QWidget):
         circle_row.addStretch()
         form.addRow("Radius-Kreis:", circle_row)
         self._circle_label = form.labelForField(circle_row)
+        self._dimensions = QCheckBox("Maße auf der Karte")
+        self._dimensions.setToolTip("Radius des Kreises bzw. Länge jeder Kante auf der Karte zeigen")
+        self._dimensions.clicked.connect(
+            lambda: controller.set_selection_dimensions(_clicked_state(self._dimensions))
+        )
+        form.addRow("", self._dimensions)
         # Linien: Pfeilspitzen direkt schaltbar (Breite, Farbe und Größe der Spitzen unter „Gestaltung“)
         self._start_arrow = QCheckBox("am Anfang")
         self._start_arrow.clicked.connect(lambda: self._on_arrow_clicked(False))
@@ -399,6 +405,12 @@ class SelectionDetails(QWidget):
         # Angaben zum einzelnen Objekt – werden bei jeder Aktualisierung neu aufgebaut
         self._props = QFormLayout()
         layout.addLayout(self._props)
+        self._coords_label = QLabel("Koordinaten:")
+        layout.addWidget(self._coords_label)
+        self._coords = CoordinateTable()
+        self._coords.edited.connect(self._on_coords_edited)
+        self._coords_target: tuple[str, int] | None = None
+        layout.addWidget(self._coords)
 
         self._list = QTreeWidget()
         self._list.setHeaderLabels(["Objekt", "Angabe"])
@@ -514,12 +526,23 @@ class SelectionDetails(QWidget):
                 text = QLabel(value)
                 text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
                 self._props.addRow(f"{label}:", text)
-            if role == ROLE_ZONES and feature.hasGeometry():
-                points = zone_points_text(feature, self._crs(role))
-                copy = QPushButton("Eckpunkte kopieren")
-                copy.setToolTip("Alle Eckpunkte (UTMREF und Breite/Länge) in die Zwischenablage kopieren")
-                copy.clicked.connect(lambda _checked=False, text=points: QApplication.clipboard().setText(text))
-                self._props.addRow("", copy)
+        # Texte, Punkte, Linien, Gebiete: Koordinaten zum Ansehen, Kopieren und Eintippen
+        coords = single is not None and single[0] in COORDINATE_ROLES and single[1].hasGeometry()
+        self._coords_label.setVisible(coords)
+        self._coords.setVisible(coords)
+        if coords:
+            role, feature = single
+            self._coords_target = (role, feature.id())
+            minimum = {ROLE_ZONES: 3, ROLE_ARROWS: 2}.get(role, 1)
+            self._coords.set_points(vertex_points(role, feature, self._crs(role)), minimum, closed=role == ROLE_ZONES)
+        # Maße auf der Karte: Linien und Gebiete immer, Punkte erst mit Radius
+        dims = self.controller.selection_dimensions() if style_role in (ROLE_POINTS, ROLE_ARROWS) else []
+        if style_role is None and all(r == ROLE_ZONES for r, _f in items):
+            dims = self.controller.selection_dimensions()
+        dims_shown = bool(dims) and (style_role != ROLE_POINTS or circle)
+        self._dimensions.setVisible(dims_shown)
+        if dims_shown:
+            _show_states(self._dimensions, dims)
 
         self._fill_list(items if single is None else [])
         self._rotate.setEnabled(any(role in FOOTPRINT_ROLES for role, _f in items))
@@ -613,6 +636,10 @@ class SelectionDetails(QWidget):
     def _on_arrow_clicked(self, at_end: bool):
         box = self._end_arrow if at_end else self._start_arrow
         self.controller.set_selection_arrows(at_end, _clicked_state(box))
+
+    def _on_coords_edited(self, points):
+        if self._coords_target is not None:
+            self.controller.set_vertices(*self._coords_target, points)
 
     def _on_note_edited(self):
         text = self._note_edit.toPlainText().strip()

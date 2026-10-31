@@ -1,5 +1,6 @@
 """Steuerung der Objektplanung: verbindet Dock, Hotbar, Kartenwerkzeuge und Layer."""
 
+import json
 import math
 
 from qgis.core import (
@@ -21,8 +22,10 @@ from qgis.PyQt.QtWidgets import QApplication
 from ..layer.labeling import label_size_pt
 from ..logging_utils import get_logger
 from ..ui.symbol_picker import Symbol, symbol_catalog, symbol_prefs
+from ..util.coordinates import WGS84
 from .capacity_dialog import CapacityDialog
 from .catalog import FootprintType, fmt_m, load_catalog
+from .dimension_handles import read_adjustments
 from .dock import PlanningDock
 from .drop_filter import PlanningDropFilter
 from .geometry import MetricFrame, align_snap, grid_centers, rotated_frame, tent_polygon
@@ -37,6 +40,9 @@ from .layers import (
     LABEL_DY_FIELD,
     LABEL_EDIT_ROLES,
     LABEL_SIZE_FIELD,
+    DIMENSION_ADJUST_FIELD,
+    MEASURE_FIELD,
+    MEASURE_ROLES,
     NOTE_ROLES,
     OBJECT_STYLE_ROLES,
     POINT_ROLES,
@@ -151,6 +157,7 @@ class PlanningController(QObject):
             FootprintType("eigen", "Eigenes Fahrzeug", 6.0, 2.5, 0.0, "THW_Fahrzeuge/Kraftfahrzeug.svg")
         )
         self.layers = PlanningLayers(plugin_dir, self.catalog)
+        self.layers.canvas = self.canvas
         self.dock: PlanningDock | None = None
         self.hotbar: PlanningHotbar | None = None
         self._tools: dict[str, object] = {}
@@ -222,6 +229,8 @@ class PlanningController(QObject):
             self.edit_vertices(*shape)
 
     def unload(self):
+        # Vorschau-Intervall der Karte nicht zurückgehalten lassen
+        self.layers.release_preview()
         if self.dock:
             try:
                 self.dock.visibilityChanged.disconnect(self._on_dock_visibility)
@@ -851,7 +860,7 @@ class PlanningController(QObject):
         for role, geoms in geometries.items():
             if role == ROLE_MARKERS:
                 self.plugin.move_markers(geoms)
-                self.layers.changed.emit()
+                self.layers.notify_changed()
                 continue
             attrs = None
             if rotation_delta and role in FOOTPRINT_ROLES:
@@ -999,7 +1008,7 @@ class PlanningController(QObject):
                 for fid in fids:
                     self.plugin.toggle_label_visibility(fid, visible)
                 # Zeichen liegen nicht in den Objektplanungs-Layern: die Details eigens auffrischen
-                self.layers.changed.emit()
+                self.layers.notify_changed()
             else:
                 self.layers.change_features(role, {}, {fid: {LABEL_FIELD: visible} for fid in fids})
 
@@ -1020,7 +1029,7 @@ class PlanningController(QObject):
             if role == ROLE_MARKERS:
                 for fid in fids:
                     self.plugin.set_label_size(fid, size_pt)
-                self.layers.changed.emit()
+                self.layers.notify_changed()
             else:
                 self.layers.change_features(role, {}, {fid: {LABEL_SIZE_FIELD: size_pt} for fid in fids})
 
@@ -1155,6 +1164,78 @@ class PlanningController(QObject):
                 attrs[f.id()] = {STYLE_FIELD: style.updated(circle=None).to_json()}
         if attrs:
             self.layers.change_features(ROLE_POINTS, {}, attrs)
+
+    def selection_dimensions(self) -> list[bool]:
+        """Je ausgewähltem Punkt, Linie bzw. Gebiet: stehen seine Maße auf der Karte?"""
+        return [
+            bool(_float_or_none(f.attribute(MEASURE_FIELD)))
+            for role, f in self.selection()
+            if role in MEASURE_ROLES and f.fields().indexFromName(MEASURE_FIELD) >= 0
+        ]
+
+    def set_selection_dimensions(self, shown: bool):
+        """Maße (Radius bzw. Segmentlängen) der Auswahl auf der Karte ein- oder ausblenden."""
+        for role, fids in self.selection_ids().items():
+            if role in MEASURE_ROLES:
+                self.layers.change_features(role, {}, {fid: {MEASURE_FIELD: bool(shown)} for fid in fids})
+                self.layers.refresh_dimensions(role)
+
+    def dimension_target(self) -> tuple[str, QgsFeature] | None:
+        """Das einzeln ausgewählte Objekt, dessen Maße auf der Karte stehen (Punkt nur mit Radius)."""
+        selected = self.selection()
+        if len(selected) != 1:
+            return None
+        role, feature = selected[0]
+        if role not in MEASURE_ROLES or not _float_or_none(feature.attribute(MEASURE_FIELD)):
+            return None
+        if role == ROLE_POINTS and not (_float_or_none(feature.attribute("radius")) or 0) > 0:
+            return None
+        return role, feature
+
+    def set_dimension_adjustment(self, role: str, fid: int, key: str, adjust: dict):
+        """Anpassung eines einzelnen Maßes (Versatz, Größe, ausgeblendet) speichern."""
+        layer = self.layers.layer(role)
+        feature = layer.getFeature(fid) if layer is not None else None
+        if feature is None or not feature.isValid():
+            return
+        adjustments = read_adjustments(feature)
+        adjustments[key] = adjust
+        self.layers.change_features(role, {}, {fid: {DIMENSION_ADJUST_FIELD: json.dumps(adjustments)}})
+
+    def selection_dimensions_adjusted(self) -> bool:
+        """Hat ein ausgewähltes Objekt von Hand verschobene, skalierte oder ausgeblendete Maße?"""
+        return any(read_adjustments(f) for role, f in self.selection() if role in MEASURE_ROLES)
+
+    def reset_selection_dimension_adjustments(self):
+        """Alle Maße der Auswahl wieder an ihren gewohnten Platz, in Normalgröße und sichtbar."""
+        for role, fids in self.selection_ids().items():
+            if role in MEASURE_ROLES:
+                self.layers.change_features(role, {}, {fid: {DIMENSION_ADJUST_FIELD: None} for fid in fids})
+
+    def set_vertices(self, role: str, fid: int, points_wgs: list[QgsPointXY]) -> bool:
+        """Punkte eines Texts, Punkts, einer Linie bzw. eines Gebiets aus Koordinaten (WGS 84) neu setzen."""
+        layer = self.layers.layer(role)
+        if layer is None or not points_wgs:
+            return False
+        transform = QgsCoordinateTransform(WGS84, layer.crs(), QgsProject.instance())
+        points = [transform.transform(p) for p in points_wgs]
+        if role in NOTE_ROLES:
+            geom = QgsGeometry.fromPointXY(points[0])
+        elif role == ROLE_ZONES:
+            if len(points) < 3:
+                return False
+            geom = QgsGeometry.fromPolygonXY([points + [points[0]]])
+        else:
+            if len(points) < 2:
+                return False
+            geom = QgsGeometry.fromPolylineXY(points)
+        # Andere Punktzahl: die Segmente sind neu nummeriert, angepasste Maße passen nicht mehr
+        old = layer.getFeature(fid)
+        attrs = None
+        if role in MEASURE_ROLES and old.isValid() and old.hasGeometry():
+            if old.geometry().constGet().nCoordinates() != geom.constGet().nCoordinates():
+                attrs = {fid: {DIMENSION_ADJUST_FIELD: None}}
+        return self.layers.change_features(role, {fid: geom}, attrs)
 
     def selection_radii(self) -> list[float]:
         """Radius-Kreis je ausgewähltem Punkt (Meter, 0 = keiner)."""

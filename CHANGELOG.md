@@ -9,6 +9,10 @@
 - **Hotbar-Icons** zeigen den gewählten Typ (erzeugt mit `scripts/build_planning_icons.py`)
 - **Beschriftungen frei platzieren**: Beschriftung eines ausgewählten Texts, Punkts, einer Linie oder eines Gebiets verschieben, an den Ecken skalieren und daneben drehen (Shift: 15°); Rechtsklick „Beschriftung zurücksetzen“
 - **Objektliste im Dock**: alle Texte, Punkte, Linien und Gebiete; Klick wählt aus und zeigt das Objekt
+- **Messen**: beim Zeichnen Segmentlänge, Gesamtlänge bzw. Umfang und Fläche; je Objekt „Maße auf der Karte“ (Kantenlängen, Radius); Kreisfläche und -umfang in den Details
+- **Maße einzeln anpassen**: Maß anklicken, verschieben und an den Ecken skalieren; Entf blendet es aus; Rechtsklick „Maße zurücksetzen“
+- **Koordinaten**: Tabelle in den Details (UTMREF bzw. Breite/Länge eintippen, Punkte einfügen/löschen, kopieren); `$POS` in Texten und Punktbeschreibungen wird zur UTMREF; UTMREF am Mauszeiger beim Ziehen eines Punkts
+- **Adress-Suche** springt bei UTMREF bzw. Breite/Länge direkt zur Koordinate und markiert sie mit Fadenkreuz und pulsierendem Ring
 
 ### Geändert
 - Gebietstypen: rot, gelb, blau – gefüllt oder ohne Füllung; Pfeiltypen heißen jetzt „Linie …“

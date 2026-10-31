@@ -13,11 +13,13 @@ from qgis.core import (
     QgsField,
     QgsFields,
     QgsFillSymbol,
+    QgsFontMarkerSymbolLayer,
     QgsGeometryGeneratorSymbolLayer,
     QgsLinePatternFillSymbolLayer,
     QgsLineSymbol,
     QgsMarkerLineSymbolLayer,
     QgsMarkerSymbol,
+    QgsMarkerSymbolLayer,
     QgsPalLayerSettings,
     QgsPointPatternFillSymbolLayer,
     QgsProject,
@@ -34,8 +36,8 @@ from qgis.core import (
     QgsVectorLayer,
     QgsVectorLayerSimpleLabeling,
 )
-from qgis.PyQt.QtCore import QObject, Qt, pyqtSignal
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtCore import QObject, Qt, QTimer, pyqtSignal
+from qgis.PyQt.QtGui import QColor, QFont
 
 from ..layer.fields import _T_BOOL, _T_DOUBLE, _T_STRING
 from ..logging_utils import get_logger
@@ -44,6 +46,7 @@ from ..tools.layer_functions import update_layer_tree_sources
 from ..util.svg_minify import minify_svg
 from ..util.temp_files import remove_temp_file
 from .catalog import Catalog
+from .expressions import meters_text_expr, metric_length_expr, note_label_expr
 from .object_style import (
     ARROWS_BOTH,
     ARROWS_END,
@@ -57,6 +60,8 @@ from .zone_style import DEFAULT_OPACITY, DEFAULT_STROKE_WIDTH, DOT_PATTERNS, HAT
 logger = get_logger(__name__)
 
 GPKG_SUFFIX = "_objektplanung"
+# Nach einer Änderung höchstens so lange das alte Kartenbild zeigen (ms), siehe PlanningLayers._hold_preview
+_HOLD_PREVIEW_MS = 5000
 GROUP_NAME = "Objektplanung"
 # Custom property, über die wir unsere Layer auch nach Umbenennen wiederfinden
 ROLE_PROPERTY = "thw_toolbox/objektplanung"
@@ -104,6 +109,32 @@ LABEL_DX_FIELD = "beschriftung_dx"
 LABEL_DY_FIELD = "beschriftung_dy"
 LABEL_ANGLE_FIELD = "beschriftung_winkel"
 LABEL_EDIT_ROLES = (ROLE_TEXTS, ROLE_POINTS, ROLE_ARROWS, ROLE_ZONES)
+# Maße auf der Karte je Objekt (leer = aus): Radius eines Punkts, Segmentlängen einer Linie bzw. eines Gebiets
+MEASURE_FIELD = "masse"
+MEASURE_ROLES = (ROLE_POINTS, ROLE_ARROWS, ROLE_ZONES)
+_MEASURE_ON_EXPR = f'coalesce("{MEASURE_FIELD}", false)'
+# Schrift der Maße (mm) und Abstand zur Kante
+DIMENSION_SIZE_MM = 2.5
+DIMENSION_GAP_MM = 1.6
+# Von Hand angepasste Maße je Objekt (JSON): Schlüssel = Nummer des Segments (1, 2, …) bzw. „r“ für den Radius,
+# Werte: Versatz ``dx``/``dy`` (Segmente in mm entlang/quer zur Schrift, Radius in Metern), Faktor ``s``,
+# ``aus`` = ausgeblendet. Leer = alle Maße an ihrem gewohnten Platz
+DIMENSION_ADJUST_FIELD = "masse_anpassung"
+RADIUS_DIMENSION_KEY = "r"
+
+
+def _dimension_adjust(key_expr: str) -> str:
+    """Anpassung eines Maßes als Map (oder NULL) – ``key_expr`` ergibt den Schlüssel."""
+    return f"map_get(json_to_map(coalesce(\"{DIMENSION_ADJUST_FIELD}\", '{{}}')), {key_expr})"
+
+
+def _dimension_text(adjust: str, text_expr: str) -> str:
+    """Ausgeblendete Maße zeichnen nichts."""
+    return f"if(coalesce(map_get({adjust}, 'aus'), false), '', {text_expr})"
+
+
+def _dimension_size(adjust: str) -> str:
+    return f"{DIMENSION_SIZE_MM} * coalesce(map_get({adjust}, 's'), 1)"
 _POSITION_PROPERTY = _label_property("PositionPoint")
 _ROTATION_PROPERTY = _label_property("LabelRotation")
 _HALI_PROPERTY = _label_property("Hali")
@@ -208,11 +239,14 @@ def _arrow_trim_expr(modes) -> str:
 
 # Stand der Darstellung von Gebieten, Linien und Punkten; ältere Layer werden beim Öffnen einmal neu aufgebaut
 _STYLE_VERSION_PROPERTY = "thw_toolbox/objektplanung_darstellung"
-_STYLE_VERSION = 2
+_STYLE_VERSION = 6
+# Ob die Darstellung die Maß-Ebenen enthält (nur, solange ein Objekt seine Maße zeigt)
+_DIMENSIONS_PROPERTY = "thw_toolbox/objektplanung_masse"
 _VERSIONED_ROLES = (ROLE_ZONES, ROLE_ARROWS, ROLE_POINTS)
 
 # Gebiete tragen nur ihre eigene Bezeichnung; frühere Versionen zeigten ohne sie den Typ
 _ZONE_LABEL_EXPR = "nullif(\"bezeichnung\", '')"
+_PLAIN_LABEL_EXPR = _ZONE_LABEL_EXPR
 _LEGACY_ZONE_LABEL_EXPR = 'coalesce(nullif("bezeichnung", \'\'), "typ")'
 
 # Schraffur-Abstand und Linienstärke (mm)
@@ -320,6 +354,9 @@ def build_fields(role: str) -> QgsFields:
     if role in LABEL_EDIT_ROLES:
         for name in (LABEL_DX_FIELD, LABEL_DY_FIELD, LABEL_ANGLE_FIELD):
             fields.append(QgsField(name, _T_DOUBLE))
+    if role in MEASURE_ROLES:
+        fields.append(QgsField(MEASURE_FIELD, _T_BOOL))
+        fields.append(QgsField(DIMENSION_ADJUST_FIELD, _T_STRING))
     return fields
 
 
@@ -374,6 +411,16 @@ class PlanningLayers(QObject):
         self._layers: dict[str, QgsVectorLayer] = {}
         # Eingebettete Zeichen je Katalogpfad (``svgs/<rel>``), einmal gelesen
         self._sign_data: dict[str, str] = {}
+        # Änderungen gesammelt melden: Mehrere Schreibvorgänge hintereinander (Verschieben einer gemischten
+        # Auswahl, Attribute und Geometrie) bauen Details, Dock und Werkzeuge nur einmal neu auf –
+        # und erst, nachdem QGIS mit dem Neuzeichnen beginnen konnte
+        self._changed_timer = QTimer(self)
+        self._changed_timer.setSingleShot(True)
+        self._changed_timer.setInterval(0)
+        self._changed_timer.timeout.connect(self.changed)
+        # Karte, deren Zwischenbilder beim Neuzeichnen nach einer Änderung zurückgehalten werden (siehe _hold_preview)
+        self.canvas = None
+        self._held_interval: int | None = None
 
     # ------------------------------------------------------------------
     # Zugriff
@@ -519,7 +566,39 @@ class PlanningLayers(QObject):
             pass
 
     def _emit_changed(self, *args):
-        self.changed.emit()
+        self.notify_changed()
+
+    def _hold_preview(self):
+        """Bis die Karte nach dieser Änderung fertig gezeichnet ist, das alte Bild stehen lassen.
+
+        Jede Änderung an einem beschrifteten Layer lässt QGIS alle Beschriftungen des Projekts neu setzen.
+        Dauert das länger als das Vorschau-Intervall der Karte, zeigt sie zwischendurch ein Bild ohne
+        Beschriftungen – Texte und Beschreibungen verschwinden kurz. Mit langem Intervall wechselt das
+        Bild erst, wenn es fertig ist.
+        """
+        canvas = self.canvas
+        if canvas is None or self._held_interval is not None:
+            return
+        self._held_interval = canvas.mapUpdateInterval()
+        canvas.setMapUpdateInterval(_HOLD_PREVIEW_MS)
+        canvas.mapCanvasRefreshed.connect(self.release_preview)
+        # Falls nichts neu gezeichnet wird: spätestens dann wieder wie gewohnt
+        QTimer.singleShot(_HOLD_PREVIEW_MS, self.release_preview)
+
+    def release_preview(self):
+        canvas, interval = self.canvas, self._held_interval
+        if canvas is None or interval is None:
+            return
+        self._held_interval = None
+        try:
+            canvas.mapCanvasRefreshed.disconnect(self.release_preview)
+        except (TypeError, RuntimeError):
+            pass
+        canvas.setMapUpdateInterval(interval)
+
+    def notify_changed(self):
+        """``changed`` vormerken; es kommt einmal, sobald die laufenden Änderungen durch sind."""
+        self._changed_timer.start()
 
     def _emit_selection_changed(self, *args):
         self.selection_changed.emit()
@@ -532,13 +611,20 @@ class PlanningLayers(QObject):
         lyr = self.layer(role)
         if lyr is None or not features:
             return False
+        self._ensure_type_categories(
+            lyr,
+            role,
+            {str(f.attribute("typ_id")) for f in features if f.attribute("typ_id")},
+            any(_truthy(f.attribute(MEASURE_FIELD)) for f in features if f.fields().indexFromName(MEASURE_FIELD) >= 0),
+        )
         if lyr.isEditable():
             ok = lyr.addFeatures(features)
         else:
             ok, _ = lyr.dataProvider().addFeatures(features)
             lyr.updateExtents()
+        self._hold_preview()
         lyr.triggerRepaint()
-        self.changed.emit()
+        self.notify_changed()
         return bool(ok)
 
     def delete_feature(self, role: str, fid: int) -> bool:
@@ -549,8 +635,9 @@ class PlanningLayers(QObject):
             ok = lyr.deleteFeature(fid)
         else:
             ok = lyr.dataProvider().deleteFeatures([fid])
+        self._hold_preview()
         lyr.triggerRepaint()
-        self.changed.emit()
+        self.notify_changed()
         return bool(ok)
 
     def delete_features(self, role: str, fids: list[int]) -> bool:
@@ -562,8 +649,9 @@ class PlanningLayers(QObject):
             ok = lyr.deleteFeatures(fids)
         else:
             ok = lyr.dataProvider().deleteFeatures(fids)
+        self._hold_preview()
         lyr.triggerRepaint()
-        self.changed.emit()
+        self.notify_changed()
         return bool(ok)
 
     def change_features(self, role: str, geometries: dict, attributes: dict | None = None) -> bool:
@@ -586,8 +674,9 @@ class PlanningLayers(QObject):
             if attr_map:
                 ok = provider.changeAttributeValues(attr_map) and ok
             lyr.updateExtents()
+        self._hold_preview()
         lyr.triggerRepaint()
-        self.changed.emit()
+        self.notify_changed()
         return bool(ok)
 
     def new_feature(self, role: str) -> QgsFeature:
@@ -685,66 +774,110 @@ class PlanningLayers(QObject):
             lyr.setRenderer(QgsSingleSymbolRenderer(_distributor_symbol()))
             _set_labels(lyr, 'coalesce(nullif("bezeichnung", \'\'), "typ")')
         elif role == ROLE_ZONES:
-            lyr.setRenderer(self._renderer(role))
+            self._set_renderer(lyr, role, _used_type_ids(lyr), _dimensions_used(lyr))
             # Gebiete sind groß – ihre Namen sollen auch in der Übersicht lesbar sein.
             # Nur eine eigene Bezeichnung: der Typ („Gebiet rot (gefüllt)“) steckt schon in der Darstellung
             _set_labels(lyr, _ZONE_LABEL_EXPR, polygon=True, min_scale=50000)
         elif role == ROLE_ARROWS:
-            lyr.setRenderer(self._renderer(role))
+            self._set_renderer(lyr, role, _used_type_ids(lyr), _dimensions_used(lyr))
             _set_labels(lyr, "nullif(\"bezeichnung\", '')", line=True, min_scale=50000)
         elif role == ROLE_POINTS:
-            lyr.setRenderer(self._renderer(role))
+            self._set_renderer(lyr, role, _used_type_ids(lyr), _dimensions_used(lyr))
             # Die Beschreibung gehört zum Punkt: immer zeigen, auch weit herausgezoomt
-            _set_labels(lyr, "nullif(\"bezeichnung\", '')", dist_mm=1.5, min_scale=0)
+            _set_labels(lyr, note_label_expr(), dist_mm=1.5, min_scale=0)
         elif role == ROLE_TEXTS:
             lyr.setRenderer(QgsSingleSymbolRenderer(_text_anchor_symbol()))
             type_color = _type_color_expr(self.catalog.texte, "#212121")
             _set_labels(
                 lyr,
-                "nullif(\"bezeichnung\", '')",
+                note_label_expr(),
                 over_point=True,
                 min_scale=0,
                 color_expr=f"coalesce({_OBJECT_COLOR_EXPR}, {type_color})",
             )
         lyr.triggerRepaint()
 
-    def _zone_renderer(self) -> QgsCategorizedSymbolRenderer:
+    def _zone_renderer(self, types, dimensions: bool) -> QgsCategorizedSymbolRenderer:
+        def symbol(color: str, filled: bool = True):
+            zone = _zone_symbol(color, filled)
+            return _with_segment_dimensions(zone) if dimensions else zone
+
         renderer = QgsCategorizedSymbolRenderer(
-            "typ_id",
-            [QgsRendererCategory(t.id, _zone_symbol(t.farbe, t.gefuellt), t.name) for t in self.catalog.zone_types()],
+            "typ_id", [QgsRendererCategory(t.id, symbol(t.farbe, t.gefuellt), t.name) for t in types]
         )
-        renderer.setSourceSymbol(_zone_symbol("#1565c0"))
+        renderer.setSourceSymbol(symbol("#1565c0"))
         return renderer
 
     def _ensure_style(self, lyr: QgsVectorLayer, role: str) -> None:
         """Gebiete, Linien und Punkte früherer Versionen nachrüsten: Feld ``gestaltung``, aktuelle Darstellung."""
+        if role in NOTE_ROLES:
+            # Beschriftung einer früheren Version ohne Platzhalter $POS
+            _replace_label_expression(lyr, _PLAIN_LABEL_EXPR, note_label_expr())
         if role not in _VERSIONED_ROLES or not _ensure_field(lyr, STYLE_FIELD, _T_STRING):
+            return
+        if role in MEASURE_ROLES and not (
+            _ensure_field(lyr, MEASURE_FIELD) and _ensure_field(lyr, DIMENSION_ADJUST_FIELD, _T_STRING)
+        ):
             return
         if role == ROLE_ZONES:
             _replace_label_expression(lyr, _LEGACY_ZONE_LABEL_EXPR, _ZONE_LABEL_EXPR)
-        renderer = lyr.renderer()
         current = str(lyr.customProperty(_STYLE_VERSION_PROPERTY, "")) == str(_STYLE_VERSION)
-        # Aktuell und alle Typen des Katalogs da (neue Typen hätten sonst kein Symbol und blieben unsichtbar)
-        categorized = isinstance(renderer, QgsCategorizedSymbolRenderer)
-        if current and categorized and _covers_types(renderer, self._types(role)):
+        if current:
+            # Aktuell – nur noch dafür sorgen, dass jeder verwendete Typ sein Symbol hat
+            self._ensure_type_categories(lyr, role)
             return
         # Darstellung einer früheren Version – neu aufbauen, die Beschriftung bleibt
-        lyr.setRenderer(self._renderer(role))
+        self._set_renderer(lyr, role, _used_type_ids(lyr), _dimensions_used(lyr))
         lyr.setCustomProperty(_STYLE_VERSION_PROPERTY, _STYLE_VERSION)
         lyr.triggerRepaint()
+
+    def _ensure_type_categories(
+        self, lyr: QgsVectorLayer, role: str, extra_ids=(), extra_dimensions: bool = False
+    ) -> None:
+        """Kategorien für alle verwendeten Typen (und ``extra_ids``) – sonst blieben deren Objekte unsichtbar.
+
+        Die Darstellung enthält bewusst nur, was gebraucht wird: QGIS bereitet bei jedem Neuzeichnen alle
+        Ausdrücke aller Kategorien vor, auch ungenutzter, und jede Schrift der Maße. Mit allen Typen
+        des Katalogs und stets vorhandenen Maß-Ebenen kostete das je Layer spürbar Zeit. Deshalb nur
+        verwendete Typen (die Legende zeigt so auch nur, was auf der Karte ist) und Maß-Ebenen nur,
+        solange ein Objekt seine Maße zeigt (bzw. ``extra_dimensions``).
+        """
+        if role not in _VERSIONED_ROLES:
+            return
+        wanted = _used_type_ids(lyr) | set(extra_ids)
+        dimensions = extra_dimensions or _dimensions_used(lyr)
+        renderer = lyr.renderer()
+        categorized = isinstance(renderer, QgsCategorizedSymbolRenderer)
+        if categorized and wanted <= _category_values(renderer) and dimensions == _has_dimensions(lyr):
+            return
+        # Bisherige Kategorien behalten (Typen, deren Objekte gerade gelöscht wurden, schaden nicht)
+        if categorized:
+            wanted |= _category_values(renderer)
+        self._set_renderer(lyr, role, wanted, dimensions)
+        lyr.triggerRepaint()
+
+    def refresh_dimensions(self, role: str) -> None:
+        """Nach dem Ein- bzw. Ausschalten der Maße: Maß-Ebenen nur, solange ein Objekt sie zeigt."""
+        lyr = self.layer(role)
+        if lyr is not None:
+            self._ensure_type_categories(lyr, role)
+
+    def _set_renderer(self, lyr: QgsVectorLayer, role: str, type_ids: set[str], dimensions: bool) -> None:
+        lyr.setRenderer(self._renderer(role, type_ids, dimensions))
+        lyr.setCustomProperty(_DIMENSIONS_PROPERTY, int(dimensions))
 
     def _types(self, role: str):
         if role == ROLE_ZONES:
             return self.catalog.zone_types()
         return self.catalog.pfeile if role == ROLE_ARROWS else self.catalog.punkte
 
-    def _renderer(self, role: str) -> QgsCategorizedSymbolRenderer:
-        """Darstellung je Typ für Gebiete, Linien und Punkte."""
+    def _renderer(self, role: str, type_ids: set[str], dimensions: bool) -> QgsCategorizedSymbolRenderer:
+        """Darstellung je Typ für Gebiete, Linien und Punkte – nur für die Typen ``type_ids``."""
+        types = [t for t in self._types(role) if t.id in type_ids]
         if role == ROLE_ZONES:
-            return self._zone_renderer()
-        if role == ROLE_ARROWS:
-            return _typed_renderer(self.catalog.pfeile, _arrow_symbol, "#c62828")
-        return _typed_renderer(self.catalog.punkte, _point_symbol, "#c62828")
+            return self._zone_renderer(types, dimensions)
+        factory = _arrow_symbol if role == ROLE_ARROWS else _point_symbol
+        return _typed_renderer(types, lambda color: factory(color, dimensions), "#c62828")
 
     def _sign_symbol(self, role: str):
         """Symbol der Objekte mit taktischem Zeichen (Fahrzeuge, Stromerzeuger, Leuchten)."""
@@ -1076,10 +1209,34 @@ def _replace_label_expression(lyr: QgsVectorLayer, old: str, new: str) -> None:
     lyr.setLabeling(QgsVectorLayerSimpleLabeling(settings))
 
 
-def _covers_types(renderer: QgsCategorizedSymbolRenderer, types) -> bool:
-    """Hat die kategorisierte Darstellung für jeden Typ eine Kategorie?"""
-    values = {str(category.value()) for category in renderer.categories()}
-    return all(t.id in values for t in types)
+def _truthy(value) -> bool:
+    """Ja/Nein-Attribut (auch 0/1 aus dem GeoPackage); NULL ist nein."""
+    if value is None or (hasattr(value, "isNull") and value.isNull()):
+        return False
+    return bool(value)
+
+
+def _dimensions_used(lyr: QgsVectorLayer) -> bool:
+    """Zeigt irgendein Objekt des Layers seine Maße?"""
+    index = lyr.fields().indexFromName(MEASURE_FIELD)
+    return index >= 0 and any(_truthy(v) for v in lyr.uniqueValues(index))
+
+
+def _has_dimensions(lyr: QgsVectorLayer) -> bool:
+    """Enthält die aktuelle Darstellung die Maß-Ebenen?"""
+    return str(lyr.customProperty(_DIMENSIONS_PROPERTY, "0")) in ("1", "true")
+
+
+def _category_values(renderer: QgsCategorizedSymbolRenderer) -> set[str]:
+    return {str(category.value()) for category in renderer.categories()}
+
+
+def _used_type_ids(lyr: QgsVectorLayer) -> set[str]:
+    """Typen (``typ_id``), die im Layer vorkommen."""
+    index = lyr.fields().indexFromName("typ_id")
+    if index < 0:
+        return set()
+    return {str(v) for v in lyr.uniqueValues(index) if v is not None and not (hasattr(v, "isNull") and v.isNull())}
 
 
 def _type_color_expr(types, default: str) -> str:
@@ -1089,7 +1246,7 @@ def _type_color_expr(types, default: str) -> str:
     return f"coalesce({lookup}, '{default}')"
 
 
-def _arrow_symbol(color: str) -> QgsLineSymbol:
+def _arrow_symbol(color: str, dimensions: bool = False) -> QgsLineSymbol:
     """Pfeil bzw. Linie in der Typfarbe; die Gestaltung (Feld ``gestaltung``) überschreibt Farbe, Breite und Spitzen.
 
     Die Spitze ist ein Dreieck, dessen Spitze genau auf dem letzten (bzw. ersten) Punkt sitzt
@@ -1132,10 +1289,10 @@ def _arrow_symbol(color: str) -> QgsLineSymbol:
         listed = ", ".join(f"'{m}'" for m in modes)
         marker_line.setDataDefinedProperty(_LAYER_ENABLED, QgsProperty.fromExpression(f"{_ARROWS_EXPR} IN ({listed})"))
         symbol.appendSymbolLayer(marker_line)
-    return symbol
+    return _with_segment_dimensions(symbol) if dimensions else symbol
 
 
-def _point_symbol(color: str) -> QgsMarkerSymbol:
+def _point_symbol(color: str, dimensions: bool = False) -> QgsMarkerSymbol:
     """Punkt in der Typfarbe, mit Radius (Feld ``radius``, Meter) zusätzlich ein maßstabsgetreuer Kreis."""
     symbol = QgsMarkerSymbol.createSimple(
         {
@@ -1161,6 +1318,80 @@ def _point_symbol(color: str) -> QgsMarkerSymbol:
         generator.setSubSymbol(circle)
         generator.setDataDefinedProperty(_LAYER_ENABLED, QgsProperty.fromExpression('coalesce("radius", 0) > 0'))
         symbol.insertSymbolLayer(0, generator)
+    # Maß: „r = 25 m“ über dem Kreis, mit dem Kreis maßstabsgetreu versetzt
+    if not dimensions:
+        return symbol
+    adjust = _dimension_adjust(f"'{RADIUS_DIMENSION_KEY}'")
+    radius_text = "'r = ' || " + meters_text_expr('coalesce("radius", 0)')
+    for marker in _dimension_markers(_dimension_text(adjust, radius_text), _dimension_size(adjust)):
+        marker.setVerticalAnchorPoint(QgsMarkerSymbolLayer.VerticalAnchorPoint.Bottom)
+        # In Metern: über dem Kreis, mit ihm maßstabsgetreu; von Hand verschoben ebenfalls in Metern
+        marker.setOffsetUnit(Qgis.RenderUnit.MetersInMapUnits)
+        marker.setDataDefinedProperty(
+            QgsSymbolLayer.Property.Offset,
+            QgsProperty.fromExpression(
+                f"to_string(coalesce(map_get({adjust}, 'dx'), 0)) || ',' || "
+                f"to_string(-coalesce(\"radius\", 0) + coalesce(map_get({adjust}, 'dy'), 0))"
+            ),
+        )
+        marker.setDataDefinedProperty(
+            _LAYER_ENABLED, QgsProperty.fromExpression(f'{_MEASURE_ON_EXPR} AND coalesce("radius", 0) > 0')
+        )
+        symbol.appendSymbolLayer(marker)
+    return symbol
+
+
+def _dimension_markers(text_expr: str, size_expr: str) -> list[QgsFontMarkerSymbolLayer]:
+    """Maß als Schrift: zuerst ein weißer Rand, darüber die dunkle Schrift (wie bei den Beschriftungen)."""
+    markers = []
+    for halo in (True, False):
+        marker = QgsFontMarkerSymbolLayer(QFont().family(), "", DIMENSION_SIZE_MM)
+        marker.setSizeUnit(Qgis.RenderUnit.Millimeters)
+        marker.setColor(QColor(255, 255, 255) if halo else QColor(33, 33, 33))
+        marker.setStrokeColor(QColor(255, 255, 255) if halo else QColor(0, 0, 0, 0))
+        marker.setStrokeWidth(0.7 if halo else 0.0)
+        marker.setStrokeWidthUnit(Qgis.RenderUnit.Millimeters)
+        marker.setDataDefinedProperty(QgsSymbolLayer.Property.Character, QgsProperty.fromExpression(text_expr))
+        marker.setDataDefinedProperty(QgsSymbolLayer.Property.Size, QgsProperty.fromExpression(size_expr))
+        markers.append(marker)
+    return markers
+
+
+def _with_segment_dimensions(symbol):
+    """Länge jedes Segments mittig an die Kante schreiben, entlang der Kante und nie auf dem Kopf."""
+    generator = QgsGeometryGeneratorSymbolLayer.create(
+        {"geometryModifier": "segments_to_lines($geometry)", "SymbolType": "Line"}
+    )
+    if generator is None:
+        return symbol
+    generator.setSymbolType(Qgis.SymbolType.Line)
+    # Das gerade gezeichnete Segment: Teil Nr. @geometry_part_num der Segmente
+    segment = "geometry_n(segments_to_lines($geometry), @geometry_part_num)"
+    flipped = f"x(end_point({segment})) < x(start_point({segment}))"
+    adjust = _dimension_adjust("to_string(@geometry_part_num)")
+    text = _dimension_text(adjust, meters_text_expr(metric_length_expr(segment)))
+    markers = _dimension_markers(text, _dimension_size(adjust))
+    for marker in markers:
+        marker.setOffsetUnit(Qgis.RenderUnit.Millimeters)
+        marker.setDataDefinedProperty(
+            QgsSymbolLayer.Property.Angle, QgsProperty.fromExpression(f"if({flipped}, 180, 0)")
+        )
+        # Über der Kante – nach dem Umdrehen liegt „oben“ auf der anderen Seite; dazu der Versatz von Hand,
+        # in der Richtung der Schrift (so wandert er mit, wenn sich die Kante dreht)
+        marker.setDataDefinedProperty(
+            QgsSymbolLayer.Property.Offset,
+            QgsProperty.fromExpression(
+                f"to_string(coalesce(map_get({adjust}, 'dx'), 0)) || ',' || "
+                f"to_string(if({flipped}, {DIMENSION_GAP_MM}, -{DIMENSION_GAP_MM}) "
+                f"+ coalesce(map_get({adjust}, 'dy'), 0))"
+            ),
+        )
+    marker_line = QgsMarkerLineSymbolLayer(True)
+    marker_line.setPlacements(Qgis.MarkerLinePlacement.CentralPoint)
+    marker_line.setSubSymbol(QgsMarkerSymbol(markers))
+    generator.setSubSymbol(QgsLineSymbol([marker_line]))
+    generator.setDataDefinedProperty(_LAYER_ENABLED, QgsProperty.fromExpression(_MEASURE_ON_EXPR))
+    symbol.appendSymbolLayer(generator)
     return symbol
 
 
