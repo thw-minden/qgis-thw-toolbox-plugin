@@ -734,10 +734,12 @@ class SetupDialog(QWizard):
             return False
 
         logger.debug("Dialog completed")
-        # Reihenfolge: erst Hintergrundkarte (OSM), dann Koordinatensystem, zuletzt auf Deutschland zoomen.
-        # Die erste Karte im leeren Projekt würde sonst ihr eigenes System (EPSG:3857) mitbringen.
 
-        # 1. Add the static basemap connections to the QGIS browser
+        # 1. Set the CRS first, so that layers are added directly in the target CRS.
+        #    add_*_to_project() keeps QGIS from replacing it with the CRS of the first added layer.
+        apply_project_crs(self._plugin, self.parentWidget(), self.crs_pg.get_selected_epsg())
+
+        # 2. Add the static basemap connections to the QGIS browser
         for bm in self.base_map_pg.get_qgis_bms():
             if qgis_connection_exists(bm):
                 logger.debug("Base Map %s already added to QGIS", bm.name)
@@ -745,15 +747,12 @@ class SetupDialog(QWizard):
                 logger.debug("Adding Basemap %s as permanent connection", bm.name)
                 install_qgis_connection(bm)
 
-        # 2. Add the basemaps to the project
+        # 3. Add the basemaps to the project
         active_bm = self.base_map_pg.get_active_bm()
         for bm in self.base_map_pg.get_project_bms():
             if exists_in_project(bm):
                 continue
             add_basemap_to_project(bm, visible=bm == active_bm)
-
-        # 3. Set the CRS, so that the additional layers and the zoom use the final project CRS
-        apply_project_crs(self._plugin, self.parentWidget(), self.crs_pg.get_selected_epsg())
 
         # 4. Add the additional layer connections to the QGIS browser
         for map_layer in self.add_layer_pg.get_qgis_layers():
