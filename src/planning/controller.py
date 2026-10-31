@@ -28,6 +28,7 @@ from .catalog import FootprintType, fmt_m, load_catalog
 from .dimension_handles import read_adjustments
 from .dock import PlanningDock
 from .drop_filter import PlanningDropFilter
+from .export import export_mbtiles, export_selection_kmz
 from .geometry import MetricFrame, align_snap, grid_centers, rotated_frame, tent_polygon
 from .hotbar import PlanningHotbar
 from .label_frame import LabelFrame
@@ -205,6 +206,18 @@ class PlanningController(QObject):
         # Rückgängig gilt nur innerhalb eines Projekts
         QgsProject.instance().cleared.connect(self.layers.history.clear)
         QgsProject.instance().readProject.connect(self._clear_history)
+
+    # ------------------------------------------------------------------
+    # Export für Drohnen
+    # ------------------------------------------------------------------
+
+    def export_selection_kmz(self) -> bool:
+        """Ausgewählte Objekte als KMZ – mit eigener Bezeichnung und Gestaltung."""
+        return export_selection_kmz(self, self.iface.mainWindow())
+
+    def export_mbtiles(self) -> bool:
+        """Ganze Objektplanung samt taktischen Zeichen als MBTiles."""
+        return export_mbtiles(self, self.iface.mainWindow())
 
     # ------------------------------------------------------------------
     # Rückgängig / Wiederherstellen

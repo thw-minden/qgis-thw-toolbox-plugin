@@ -431,7 +431,10 @@ class SelectionDetails(QWidget):
         self._delete = QPushButton("Löschen")
         self._delete.setToolTip("Löschen (Entf)")
         self._delete.clicked.connect(lambda: controller.delete_selection())
-        for button in (self._duplicate, self._rotate, self._delete):
+        self._kmz = QPushButton("KMZ …")
+        self._kmz.setToolTip("Auswahl als KMZ für die Drohne speichern – mit Bezeichnung und Farbe")
+        self._kmz.clicked.connect(lambda: controller.export_selection_kmz())
+        for button in (self._duplicate, self._rotate, self._kmz, self._delete):
             row.addWidget(button)
         layout.addLayout(row)
         layout.addStretch()
@@ -546,6 +549,8 @@ class SelectionDetails(QWidget):
 
         self._fill_list(items if single is None else [])
         self._rotate.setEnabled(any(role in FOOTPRINT_ROLES for role, _f in items))
+        # Taktische Zeichen allein lassen sich nicht als KMZ speichern
+        self._kmz.setEnabled(any(role != ROLE_MARKERS for role, _f in items))
 
     def _crs(self, role: str):
         layer = self.controller.layer(role)

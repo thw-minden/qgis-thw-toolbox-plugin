@@ -1695,6 +1695,8 @@ class SelectTool(_PlanningTool):
                     self.controller.toggle_selection_signs,
                 )
             menu.addAction("Duplizieren\tD", self.controller.duplicate_selection)
+            if self.controller.planning_selection():
+                menu.addAction("Als KMZ exportieren (Drohne) …", self.controller.export_selection_kmz)
             menu.addAction("Drehen 90°", lambda: self.controller.rotate_selection(90))
             menu.addAction("Drehen 15°\tR", lambda: self.controller.rotate_selection(15))
             menu.addSeparator()

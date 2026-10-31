@@ -161,6 +161,7 @@ class PlanningDock(QDockWidget):
         layout.addWidget(self._build_lights())
         layout.addWidget(self._build_shapes())
         layout.addWidget(self._build_edit())
+        layout.addWidget(self._build_export())
         layout.addWidget(self._build_summary(), 1)
 
         self._hint = _muted("")
@@ -344,6 +345,21 @@ class PlanningDock(QDockWidget):
                 "Auswahl mit den QGIS-Auswahlwerkzeugen funktioniert auch (Gruppe „Objektplanung“)."
             )
         )
+        return box
+
+    def _build_export(self) -> QGroupBox:
+        box = QGroupBox("Export für Drohnen")
+        layout = QVBoxLayout(box)
+        kmz = QPushButton("Auswahl als KMZ …")
+        kmz.setToolTip("Ausgewählte Objekte mit Bezeichnung und Farbe, z. B. Gebiete als Flugbereiche (DJI Pilot 2)")
+        kmz.clicked.connect(lambda: self.controller.export_selection_kmz())
+        mbtiles = QPushButton("Objektplanung als MBTiles …")
+        mbtiles.setToolTip(
+            "Alle Objekte samt Beschriftungen, Maßen und taktischen Zeichen als Kachel-Ebene (Zoomstufen wählbar)"
+        )
+        mbtiles.clicked.connect(lambda: self.controller.export_mbtiles())
+        layout.addWidget(kmz)
+        layout.addWidget(mbtiles)
         return box
 
     def _build_summary(self) -> QGroupBox:
