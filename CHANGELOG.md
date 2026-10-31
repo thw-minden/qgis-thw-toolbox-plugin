@@ -7,6 +7,8 @@
 - **Gestaltung je Linie, Punkt und Text** in den Details: Farbe, Deckkraft, Linienbreite; Radius-Kreis wie ein Gebiet
 - **Linien** mit Pfeilspitze am Anfang und/oder Ende, Punkte bearbeiten wie bei Gebieten
 - **Hotbar-Icons** zeigen den gewählten Typ (erzeugt mit `scripts/build_planning_icons.py`)
+- **Beschriftungen frei platzieren**: Beschriftung eines ausgewählten Texts, Punkts, einer Linie oder eines Gebiets verschieben, an den Ecken skalieren und daneben drehen (Shift: 15°); Rechtsklick „Beschriftung zurücksetzen“
+- **Objektliste im Dock**: alle Texte, Punkte, Linien und Gebiete; Klick wählt aus und zeigt das Objekt
 
 ### Geändert
 - Gebietstypen: rot, gelb, blau – gefüllt oder ohne Füllung; Pfeiltypen heißen jetzt „Linie …“

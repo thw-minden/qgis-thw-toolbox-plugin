@@ -291,7 +291,34 @@ class PlanningDock(QDockWidget):
                 "Der Name bzw. Text kommt aus der Bezeichnung in den Details."
             )
         )
+        # Alle Texte, Punkte, Linien und Gebiete des Projekts; Klick wählt aus und zeigt das Objekt
+        self._objects = QTreeWidget()
+        self._objects.setHeaderHidden(True)
+        self._objects.setMinimumHeight(120)
+        self._objects.itemClicked.connect(self._on_object_clicked)
+        layout.addWidget(self._objects)
         return box
+
+    def _refresh_objects(self):
+        self._objects.clear()
+        for title, entries in self.controller.annotation_objects():
+            parent = QTreeWidgetItem([f"{title} ({len(entries)})"])
+            font = parent.font(0)
+            font.setBold(True)
+            parent.setFont(0, font)
+            parent.setFlags(parent.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            for role, fid, name in entries:
+                child = QTreeWidgetItem([name])
+                child.setData(0, Qt.ItemDataRole.UserRole, (role, fid))
+                parent.addChild(child)
+            self._objects.addTopLevelItem(parent)
+            parent.setExpanded(True)
+        self._objects.setVisible(self._objects.topLevelItemCount() > 0)
+
+    def _on_object_clicked(self, item, _column):
+        hit = item.data(0, Qt.ItemDataRole.UserRole)
+        if hit:
+            self.controller.select_and_show(*hit)
 
     def _point_row(self, role: str, kind: str, text: str, drag: bool = True) -> QHBoxLayout:
         combo = QComboBox()
@@ -409,6 +436,7 @@ class PlanningDock(QDockWidget):
     # ------------------------------------------------------------------
 
     def refresh_summary(self):
+        self._refresh_objects()
         data = self.controller.summary()
         self._summary.clear()
 

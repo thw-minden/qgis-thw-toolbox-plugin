@@ -37,6 +37,7 @@ from .layers import (
     ROLE_VEHICLES,
     ROLE_ZONES,
 )
+from .label_handles import LabelHandles
 from .selection_overlay import HANDLE_PX, SelectionOverlay
 
 logger = get_logger(__name__)
@@ -792,20 +793,31 @@ class VertexTool(_PlanningTool):
         self._active: int | None = None  # zuletzt angefasster Eckpunkt (Entf löscht ihn)
         self._drag: int | None = None
         self._moved = False
+        # Beschriftung verschieben, skalieren, drehen – auch während der Punktbearbeitung
+        self.labels: LabelHandles | None = None
 
     # -- Lebenszyklus --------------------------------------------------------
 
     def activate(self):
         super().activate()
         self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+        self.labels = LabelHandles(self.canvas, self.controller)
         self.controller.layers.changed.connect(self._reload)
+        self.canvas.mapCanvasRefreshed.connect(self.labels.refresh)
         self._reload()
 
     def deactivate(self):
-        try:
-            self.controller.layers.changed.disconnect(self._reload)
-        except (TypeError, RuntimeError):
-            pass
+        for signal, slot in (
+            (self.controller.layers.changed, self._reload),
+            (self.canvas.mapCanvasRefreshed, self.labels.refresh if self.labels else None),
+        ):
+            try:
+                signal.disconnect(slot)
+            except (TypeError, RuntimeError):
+                pass
+        if self.labels is not None:
+            self.labels.dispose()
+            self.labels = None
         super().deactivate()
 
     def _layer(self):
@@ -836,6 +848,8 @@ class VertexTool(_PlanningTool):
         if self._active is not None and self._active >= len(self._points):
             self._active = None
         self._redraw()
+        if self.labels is not None:
+            self.labels.refresh()
 
     # -- Darstellung ---------------------------------------------------------
 
@@ -916,6 +930,8 @@ class VertexTool(_PlanningTool):
             return
         hit = self._hit(QPoint(event.pos()))
         if hit is None:
+            if self.labels is not None and self.labels.press(event):
+                return
             # Kein Punkt getroffen: das Auswahlwerkzeug übernimmt den Klick – anderes Objekt
             # wählen, abwählen oder im Gebiet ziehen, um es als Ganzes zu verschieben
             self._hand_over(event)
@@ -929,6 +945,8 @@ class VertexTool(_PlanningTool):
         self._redraw()
 
     def canvasMoveEvent(self, event):
+        if self.labels is not None and self.labels.move(event):
+            return
         if self._drag is not None:
             self._points[self._drag] = QgsPointXY(event.mapPoint())
             self._moved = True
@@ -936,7 +954,11 @@ class VertexTool(_PlanningTool):
             self._redraw()
             return
         hit = self._hit(QPoint(event.pos()))
-        if hit is None:
+        label_hit = self.labels.hit(QPointF(event.pos())) if hit is None and self.labels is not None else None
+        if label_hit is not None:
+            self.setCursor(self.labels.cursor_for(label_hit))
+            QToolTip.hideText()
+        elif hit is None:
             self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
             QToolTip.hideText()
         elif hit[0] == "corner":
@@ -947,6 +969,8 @@ class VertexTool(_PlanningTool):
             self._tooltip(event, "Ziehen fügt hier einen Punkt ein")
 
     def canvasReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.labels is not None and self.labels.release(event):
+            return
         if event.button() == Qt.MouseButton.RightButton:
             hit = self._hit(QPoint(event.pos()))
             if hit is not None and hit[0] == "corner":
@@ -963,6 +987,11 @@ class VertexTool(_PlanningTool):
             if self._moved:
                 self._commit()
             self._redraw()
+
+    def canvasDoubleClickEvent(self, event):
+        # Doppelklick auf die Beschriftung: ihren Text in den Details bearbeiten
+        if self.controller.label_at(QgsPointXY(event.mapPoint())) is not None:
+            self.controller.focus_label()
 
     def _hand_over(self, event, release: bool = False):
         """Zurück zum Auswahlwerkzeug und ihm das Mausereignis weiterreichen."""
@@ -1034,7 +1063,8 @@ class SelectTool(_PlanningTool):
         super().__init__(canvas, controller)
         self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
         self.overlay: SelectionOverlay | None = None
-        self._gesture: str | None = None  # move | rotate | marquee
+        self.labels: LabelHandles | None = None
+        self._gesture: str | None = None  # move | rotate | marquee | label
         self._started = False
         self._alt = False
         self._press_pos: QPoint | None = None
@@ -1055,6 +1085,7 @@ class SelectTool(_PlanningTool):
     def activate(self):
         super().activate()
         self.overlay = SelectionOverlay(self.canvas)
+        self.labels = LabelHandles(self.canvas, self.controller)
         self.controller.layers.selection_changed.connect(self._refresh_overlay)
         self.controller.layers.changed.connect(self._refresh_overlay)
         self.canvas.extentsChanged.connect(self._on_extent_changed)
@@ -1077,6 +1108,9 @@ class SelectTool(_PlanningTool):
         if self.overlay is not None:
             self.overlay.dispose()
             self.overlay = None
+        if self.labels is not None:
+            self.labels.dispose()
+            self.labels = None
         super().deactivate()
 
     def _refresh_overlay(self):
@@ -1095,6 +1129,12 @@ class SelectTool(_PlanningTool):
         self.overlay.show_handles = ROLE_MARKERS not in ids and not single_shape and not notes_only
         self.overlay.ghosts = []
         self.overlay.guides = []
+        if self.labels is not None:
+            self.labels.refresh()
+            # Ein einzelner Text: sein Rahmen ist der der Beschriftung (mit Anfassern, mitgedreht)
+            if list(ids) == [ROLE_TEXTS] and self.controller.label_target() is not None:
+                self.overlay.selected = []
+                self.overlay.frame = None
         self.overlay.refresh()
 
     def _on_extent_changed(self):
@@ -1106,6 +1146,8 @@ class SelectTool(_PlanningTool):
         # Rahmen von Texten und Punkten folgt ihrer Beschriftung – deren Lage steht erst nach dem Zeichnen fest
         if any(role in NOTE_ROLES for role in self.controller.selection_ids()):
             self._refresh_overlay()
+        elif self.labels is not None:
+            self.labels.refresh()
 
     # -- Taktische Zeichen ----------------------------------------------------
 
@@ -1141,7 +1183,7 @@ class SelectTool(_PlanningTool):
             if feat is not None:
                 return ROLE_MARKERS, feat
         # Texte (und Beschreibungen der Punkte) greift man an ihrer Beschriftung, nicht nur am Ankerpunkt
-        hit = self.controller.note_at(map_point)
+        hit = self.controller.label_at(map_point)
         if hit is not None:
             return hit
         tol = self._pixel_tolerance()
@@ -1260,6 +1302,10 @@ class SelectTool(_PlanningTool):
         if markers is not None and not shift and markers.frame_hit(QPointF(event.pos())) is not None:
             self._delegate_press(markers, event)
             return
+        # Beschriftung des einzeln ausgewählten Objekts: Verschieben, Skalieren, Drehen
+        if not shift and self.labels is not None and self.labels.press(event):
+            self._gesture = "label"
+            return
 
         frame_hit = None if shift else self._frame_hit(QPointF(event.pos()))
         if frame_hit == "rotate":
@@ -1305,6 +1351,9 @@ class SelectTool(_PlanningTool):
                 self.controller.plugin.duplicate_markers([moving.id()])
             tool.canvasMoveEvent(event)
             return
+        if self._gesture == "label":
+            self.labels.move(event)
+            return
         pos = QPoint(event.pos())
         map_point = QgsPointXY(event.mapPoint())
         mods = event.modifiers()
@@ -1338,6 +1387,14 @@ class SelectTool(_PlanningTool):
         marker_hit = markers.frame_hit(QPointF(pos)) if markers is not None else None
         if marker_hit is not None:
             self.setCursor(QCursor(markers.cursor_for(marker_hit)))
+            if self.overlay.hovers:
+                self.overlay.hovers = []
+                self.overlay.refresh()
+            return
+
+        label_hit = self.labels.hit(QPointF(pos)) if self.labels is not None else None
+        if label_hit is not None:
+            self.setCursor(self.labels.cursor_for(label_hit))
             if self.overlay.hovers:
                 self.overlay.hovers = []
                 self.overlay.refresh()
@@ -1449,6 +1506,11 @@ class SelectTool(_PlanningTool):
         self._show_ghosts(rotated, frame_m, badge)
 
     def canvasReleaseEvent(self, event):
+        if self._gesture == "label":
+            if event.button() == Qt.MouseButton.LeftButton:
+                self.labels.release(event)
+                self._end_gesture()
+            return
         if self._gesture == "marker":
             if event.button() == Qt.MouseButton.LeftButton:
                 tool, self._marker_gesture, self._gesture = self._marker_gesture, None, None
@@ -1477,6 +1539,14 @@ class SelectTool(_PlanningTool):
         self._end_gesture()
 
     def canvasDoubleClickEvent(self, event):
+        # Doppelklick auf eine Beschriftung: deren Text bearbeiten (auch bei Gebieten und Linien)
+        label = self.controller.label_at(QgsPointXY(event.mapPoint()))
+        if label is not None:
+            self._end_gesture()
+            if label[1].id() not in self.controller.selection_ids().get(label[0], set()):
+                self.controller.select([(label[0], label[1].id())])
+            self.controller.focus_label()
+            return
         hit = self._find(QgsPointXY(event.mapPoint()))
         if hit is None:
             return
@@ -1518,6 +1588,8 @@ class SelectTool(_PlanningTool):
             if self.controller.editable_shape() is not None:
                 menu.addAction("Punkte bearbeiten\tDoppelklick", self.controller.edit_vertices)
             menu.addAction("Bezeichnung bearbeiten …\tEnter", self.controller.focus_label)
+            if self.controller.selection_labels_placed():
+                menu.addAction("Beschriftung zurücksetzen", self.controller.reset_selection_label_placement)
             # Texte bestehen nur aus ihrer Beschriftung – ausblenden ergäbe nichts Sichtbares mehr
             if set(self.controller.selection_ids()) != {ROLE_TEXTS}:
                 labels_shown = all(self.controller.selection_labels_visible())
@@ -1578,7 +1650,10 @@ class SelectTool(_PlanningTool):
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and has_selection:
             self.controller.focus_label()
         elif key == Qt.Key.Key_Escape:
-            if self._gesture:
+            if self._gesture == "label":
+                self.labels.cancel()
+                self._end_gesture()
+            elif self._gesture:
                 self._end_gesture()
             elif has_selection or single_marker:
                 self.controller.clear_selection()

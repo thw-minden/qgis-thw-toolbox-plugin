@@ -91,6 +91,33 @@ _SIZE_PROPERTY = _SIZE if isinstance(_SIZE, int) else _SIZE.value
 _COLOR = getattr(QgsPalLayerSettings, "Property", QgsPalLayerSettings).Color
 _COLOR_PROPERTY = _COLOR if isinstance(_COLOR, int) else _COLOR.value
 
+
+def _label_property(name: str):
+    """Schlüssel einer datendefinierten Beschriftungs-Eigenschaft als int (unter PyQt6 ist das Enum keiner)."""
+    prop = getattr(getattr(QgsPalLayerSettings, "Property", QgsPalLayerSettings), name)
+    return prop if isinstance(prop, int) else prop.value
+
+
+# Beschriftung je Objekt frei platziert (Texte, Punkte, Linien, Gebiete): Versatz der Mitte zum Ankerpunkt
+# in Layer-Einheiten und Drehung in Grad im Uhrzeigersinn; leer = Platzierung wie gewohnt
+LABEL_DX_FIELD = "beschriftung_dx"
+LABEL_DY_FIELD = "beschriftung_dy"
+LABEL_ANGLE_FIELD = "beschriftung_winkel"
+LABEL_EDIT_ROLES = (ROLE_TEXTS, ROLE_POINTS, ROLE_ARROWS, ROLE_ZONES)
+_POSITION_PROPERTY = _label_property("PositionPoint")
+_ROTATION_PROPERTY = _label_property("LabelRotation")
+_HALI_PROPERTY = _label_property("Hali")
+_VALI_PROPERTY = _label_property("Vali")
+
+
+def label_anchor_expr(role: str) -> str:
+    """Ankerpunkt der Beschriftung als Ausdruck – muss zu ``controller.label_anchor`` passen."""
+    if role == ROLE_ZONES:
+        return "centroid($geometry)"
+    if role == ROLE_ARROWS:
+        return "line_interpolate_point($geometry, length($geometry) / 2)"
+    return "$geometry"
+
 # Taktisches Zeichen je Objekt ein/aus (leer = an); nur die Layer, deren Objekte eins tragen, haben das Feld
 SIGN_FIELD = "zeichen"
 SIGN_ROLES = (ROLE_VEHICLES, ROLE_GENERATORS, ROLE_LIGHTS)
@@ -290,6 +317,9 @@ def build_fields(role: str) -> QgsFields:
         fields.append(QgsField(SIGN_FIELD, _T_BOOL))
     if role in STYLE_ROLES:
         fields.append(QgsField(STYLE_FIELD, _T_STRING))
+    if role in LABEL_EDIT_ROLES:
+        for name in (LABEL_DX_FIELD, LABEL_DY_FIELD, LABEL_ANGLE_FIELD):
+            fields.append(QgsField(name, _T_DOUBLE))
     return fields
 
 
@@ -404,6 +434,7 @@ class PlanningLayers(QObject):
             if role in _LAYER_SPECS and self.layer(role) is None and isinstance(lyr, QgsVectorLayer):
                 lyr.setCustomProperty(ROLE_PROPERTY, role)
                 _ensure_label_switch(lyr)
+                _ensure_label_transform(lyr, role)
                 self._ensure_sign_switch(lyr, role)
                 self._ensure_style(lyr, role)
                 self._layers[role] = lyr
@@ -452,6 +483,7 @@ class PlanningLayers(QObject):
         lyr.setCustomProperty(ROLE_PROPERTY, role)
         self.apply_style(lyr, role)
         _ensure_label_switch(lyr)
+        _ensure_label_transform(lyr, role)
         self._ensure_sign_switch(lyr, role)
         self._ensure_style(lyr, role)
 
@@ -1297,4 +1329,39 @@ def _ensure_label_switch(lyr: QgsVectorLayer) -> None:
     if properties.isActive(_SHOW_PROPERTY) and properties.isActive(_SIZE_PROPERTY):
         return
     _set_label_switch(settings)
+    lyr.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+
+
+def _ensure_label_transform(lyr: QgsVectorLayer, role: str) -> None:
+    """Beschriftung frei platzierbar machen: Felder für Versatz und Drehung, Position und Drehung daran knüpfen.
+
+    Ohne Versatz bleibt die gewohnte Platzierung (um den Punkt, entlang der Linie, in der Fläche).
+    Texte sind ihre Beschriftung: sie werden als Ganzes verschoben, hier zählt nur die Drehung.
+    """
+    if role not in LABEL_EDIT_ROLES:
+        return
+    if not all(_ensure_field(lyr, name, _T_DOUBLE) for name in (LABEL_DX_FIELD, LABEL_DY_FIELD, LABEL_ANGLE_FIELD)):
+        return
+    labeling = lyr.labeling()
+    if not isinstance(labeling, QgsVectorLayerSimpleLabeling):
+        return
+    settings = labeling.settings()
+    properties = settings.dataDefinedProperties()
+    if properties.isActive(_ROTATION_PROPERTY) and (role == ROLE_TEXTS or properties.isActive(_POSITION_PROPERTY)):
+        return
+    properties.setProperty(_ROTATION_PROPERTY, QgsProperty.fromExpression(f'"{LABEL_ANGLE_FIELD}"'))
+    if role != ROLE_TEXTS:
+        anchor = label_anchor_expr(role)
+        dx, dy = f'"{LABEL_DX_FIELD}"', f'"{LABEL_DY_FIELD}"'
+        properties.setProperty(
+            _POSITION_PROPERTY,
+            QgsProperty.fromExpression(
+                f"if({dx} IS NULL AND {dy} IS NULL, NULL, "
+                f"make_point(x({anchor}) + coalesce({dx}, 0), y({anchor}) + coalesce({dy}, 0)))"
+            ),
+        )
+        # Die Position ist die Mitte der Beschriftung
+        properties.setProperty(_HALI_PROPERTY, QgsProperty.fromValue("Center"))
+        properties.setProperty(_VALI_PROPERTY, QgsProperty.fromValue("Half"))
+    settings.setDataDefinedProperties(properties)
     lyr.setLabeling(QgsVectorLayerSimpleLabeling(settings))

@@ -27,10 +27,15 @@ from .dock import PlanningDock
 from .drop_filter import PlanningDropFilter
 from .geometry import MetricFrame, align_snap, grid_centers, rotated_frame, tent_polygon
 from .hotbar import PlanningHotbar
+from .label_frame import LabelFrame
 from .layers import (
     ALL_ROLES,
     FOOTPRINT_ROLES,
     LABEL_FIELD,
+    LABEL_ANGLE_FIELD,
+    LABEL_DX_FIELD,
+    LABEL_DY_FIELD,
+    LABEL_EDIT_ROLES,
     LABEL_SIZE_FIELD,
     NOTE_ROLES,
     OBJECT_STYLE_ROLES,
@@ -110,6 +115,16 @@ NOTE_TOOL_ROLES = {TOOL_POINT: ROLE_POINTS, TOOL_TEXT: ROLE_TEXTS}
 TYPE_TOOL_ROLES = {**POINT_TOOL_ROLES, TOOL_ZONE: ROLE_ZONES, TOOL_ARROW: ROLE_ARROWS, **NOTE_TOOL_ROLES}
 # Umriss eines Punkts bzw. eines Texts ohne gezeichnete Beschriftung (Pixel)
 _NOTE_OUTLINE_PX = 6
+
+
+def _float_or_none(value) -> float | None:
+    """Zahl aus einem Attribut; NULL (None bzw. QVariant-NULL unter QGIS 3) ergibt None."""
+    if value is None or (hasattr(value, "isNull") and value.isNull()):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class PlanningController(QObject):
@@ -1345,10 +1360,10 @@ class PlanningController(QObject):
         QTimer.singleShot(0, self.focus_label)
         return True
 
-    def _note_labels(self, positions) -> list[tuple[str, int, QgsGeometry]]:
-        """Beschriftungen von Punkten und Texten als (Rolle, Feature-ID, Umriss im Canvas-CRS)."""
+    def _note_labels(self, positions, roles_wanted=NOTE_ROLES) -> list[tuple[str, int, QgsGeometry]]:
+        """Beschriftungen der Rollen ``roles_wanted`` als (Rolle, Feature-ID, Umriss im Canvas-CRS)."""
         roles = {}
-        for role in NOTE_ROLES:
+        for role in roles_wanted:
             layer = self.layers.layer(role)
             if layer is not None:
                 roles[layer.id()] = role
@@ -1363,12 +1378,12 @@ class PlanningController(QObject):
             result.append((role, pos.featureId, QgsGeometry(geom)))
         return result
 
-    def note_at(self, map_point: QgsPointXY) -> tuple[str, QgsFeature] | None:
-        """Punkt bzw. Text, dessen Beschriftung unter ``map_point`` (Canvas-CRS) liegt."""
+    def label_at(self, map_point: QgsPointXY) -> tuple[str, QgsFeature] | None:
+        """Text, Punkt, Linie oder Gebiet, dessen Beschriftung unter ``map_point`` (Canvas-CRS) liegt."""
         results = self.canvas.labelingResults()
         if results is None:
             return None
-        for role, fid, _geom in self._note_labels(results.labelsAtPosition(map_point)):
+        for role, fid, _geom in self._note_labels(results.labelsAtPosition(map_point), LABEL_EDIT_ROLES):
             feat = self.layers.layer(role).getFeature(fid)
             if feat.isValid():
                 return role, feat
@@ -1396,6 +1411,119 @@ class PlanningController(QObject):
                     box.combineExtentWith(label_box)
                     break
         return QgsGeometry.fromRect(box)
+
+    # ------------------------------------------------------------------
+    # Beschriftung frei platzieren (Texte, Punkte, Linien, Gebiete)
+    # ------------------------------------------------------------------
+
+    def label_target(self) -> tuple[str, QgsFeature] | None:
+        """Das einzeln ausgewählte Objekt, dessen Beschriftung sich verschieben, skalieren und drehen lässt."""
+        selected = self.selection()
+        if len(selected) != 1:
+            return None
+        role, feature = selected[0]
+        if role not in LABEL_EDIT_ROLES or not (feature.attribute("bezeichnung") or "").strip():
+            return None
+        if role != ROLE_TEXTS and not label_visible(role, feature):
+            return None
+        return role, feature
+
+    def label_frame(self, role: str, feature) -> LabelFrame | None:
+        """Gezeichnete Beschriftung als gedrehter Rahmen im Canvas-CRS; None, wenn sie nicht zu sehen ist."""
+        results = self.canvas.labelingResults()
+        if results is None:
+            return None
+        for hit_role, fid, geom in self._note_labels(results.labelsWithinRect(self.canvas.extent()), (role,)):
+            if hit_role != role or fid != feature.id():
+                continue
+            angle = _float_or_none(feature.attribute(LABEL_ANGLE_FIELD))
+            return LabelFrame.from_geometry(geom, angle, label_size(feature))
+        return None
+
+    def label_anchor(self, role: str, feature) -> QgsPointXY:
+        """Ankerpunkt der Beschriftung im Layer-CRS – wie ``layers.label_anchor_expr``."""
+        geom = feature.geometry()
+        if role == ROLE_ZONES:
+            return geom.centroid().asPoint()
+        if role == ROLE_ARROWS:
+            return geom.interpolate(geom.length() / 2.0).asPoint()
+        return geom.asPoint()
+
+    def set_label_placement(self, role: str, fid: int, center: QgsPointXY, angle: float, size_pt: float):
+        """Beschriftung mit ihrer Mitte an ``center`` (Canvas-CRS) legen, gedreht um ``angle`` Grad im Uhrzeigersinn.
+
+        Gespeichert wird der Versatz zum Ankerpunkt – verschiebt man das Objekt, wandert die Beschriftung mit.
+        Ein Text ist seine Beschriftung: er selbst wird verschoben.
+        """
+        layer = self.layers.layer(role)
+        feature = layer.getFeature(fid) if layer is not None else None
+        if feature is None or not feature.isValid() or not feature.hasGeometry():
+            return
+        point = QgsCoordinateTransform(
+            self.canvas.mapSettings().destinationCrs(), layer.crs(), QgsProject.instance()
+        ).transform(center)
+        angle = (angle + 180.0) % 360.0 - 180.0
+        attrs = {
+            LABEL_ANGLE_FIELD: round(angle, 1) if abs(angle) >= 0.05 else None,
+            LABEL_SIZE_FIELD: round(size_pt, 1),
+        }
+        if role == ROLE_TEXTS:
+            self.layers.change_features(role, {fid: QgsGeometry.fromPointXY(point)}, {fid: attrs})
+            return
+        anchor = self.label_anchor(role, feature)
+        attrs[LABEL_DX_FIELD] = point.x() - anchor.x()
+        attrs[LABEL_DY_FIELD] = point.y() - anchor.y()
+        self.layers.change_features(role, {}, {fid: attrs})
+
+    def annotation_objects(self) -> list[tuple[str, list[tuple[str, int, str]]]]:
+        """Texte, Punkte, Linien und Gebiete fürs Dock: je Art (Titel, [(Rolle, Feature-ID, Name)]), ohne leere."""
+        result = []
+        kinds = ((ROLE_TEXTS, "Texte"), (ROLE_POINTS, "Punkte"), (ROLE_ARROWS, "Linien"), (ROLE_ZONES, "Gebiete"))
+        for role, title in kinds:
+            layer = self.layers.layer(role)
+            if layer is None:
+                continue
+            entries = []
+            for f in layer.getFeatures():
+                # Mehrzeilige Texte: die erste Zeile; ohne Bezeichnung der Typ
+                lines = (f.attribute("bezeichnung") or "").strip().splitlines()
+                entries.append((role, f.id(), lines[0] if lines else (f.attribute("typ") or title)))
+            if entries:
+                result.append((title, sorted(entries, key=lambda e: e[2].lower())))
+        return result
+
+    def select_and_show(self, role: str, fid: int):
+        """Objekt auswählen und die Karte darauf mitten (Maßstab bleibt)."""
+        layer = self.layers.layer(role)
+        feature = layer.getFeature(fid) if layer is not None else None
+        if feature is None or not feature.isValid() or not feature.hasGeometry():
+            return
+        self.back_to_select()
+        self.select([(role, fid)])
+        center = QgsGeometry(feature.geometry())
+        center.transform(
+            QgsCoordinateTransform(layer.crs(), self.canvas.mapSettings().destinationCrs(), QgsProject.instance())
+        )
+        self.canvas.setCenter(center.centroid().asPoint())
+        self.canvas.refresh()
+
+    def selection_labels_placed(self) -> bool:
+        """Hat ein ausgewähltes Objekt eine von Hand verschobene oder gedrehte Beschriftung?"""
+        fields = (LABEL_DX_FIELD, LABEL_DY_FIELD, LABEL_ANGLE_FIELD)
+        return any(
+            _float_or_none(f.attribute(name)) is not None
+            for role, f in self.selection()
+            if role in LABEL_EDIT_ROLES
+            for name in fields
+            if f.fields().indexFromName(name) >= 0
+        )
+
+    def reset_selection_label_placement(self):
+        """Beschriftung der Auswahl wieder an ihren gewohnten Platz, ungedreht."""
+        cleared = {LABEL_DX_FIELD: None, LABEL_DY_FIELD: None, LABEL_ANGLE_FIELD: None}
+        for role, fids in self.selection_ids().items():
+            if role in LABEL_EDIT_ROLES:
+                self.layers.change_features(role, {}, {fid: dict(cleared) for fid in fids})
 
     # ------------------------------------------------------------------
     # Gebiete und Pfeile
