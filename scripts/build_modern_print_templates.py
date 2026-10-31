@@ -274,7 +274,7 @@ class Builder:
         """Nordpfeil der THW-Vorlage, oben rechts in der Karte; zeigt nach Geographisch Nord."""
         s = self.s
         w, h = 5.5 * s, 7.2 * s
-        arrow = self.picture("Nordpfeil.svg", map_right - w - 2 * s, map_top + 2 * s, w, h, "Nordpfeil")
+        arrow = self.picture("North.svg", map_right - w - 2 * s, map_top + 2 * s, w, h, "Nordpfeil")
         arrow.setBackgroundEnabled(True)
         arrow.setBackgroundColor(QColor(255, 255, 255, 215))
         arrow.setLinkedMap(main_map)

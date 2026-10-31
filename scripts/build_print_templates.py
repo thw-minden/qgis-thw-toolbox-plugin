@@ -7,7 +7,7 @@ Aufruf mit dem Python der QGIS-Installation aus dem Plugin-Ordner:
 Auf dem Blatt steht nur, was zum Lesen der Karte nötig ist:
 
 - Titelleiste: Bundeslogo, Kartentitel mit Einsatz/Ort, rechts das taktische Zeichen
-  des Trupps UL (abschaltbar)
+  des Trupps UL (im Dialog gegen das des Zugtrupps tauschbar oder abschaltbar)
 - Karte: Gitter mit Randbeschriftung, Nordpfeil oben rechts, Maßstab unten links
   in der Karte wie in den THW-Vorlagen, beide auf durchscheinendem Grund
 - Seitenleiste: Zeichenerklärung, Übersicht, Stand, Gitter, Herausgeber, Quellen
@@ -354,7 +354,7 @@ class Builder:
         """Nordpfeil der THW-Vorlage, oben rechts in der Karte; zeigt nach Geographisch Nord."""
         s = self.s
         w, h = 5.5 * s, 7.2 * s
-        arrow = self.picture("Nordpfeil.svg", map_right - w - 2 * s, map_top + 2 * s, w, h, "Nordpfeil")
+        arrow = self.picture("North.svg", map_right - w - 2 * s, map_top + 2 * s, w, h, "Nordpfeil")
         arrow.setBackgroundEnabled(True)
         arrow.setBackgroundColor(BACKDROP)
         arrow.setLinkedMap(main_map)
@@ -430,7 +430,7 @@ class Builder:
         self.label(f"[% {TITLE} %]", title_x, y - 0.2 * s, title_w, 7.5 * s, 16, bold=True, item_id="Titel")
         self.label(f"[% {SUBTITLE} %]", title_x, y + 7.8 * s, title_w, 4.5 * s, 8.5, item_id="Untertitel")
 
-        # Rechts oben, als Gegenstück zum Logo: taktisches Zeichen der Einheit, im Dialog abschaltbar
+        # Rechts oben, als Gegenstück zum Logo: taktisches Zeichen der Einheit, im Dialog austauschbar
         sign_h = 12.5 * s
         sign_w = sign_h * UNIT_SIGN_ASPECT
         self.picture(UNIT_SIGN, side_x + side_w - sign_w, logo_y, sign_w, sign_h, "Taktisches Zeichen Einheit")

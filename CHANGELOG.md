@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Hinzugefügt
+- **Setup-Assistent**: Die letzte Seite fragt die Angaben für die Druckvorlagen ab (Einsatz, Einsatzort, Ortsverband, Einheit, Kürzel, Bearbeiter) und teilt sie mit dem Druckvorlagen-Dialog
+- **Maßstab der Hauptkarte wählbar** im Druckvorlagen-Dialog: automatisch, Empfehlung je Papierformat oder eigener Wert
+- **Zeichen der Einheit** oben rechts in den Toolbox-Vorlagen wählbar: Unbemannte Luftfahrtsysteme, Zugtrupp oder keins
 - **Texte und Punkte** in der Hotbar (Reihenfolge: Text, Punkt, Linie, Gebiet); Punkte optional mit Radius-Kreis
 - **Gestaltung je Linie, Punkt und Text** in den Details: Farbe, Deckkraft, Linienbreite; Radius-Kreis wie ein Gebiet
 - **Linien** mit Pfeilspitze am Anfang und/oder Ende, Punkte bearbeiten wie bei Gebieten
@@ -18,10 +21,15 @@
 - **Adress-Suche** springt bei UTMREF bzw. Breite/Länge direkt zur Koordinate und markiert sie mit Fadenkreuz und pulsierendem Ring
 
 ### Geändert
+- **Nordpfeil** aller Druckvorlagen kontrastreicher, mit „N“ an der Spitze
+- Vorlagen der THW-Leitung und eigene Vorlagen öffnen auf der Mitte des Kartenfensters; der rote Rahmen der Übersichtskarten liegt über der Hintergrundkarte
 - MBTiles-Zoomstufen-Dialog breit genug für Titel und Hinweis
 - Gebietstypen: rot, gelb, blau – gefüllt oder ohne Füllung; Pfeiltypen heißen jetzt „Linie …“
 - Gebiete ohne Bezeichnung tragen keine Beschriftung mehr
 - Schriftgröße in den Details kompakter
+
+### Entfernt
+- Toolbar-Aktion „MGRS-Gitter temporär hinzufügen“ samt Gitter-Layer; UTMREF-Gitter gibt es weiterhin in den Druckvorlagen
 
 ## [2.2.2]
 

@@ -4,12 +4,7 @@ Alles hier ist reiner Ausdruckstext, ohne eigene Ausdrucksfunktionen des Plugins
 Projekt seine Koordinaten und Maße auch auf einem Rechner ohne THW Toolbox.
 """
 
-# Buchstaben des Meldegitters wie in ``layout.mgrs_grid`` (von dort nicht importierbar: das zieht über die
-# Legende die Objektplanungs-Layer nach, die diese Ausdrücke selbst brauchen)
-BAND_LETTERS = "CDEFGHJKLMNPQRSTUVWX"
-COL_SETS = ("ABCDEFGH", "JKLMNPQR", "STUVWXYZ")
-ROW_ODD = "ABCDEFGHJKLMNPQRSTUV"
-ROW_EVEN = "FGHJKLMNPQRSTUVABCDE"
+from ..layout.mgrs_grid import BAND_LETTERS, COL_SETS, ROW_EVEN, ROW_ODD
 
 # In Beschreibungen von Punkten und in Texten: wird auf der Karte durch die UTMREF-Koordinate ersetzt
 POSITION_PLACEHOLDER = "$POS"

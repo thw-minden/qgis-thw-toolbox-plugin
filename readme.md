@@ -210,7 +210,6 @@ Danke an **Steven Recktenwald** als Ideengeber für das Feature „Leitungsrolle
 |-----------|--------|--------|
 | Taktische Zeichen | CC BY 4.0 | [jonas-koeritz/Taktische-Zeichen](https://github.com/jonas-koeritz/Taktische-Zeichen) |
 | Google Roboto Font | Apache 2.0 | [Google Fonts](https://fonts.google.com/specimen/Roboto) |
-| Nordpfeil | wie QGIS | QGIS-SVG-Sammlung (`arrows/NorthArrow_04.svg`) |
 | THW-Logo | gemeinfrei (amtliches Werk, § 5 UrhG); Verwendung als Kennzeichen eingeschränkt | [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:THW.svg) |
 | Bundesadler mit THW-Schriftzug | Hoheitszeichen; Verwendung nur durch berechtigte Stellen | `templates/assets/logo.svg` |
 

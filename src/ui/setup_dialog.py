@@ -10,11 +10,15 @@ from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
     QCheckBox,
+    QCompleter,
     QDialog,
+    QFormLayout,
     QFrame,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QPushButton,
     QRadioButton,
     QScrollArea,
@@ -28,6 +32,7 @@ from qgis.PyQt.QtWidgets import (
 )
 from qgis.utils import iface
 
+from ..layout.print_template import PrintInfo, ortsverband_names
 from ..logging_utils import get_logger
 from ..tools.layer_setup import (
     MapLayer,
@@ -669,6 +674,8 @@ class FinalSetupPage(QWizardPage):
         self.layout = QVBoxLayout(self)
         self.layout.setSpacing(12)
 
+        self.layout.addWidget(self._build_print_info_box())
+
         # Collapsable Group Box for advanced options
         self._advanced_box = QgsCollapsibleGroupBox(self)
         self._advanced_box.setTitle("Erweiterte Optionen für Profis")
@@ -680,6 +687,59 @@ class FinalSetupPage(QWizardPage):
 
         self.layout.addWidget(self._advanced_box)
         self.layout.addStretch(1)
+
+    def _build_print_info_box(self) -> QGroupBox:
+        """Angaben für den Kartenrand der Druckvorlagen (wie im Druckvorlagen-Dialog)."""
+        box = QGroupBox("Angaben für Druckvorlagen")
+        form = QFormLayout(box)
+
+        hint = QLabel(
+            "Erscheinen im Kartenrand der Druckvorlagen und lassen sich dort jederzeit ändern. "
+            "Einsatz und Einsatzort werden im Projekt gespeichert, die übrigen Angaben für alle Projekte gemerkt."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: gray;")
+        form.addRow(hint)
+
+        info = PrintInfo.load(einsatz_from_title=False)
+
+        self._einsatz_edit = QLineEdit(info.einsatz)
+        form.addRow("Einsatzname:", self._einsatz_edit)
+
+        self._einsatzort_edit = QLineEdit(info.einsatzort)
+        form.addRow("Einsatzort:", self._einsatzort_edit)
+
+        self._ov_edit = QLineEdit(info.ortsverband)
+        self._ov_edit.setPlaceholderText("Name eingeben, z. B. Aachen")
+        plugin_dir = getattr(self._plugin, "plugin_dir", None)
+        if plugin_dir:
+            completer = QCompleter(ortsverband_names(plugin_dir), self._ov_edit)
+            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchFlag.MatchContains)
+            self._ov_edit.setCompleter(completer)
+        form.addRow("Ortsverband:", self._ov_edit)
+
+        self._einheit_edit = QLineEdit(info.einheit)
+        form.addRow("Einheit:", self._einheit_edit)
+
+        self._einheit_kurz_edit = QLineEdit(info.einheit_kurz)
+        self._einheit_kurz_edit.setToolTip("Kurzform für den Bildnachweis, z. B. „TrUL“")
+        form.addRow("Einheit (Kürzel):", self._einheit_kurz_edit)
+
+        self._bearbeiter_edit = QLineEdit(info.bearbeiter)
+        form.addRow("Bearbeiter:", self._bearbeiter_edit)
+        return box
+
+    def save_print_info(self) -> None:
+        """Übernimmt die Angaben in die Benutzereinstellungen bzw. das Projekt."""
+        info = PrintInfo.load(einsatz_from_title=False)
+        info.einsatz = self._einsatz_edit.text().strip()
+        info.einsatzort = self._einsatzort_edit.text().strip()
+        info.ortsverband = self._ov_edit.text().strip()
+        info.einheit = self._einheit_edit.text().strip()
+        info.einheit_kurz = self._einheit_kurz_edit.text().strip()
+        info.bearbeiter = self._bearbeiter_edit.text().strip()
+        info.save()
 
 
 # ---------------------------------------------------------------------------
@@ -734,6 +794,9 @@ class SetupDialog(QWizard):
             return False
 
         logger.debug("Dialog completed")
+
+        # 0. Angaben für die Druckvorlagen merken
+        self.final_setup_pg.save_print_info()
 
         # 1. Set the CRS first, so that layers are added directly in the target CRS.
         #    add_*_to_project() keeps QGIS from replacing it with the CRS of the first added layer.

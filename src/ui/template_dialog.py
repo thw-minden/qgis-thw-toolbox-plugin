@@ -1,6 +1,7 @@
 """Dialog zum Auswählen und Öffnen von Druckvorlagen (.qpt), mitgelieferten wie eigenen."""
 
 import os
+import re
 
 from qgis.core import QgsProject, QgsSettings
 from qgis.PyQt.QtCore import Qt, QTimer
@@ -12,6 +13,7 @@ from qgis.PyQt.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -20,18 +22,24 @@ from qgis.PyQt.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
+    QWidget,
 )
 from qgis.utils import iface
 
 from ..layout.legend import in_legend, legend_candidates, set_in_legend
 from ..layout.print_template import (
+    EINHEIT_ZEICHEN,
+    EMPFOHLENE_MASSSTAEBE,
     GITTER_NAMEN,
     KARTENTITEL_VORSCHLAEGE,
+    MASSSTAB_VORSCHLAEGE,
     PrintInfo,
     TemplateEntry,
+    TemplateInfo,
     add_user_template,
     bundeslogo_items,
     is_logo_confirmed,
@@ -39,11 +47,16 @@ from ..layout.print_template import (
     load_print_template,
     ortsverband_names,
     set_logo_confirmed,
+    template_info,
     user_template_path,
 )
 from .theme import muted_style
 
 _LAST_DIR_KEY = "THWToolbox/print/template_import_dir"
+# Zuletzt gewählter Maßstab: automatisch, die Empfehlung des Papierformats oder ein fester Wert
+_SCALE_KEY = "THWToolbox/print/massstab"
+_SCALE_AUTO = 0
+_SCALE_RECOMMENDED = -1
 
 
 class TemplateDialog(QDialog):
@@ -73,13 +86,26 @@ class TemplateDialog(QDialog):
         layout.addWidget(hint)
 
         info = PrintInfo.load()
+        self._template_info = TemplateInfo()
         left = QVBoxLayout()
         left.addWidget(self._build_template_box(), 3)
         left.addWidget(self._build_legend_box(info), 2)
         columns = QHBoxLayout()
         columns.addLayout(left, 1)
-        columns.addWidget(self._build_info_box(info), 1)
-        layout.addLayout(columns, 1)
+        right = QVBoxLayout()
+        right.addWidget(self._build_info_box(info))
+        right.addWidget(self._build_scale_box())
+        right.addStretch(1)
+        columns.addLayout(right, 1)
+        # In einer Scrollfläche: Ist das Fenster zu niedrig (kleiner Bildschirm, große Schrift), wird gescrollt,
+        # statt die Abschnitte zusammenzuquetschen – sonst lägen die Knöpfe über der Vorlagenliste
+        content = QWidget()
+        content.setLayout(columns)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
 
         btn_row = QHBoxLayout()
         self._open_btn = QPushButton("Im Designer öffnen")
@@ -104,7 +130,7 @@ class TemplateDialog(QDialog):
         self._tree.setRootIsDecorated(False)
         self._tree.setMinimumHeight(240)  # alle mitgelieferten Vorlagen ohne Scrollen
         self._tree.itemDoubleClicked.connect(lambda *_: self._open_selected())
-        self._tree.currentItemChanged.connect(lambda *_: self._update_buttons())
+        self._tree.currentItemChanged.connect(lambda *_: self._on_template_changed())
         vbox.addWidget(self._tree, 1)
 
         row = QHBoxLayout()
@@ -170,10 +196,15 @@ class TemplateDialog(QDialog):
         self._einheit_kurz_edit.setToolTip("Kurzform für den Bildnachweis, z. B. „TrUL“")
         form.addRow("Einheit (Kürzel):", self._einheit_kurz_edit)
 
-        self._zeichen_check = QCheckBox("Taktisches Zeichen Trupp UL oben rechts zeigen")
-        self._zeichen_check.setChecked(info.einheit_zeichen)
-        self._zeichen_check.setToolTip("In den Vorlagen der THW Toolbox: zeigt, dass die Karte vom Trupp UL stammt")
-        form.addRow("", self._zeichen_check)
+        self._zeichen_combo = QComboBox()
+        for key, (name, _) in EINHEIT_ZEICHEN.items():
+            self._zeichen_combo.addItem(name, key)
+        self._zeichen_combo.setCurrentIndex(self._zeichen_combo.findData(info.einheit_zeichen))
+        self._zeichen_combo.setToolTip(
+            "Taktisches Zeichen oben rechts in den Vorlagen der THW Toolbox: zeigt, von welcher Einheit die Karte "
+            "stammt. Die Vorlagen der THW-Leitung haben keinen Platz dafür."
+        )
+        form.addRow("Taktisches Zeichen:", self._zeichen_combo)
 
         self._bearbeiter_edit = QLineEdit(info.bearbeiter)
         form.addRow("Bearbeiter:", self._bearbeiter_edit)
@@ -209,12 +240,35 @@ class TemplateDialog(QDialog):
 
         return box
 
+    def _build_scale_box(self) -> QGroupBox:
+        box = QGroupBox("Maßstab der Hauptkarte")
+        vbox = QVBoxLayout(box)
+
+        self._scale_combo = QComboBox()
+        self._scale_combo.setEditable(True)
+        self._scale_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._scale_combo.setToolTip(
+            "Automatisch: Vorlagen der THW Toolbox übernehmen den Ausschnitt des Kartenfensters, alle übrigen "
+            "behalten den Maßstab der Vorlage.\nEmpfohlen je Papierformat (wie die Vorlagen der THW-Leitung, "
+            "gleicher Ausschnitt auf jedem Format): "
+            + ", ".join(f"{paper} {_format_scale(s)}" for paper, s in EMPFOHLENE_MASSSTAEBE.items())
+            + ".\nEigene Werte eintippen, z. B. 1:12500."
+        )
+        self._scale_combo.currentTextChanged.connect(lambda *_: self._on_scale_changed())
+        vbox.addWidget(self._scale_combo)
+
+        self._scale_hint = QLabel()
+        self._scale_hint.setWordWrap(True)
+        self._scale_hint.setStyleSheet("color: gray;")
+        vbox.addWidget(self._scale_hint)
+        return box
+
     def _current_info(self) -> PrintInfo:
         return PrintInfo(
             ortsverband=self._ov_edit.text().strip(),
             einheit=self._einheit_edit.text().strip(),
             einheit_kurz=self._einheit_kurz_edit.text().strip(),
-            einheit_zeichen=self._zeichen_check.isChecked(),
+            einheit_zeichen=self._zeichen_combo.currentData(),
             bearbeiter=self._bearbeiter_edit.text().strip(),
             einsatz=self._einsatz_edit.text().strip(),
             kartentitel=self._kartentitel_combo.currentText().strip(),
@@ -257,8 +311,74 @@ class TemplateDialog(QDialog):
 
     def _update_buttons(self) -> None:
         entry = self._current_entry()
-        self._open_btn.setEnabled(entry is not None)
+        self._open_btn.setEnabled(entry is not None and self._selected_scale() is not None)
         self._remove_btn.setEnabled(entry is not None and entry.is_own)
+
+    def _on_template_changed(self) -> None:
+        """Maßstabsauswahl an die Vorlage anpassen; wer die Empfehlung gewählt hat, bekommt die des neuen Formats."""
+        if self._scale_combo.count():
+            choice, text = self._scale_choice(), self._scale_combo.currentText()
+        else:
+            choice, text = QgsSettings().value(_SCALE_KEY, _SCALE_AUTO, type=int), ""
+        entry = self._current_entry()
+        self._template_info = template_info(entry.path) if entry else TemplateInfo()
+        self._zeichen_combo.setEnabled(self._template_info.unit_sign)
+        self._fill_scale_combo(choice, text)
+        self._on_scale_changed()
+
+    def _fill_scale_combo(self, choice: int | None, text: str) -> None:
+        """`choice` wie in `_scale_choice`; bei `None` (ungültige Eingabe) bleibt `text` stehen."""
+        recommended = self._template_info.recommended_scale
+        combo = self._scale_combo
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("Automatisch", _SCALE_AUTO)
+        for scale in MASSSTAB_VORSCHLAEGE:
+            label = _format_scale(scale)
+            if scale == recommended:
+                label += f" – empfohlen für {self._template_info.paper}"
+            combo.addItem(label, scale)
+
+        if choice == _SCALE_RECOMMENDED:
+            choice = recommended or _SCALE_AUTO
+        index = combo.findData(choice) if choice is not None else -1
+        if index >= 0:
+            combo.setCurrentIndex(index)
+        else:
+            combo.setEditText(_format_scale(choice) if choice is not None else text)
+        combo.blockSignals(False)
+
+    def _selected_scale(self) -> int | None:
+        """Gewählter Maßstab, `_SCALE_AUTO` für automatisch, `None` bei ungültiger Eingabe."""
+        text = self._scale_combo.currentText()
+        index = self._scale_combo.findText(text)
+        if index >= 0:
+            return self._scale_combo.itemData(index)
+        return _parse_scale(text)
+
+    def _scale_choice(self) -> int | None:
+        """Wie `_selected_scale`, die Empfehlung des Papierformats aber als `_SCALE_RECOMMENDED`."""
+        scale = self._selected_scale()
+        if scale and scale == self._template_info.recommended_scale:
+            return _SCALE_RECOMMENDED
+        return scale
+
+    def _on_scale_changed(self) -> None:
+        info = self._template_info
+        scale = self._selected_scale()
+        if scale is None:
+            hint = "Maßstab als Zahl angeben, z. B. 1:12500."
+        elif scale == _SCALE_AUTO and info.canvas_extent:
+            hint = "Übernimmt den Ausschnitt des Kartenfensters, aufgerundet auf einen gängigen Maßstab."
+        elif scale == _SCALE_AUTO:
+            hint = "Behält den Maßstab der Vorlage, zentriert auf die Mitte des Kartenfensters."
+        elif info.map_size_mm:
+            width, height = (_format_distance(mm * scale / 1000) for mm in info.map_size_mm)
+            hint = f"Die Hauptkarte zeigt {width} × {height}, zentriert auf die Mitte des Kartenfensters."
+        else:
+            hint = "Zentriert auf die Mitte des Kartenfensters."
+        self._scale_hint.setText(hint)
+        self._update_buttons()
 
     def _add_own_templates(self) -> None:
         settings = QgsSettings()
@@ -323,12 +443,18 @@ class TemplateDialog(QDialog):
             QMessageBox.warning(self, "Ortsverband fehlt", "Bitte den Ortsverband angeben.")
             self._ov_edit.setFocus()
             return
+        scale = self._selected_scale()
+        if scale is None:
+            QMessageBox.warning(self, "Maßstab ungültig", "Bitte den Maßstab als Zahl angeben, z. B. 1:12500.")
+            self._scale_combo.setFocus()
+            return
         info.save()
+        QgsSettings().setValue(_SCALE_KEY, self._scale_choice())
         if info.tidy_legend:
             self._save_legend_choice()
 
         try:
-            layout = load_print_template(entry.path, info, self._assets_dir, iface.mapCanvas())
+            layout = load_print_template(entry.path, info, self._assets_dir, iface.mapCanvas(), scale or None)
         except ValueError as e:
             QMessageBox.critical(self, "Fehler", str(e))
             return
@@ -384,6 +510,25 @@ class TemplateDialog(QDialog):
         while f"{base} ({i})" in existing:
             i += 1
         return f"{base} ({i})"
+
+
+def _format_scale(scale: int) -> str:
+    """`10000` → `"1:10 000"`."""
+    return "1:" + f"{scale:,}".replace(",", " ")
+
+
+def _parse_scale(text: str) -> int | None:
+    """Maßstabszahl aus `"1:12 500"`, `"1 : 12.500"` oder `"12500"`; `None`, wenn keine."""
+    match = re.fullmatch(r"(?:1:)?(\d+)", re.sub(r"[\s.']", "", text))
+    value = int(match.group(1)) if match else 0
+    return value if value > 0 else None
+
+
+def _format_distance(meters: float) -> str:
+    """Strecke in der Natur: `2340` → `"2,3 km"`, `850` → `"850 m"`."""
+    if meters >= 1000:
+        return f"{meters / 1000:.1f} km".replace(".", ",")
+    return f"{round(meters, -1):.0f} m"
 
 
 def _show_designer(layout) -> None:
