@@ -12,6 +12,7 @@
 - **Messen**: beim Zeichnen Segmentlänge, Gesamtlänge bzw. Umfang und Fläche; je Objekt „Maße auf der Karte“ (Kantenlängen, Radius); Kreisfläche und -umfang in den Details
 - **Maße einzeln anpassen**: Maß anklicken, verschieben und an den Ecken skalieren; Entf blendet es aus; Rechtsklick „Maße zurücksetzen“
 - **Koordinaten**: Tabelle in den Details (UTMREF bzw. Breite/Länge eintippen, Punkte einfügen/löschen, kopieren); `$POS` in Texten und Punktbeschreibungen wird zur UTMREF; UTMREF am Mauszeiger beim Ziehen eines Punkts
+- **UTMREF-Genauigkeit** je Projekt in den Einstellungen: 10 m, 1 m oder 0,1 m – für Details, Tabellen und `$POS`; die Eingabe von Koordinaten nimmt jede Genauigkeit an (auch mit Nachkommastellen)
 - **Adress-Suche** springt bei UTMREF bzw. Breite/Länge direkt zur Koordinate und markiert sie mit Fadenkreuz und pulsierendem Ring
 
 ### Geändert

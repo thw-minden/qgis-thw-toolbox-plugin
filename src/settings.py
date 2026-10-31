@@ -1,4 +1,5 @@
 from .logging_utils import get_logger
+from .util.coordinates import set_mgrs_resolution
 
 logger = get_logger(__name__)
 
@@ -12,6 +13,9 @@ class THWToolboxSettings:
     LABEL_ENABLE_DEFAULT = True
     LABEL_FONT_SIZE_DEFAULT_UM = 6000
     LABEL_BUFFER_SIZE_DEFAULT_UM = 1000
+    # UTMREF-Genauigkeit in Dezimetern (als ganze Zahl im Projekt gespeichert): 100 = 10 m, 10 = 1 m, 1 = 0,1 m
+    MGRS_RESOLUTION_DM_DEFAULT = 10
+    MGRS_RESOLUTIONS_DM = (100, 10, 1)
 
     # Save-File values
     PLUGIN_NAME = "taktischezeichen"
@@ -25,6 +29,7 @@ class THWToolboxSettings:
         self._label_enable = self.LABEL_ENABLE_DEFAULT
         self._label_font_size_mm = self.LABEL_FONT_SIZE_DEFAULT_UM / 1000.0
         self._label_buffer_size_mm = self.LABEL_BUFFER_SIZE_DEFAULT_UM / 1000.0
+        self._mgrs_resolution_dm = self.MGRS_RESOLUTION_DM_DEFAULT
 
     @property
     def new_icon_scaling_with_map(self) -> bool:
@@ -101,6 +106,22 @@ class THWToolboxSettings:
         if not isinstance(value, (int, float)) or value <= 0:
             raise ValueError("Buffer size must be a positive number")
         self._label_buffer_size_mm = int(value)
+
+    @property
+    def mgrs_resolution_dm(self) -> int:
+        return self._mgrs_resolution_dm
+
+    @mgrs_resolution_dm.setter
+    def mgrs_resolution_dm(self, value):
+        if value not in self.MGRS_RESOLUTIONS_DM:
+            raise ValueError("UTMREF resolution must be 1, 10 or 100 dm")
+        self._mgrs_resolution_dm = int(value)
+        # Alle UTMREF-Anzeigen des Plugins folgen der Einstellung
+        set_mgrs_resolution(self.mgrs_resolution_m)
+
+    @property
+    def mgrs_resolution_m(self) -> float:
+        return self._mgrs_resolution_dm / 10.0
 
     def load_settings(self, proj):
         """Loads settings automatically from the defined private parameters"""

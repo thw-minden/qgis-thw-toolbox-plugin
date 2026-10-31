@@ -3,6 +3,7 @@ import os
 from qgis.core import (
     Qgis,
     QgsCoordinateTransform,
+    QgsExpressionContextUtils,
     QgsProject,
     QgsVectorLayer,
 )
@@ -40,6 +41,7 @@ from .logging_utils import get_logger
 from .paths import plugin_root
 from .planning.controller import PlanningController
 from .planning.details import SelectionDetails
+from .planning.expressions import MGRS_RESOLUTION_VARIABLE
 from .settings import THWToolboxSettings
 from .tools import style_library
 from .tools.canvas_drop_filter import CanvasDropFilter
@@ -255,6 +257,7 @@ class THWToolboxPlugin:
         QgsProject.instance().writeProject.connect(self._on_project_save)
         # Projekte älterer Versionen beim Öffnen auf eingebettete Zeichen umstellen
         QgsProject.instance().readProject.connect(self._on_project_read)
+        self._read_mgrs_resolution(QgsProject.instance())
         # Reagiere auf Layer-Entfernung, damit wir das Plugin sauber deaktivieren,
         # wenn der Marker-Layer aus dem Projekt gelöscht wird.
         QgsProject.instance().layersWillBeRemoved.connect(self._on_layers_will_be_removed)
@@ -626,6 +629,22 @@ class THWToolboxPlugin:
         if self.move_tool:
             self.move_tool.refresh_selection()
 
+    def _read_mgrs_resolution(self, project):
+        """UTMREF-Genauigkeit des Projekts übernehmen – auch ohne aktive Toolbox (Details, Suche, Tabellen)."""
+        value, ok = project.readNumEntry(self.settings.PLUGIN_NAME, "mgrs_resolution_dm", 0)
+        if ok and value in self.settings.MGRS_RESOLUTIONS_DM:
+            self.settings.mgrs_resolution_dm = value
+        else:
+            self.settings.mgrs_resolution_dm = self.settings.MGRS_RESOLUTION_DM_DEFAULT
+
+    def _apply_mgrs_resolution(self, project):
+        """Genauigkeit als Projektvariable: ``$POS`` auf der Karte liest sie – auch auf Rechnern ohne Plugin."""
+        QgsExpressionContextUtils.setProjectVariable(
+            project, MGRS_RESOLUTION_VARIABLE, self.settings.mgrs_resolution_m
+        )
+        self.iface.mapCanvas().refreshAllLayers()
+        self.schedule_details_update()
+
     def _on_project_read(self, _doc=None):
         """Projekt geöffnet: Zeichen älterer Projekte in das Symbol einbetten (einmalige Migration).
 
@@ -635,6 +654,7 @@ class THWToolboxPlugin:
         aufgefrischt und das Projekt als geändert markiert; nach dem Speichern ist es
         eigenständig. Läuft auch, wenn die Toolbox gerade nicht aktiv ist.
         """
+        self._read_mgrs_resolution(QgsProject.instance())
         try:
             project = QgsProject.instance()
             layers = [layer for layer in project.mapLayersByName(LAYER_DISPLAY_NAME) if has_file_svg_paths(layer)]
@@ -1214,6 +1234,7 @@ class THWToolboxPlugin:
             if self.feature_ops and new_icon_defaults() != before:
                 self.feature_ops.forget_last_size()
             self.settings.save_settings(QgsProject.instance())
+            self._apply_mgrs_resolution(QgsProject.instance())
             if self.layer:
                 self._init_renderer(self.layer)
 
