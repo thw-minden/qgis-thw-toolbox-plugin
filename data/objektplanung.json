@@ -1,14 +1,15 @@
 {
-  "_hinweis": "Richtwerte für die Objektplanung. Maße in Metern (Grundfläche ohne Abspannung). Bitte vor dem Einsatz mit den Herstellerangaben / der STAN abgleichen. Die Werte lassen sich hier oder direkt im Dock anpassen.",
+  "_hinweis": "Richtwerte für die Objektplanung. Maße in Metern (Grundfläche ohne Abspannung). Bitte vor dem Einsatz mit den Herstellerangaben / der STAN abgleichen. Die Werte lassen sich hier oder direkt im Dock anpassen. „kurz“ ist der Name für die Beschriftung auf der Karte.",
   "zelte": [
-    {"id": "sg300", "name": "Zelt SG 300", "laenge": 6.0, "breite": 5.0, "abspannung": 1.5},
-    {"id": "sg500", "name": "Zelt SG 500", "laenge": 10.0, "breite": 5.0, "abspannung": 1.5},
-    {"id": "sg20", "name": "Zelt SG 20", "laenge": 5.0, "breite": 4.0, "abspannung": 1.5},
-    {"id": "sg30", "name": "Zelt SG 30", "laenge": 6.0, "breite": 5.0, "abspannung": 1.5},
-    {"id": "sg50", "name": "Zelt SG 50", "laenge": 9.0, "breite": 5.6, "abspannung": 1.5},
-    {"id": "pav33", "name": "Faltpavillon 3 x 3 m", "laenge": 3.0, "breite": 3.0, "abspannung": 0.5},
-    {"id": "pav36", "name": "Faltpavillon 3 x 6 m", "laenge": 6.0, "breite": 3.0, "abspannung": 0.5},
-    {"id": "pav48", "name": "Faltpavillon 4 x 8 m", "laenge": 8.0, "breite": 4.0, "abspannung": 0.5}
+    {"id": "sg300", "name": "Zelt SG 300", "kurz": "SG300", "laenge": 6.0, "breite": 5.0, "abspannung": 1.5},
+    {"id": "sg500", "name": "Zelt SG 500", "kurz": "SG500", "laenge": 10.0, "breite": 5.0, "abspannung": 1.5},
+    {"id": "sg20", "name": "Zelt SG 20", "kurz": "SG20", "laenge": 5.0, "breite": 4.0, "abspannung": 1.5},
+    {"id": "sg30", "name": "Zelt SG 30", "kurz": "SG30", "laenge": 6.0, "breite": 5.0, "abspannung": 1.5},
+    {"id": "sg50", "name": "Zelt SG 50", "kurz": "SG50", "laenge": 9.0, "breite": 5.6, "abspannung": 1.5},
+    {"id": "prz33", "name": "Zelt PRZ 33 (aufblasbar)", "kurz": "PRZ33", "laenge": 6.02, "breite": 5.6, "abspannung": 1.5},
+    {"id": "pav33", "name": "Faltpavillon 3 x 3 m", "kurz": "Pavillon 3x3", "laenge": 3.0, "breite": 3.0, "abspannung": 0.5},
+    {"id": "pav36", "name": "Faltpavillon 3 x 6 m", "kurz": "Pavillon 3x6", "laenge": 6.0, "breite": 3.0, "abspannung": 0.5},
+    {"id": "pav48", "name": "Faltpavillon 4 x 8 m", "kurz": "Pavillon 4x8", "laenge": 8.0, "breite": 4.0, "abspannung": 0.5}
   ],
   "_hinweis_fahrzeuge": "Fahrzeugmaße = Länge über alles × Breite ohne Spiegel, Anhänger inkl. Deichsel. Richtwerte – je nach Fahrgestell/Baujahr abweichend, bitte mit Fahrzeugschein abgleichen. Spiegel und Türen über den Mindestabstand berücksichtigen.",
   "fahrzeuge": [

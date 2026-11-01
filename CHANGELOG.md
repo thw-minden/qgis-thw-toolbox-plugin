@@ -19,8 +19,10 @@
 - **Export für Drohnen** aus der Objektplanung: Auswahl als KMZ mit Bezeichnung und tatsächlicher Farbe (Gebiete mit Füllung bzw. nur Umriss) – im Rechtsklick-Menü, in den Details und im Dock; die ganze Objektplanung samt Beschriftungen, Maßen und taktischen Zeichen als eine MBTiles-Ebene
 - **UTMREF-Genauigkeit** je Projekt in den Einstellungen: 10 m, 1 m oder 0,1 m – für Details, Tabellen und `$POS`; die Eingabe von Koordinaten nimmt jede Genauigkeit an (auch mit Nachkommastellen)
 - **Adress-Suche** springt bei UTMREF bzw. Breite/Länge direkt zur Koordinate und markiert sie mit Fadenkreuz und pulsierendem Ring
+- **Zelt PRZ 33** (aufblasbar, 6,02 × 5,60 m) im Katalog der Objektplanung
 
 ### Geändert
+- **Zelte auf der Karte** mit Kurznamen beschriftet (z. B. „SG30“, „PRZ33“, Feld `kurz` im Katalog); bestehende Zelt-Layer werden beim Öffnen umgestellt
 - **Nordpfeil** aller Druckvorlagen kontrastreicher, mit „N“ an der Spitze
 - Vorlagen der THW-Leitung und eigene Vorlagen öffnen auf der Mitte des Kartenfensters; der rote Rahmen der Übersichtskarten liegt über der Hintergrundkarte
 - MBTiles-Zoomstufen-Dialog breit genug für Titel und Hinweis

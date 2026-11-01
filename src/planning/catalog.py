@@ -17,6 +17,7 @@ class FootprintType:
     ``abspannung`` ist bei Zelten der Raum für die Abspannleinen rund um
     die Grundfläche; bei Fahrzeugen 0. ``zeichen`` ist das taktische Zeichen
     (Pfad relativ zu ``svgs/``), das in der Grundfläche angezeigt wird.
+    ``kurz`` ist der kurze Name für die Beschriftung auf der Karte (z. B. „SG30“).
     """
 
     id: str
@@ -25,6 +26,11 @@ class FootprintType:
     breite: float
     abspannung: float = 1.0
     zeichen: str = ""
+    kurz: str = ""
+
+    @property
+    def short_name(self) -> str:
+        return self.kurz or self.name
 
     @property
     def flaeche(self) -> float:
@@ -253,6 +259,7 @@ def _load_footprints(entries: list, default_guy: float) -> list[FootprintType]:
                     breite=float(entry["breite"]),
                     abspannung=float(entry.get("abspannung", default_guy)),
                     zeichen=str(entry.get("zeichen", "")),
+                    kurz=str(entry.get("kurz", "")),
                 )
             )
         except (KeyError, TypeError, ValueError):

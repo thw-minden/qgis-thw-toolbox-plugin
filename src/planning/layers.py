@@ -9,6 +9,7 @@ from qgis.core import (
     Qgis,
     QgsCategorizedSymbolRenderer,
     QgsCoordinateReferenceSystem,
+    QgsExpression,
     QgsFeature,
     QgsFeatureRequest,
     QgsField,
@@ -269,6 +270,10 @@ _VERSIONED_ROLES = (ROLE_ZONES, ROLE_ARROWS, ROLE_POINTS)
 _ZONE_LABEL_EXPR = "nullif(\"bezeichnung\", '')"
 _PLAIN_LABEL_EXPR = _ZONE_LABEL_EXPR
 _LEGACY_ZONE_LABEL_EXPR = 'coalesce(nullif("bezeichnung", \'\'), "typ")'
+
+# Zelte zeigen ohne eigene Bezeichnung ihren Kurznamen („SG30“); frühere Versionen den ganzen Typ
+_LEGACY_TENT_LABEL_EXPR = 'coalesce(nullif("bezeichnung", \'\'), "typ")'
+_TENT_LABEL_PREFIX = 'coalesce(nullif("bezeichnung", \'\'), map_get(map('
 
 # Schraffur-Abstand und Linienstärke (mm)
 _HATCH_DISTANCE_MM = 2.5
@@ -787,7 +792,7 @@ class PlanningLayers(QObject):
             _set_labels(lyr, 'coalesce(nullif("bezeichnung", \'\'), "typ")')
         elif role == ROLE_TENTS:
             lyr.setRenderer(QgsSingleSymbolRenderer(_tent_symbol()))
-            _set_labels(lyr, 'coalesce(nullif("bezeichnung", \'\'), "typ")', polygon=True)
+            _set_labels(lyr, _tent_label_expr(self.catalog.zelte), polygon=True)
         elif role == ROLE_VEHICLES:
             lyr.setRenderer(QgsSingleSymbolRenderer(self._sign_symbol(role)))
             # Der Typ steckt im taktischen Zeichen – beschriftet wird nur eine eigene Bezeichnung, unter dem Zeichen
@@ -838,6 +843,10 @@ class PlanningLayers(QObject):
         if role in NOTE_ROLES:
             # Beschriftung einer früheren Version ohne Platzhalter $POS
             _replace_label_expression(lyr, _PLAIN_LABEL_EXPR, note_label_expr())
+        if role == ROLE_TENTS:
+            # Ganzer Typ statt Kurzname bzw. Kurznamen eines älteren Katalogs
+            _replace_label_expression(lyr, _LEGACY_TENT_LABEL_EXPR, _tent_label_expr(self.catalog.zelte))
+            _replace_label_expression(lyr, _TENT_LABEL_PREFIX, _tent_label_expr(self.catalog.zelte), prefix=True)
         if role not in _VERSIONED_ROLES or not _ensure_field(lyr, STYLE_FIELD, _T_STRING):
             return
         if role in MEASURE_ROLES and not (
@@ -1238,13 +1247,17 @@ def _enable_for_patterns(layer: QgsSymbolLayer, patterns, pattern_expr: str) -> 
     layer.setDataDefinedProperty(_LAYER_ENABLED, QgsProperty.fromExpression(expression))
 
 
-def _replace_label_expression(lyr: QgsVectorLayer, old: str, new: str) -> None:
-    """Beschriftung einer früheren Version auf den neuen Ausdruck umstellen; eigene Ausdrücke bleiben."""
+def _replace_label_expression(lyr: QgsVectorLayer, old: str, new: str, prefix: bool = False) -> None:
+    """Beschriftung einer früheren Version auf den neuen Ausdruck umstellen; eigene Ausdrücke bleiben.
+
+    Mit ``prefix`` genügt es, dass der bisherige Ausdruck mit ``old`` beginnt.
+    """
     labeling = lyr.labeling()
     if not isinstance(labeling, QgsVectorLayerSimpleLabeling):
         return
     settings = labeling.settings()
-    if settings.fieldName != old:
+    matches = settings.fieldName.startswith(old) if prefix else settings.fieldName == old
+    if not matches or settings.fieldName == new:
         return
     settings.fieldName = new
     lyr.setLabeling(QgsVectorLayerSimpleLabeling(settings))
@@ -1270,6 +1283,12 @@ def _has_dimensions(lyr: QgsVectorLayer) -> bool:
 
 def _features(lyr: QgsVectorLayer, fids) -> list[QgsFeature]:
     return list(lyr.getFeatures(QgsFeatureRequest().setFilterFids(list(fids))))
+
+
+def _tent_label_expr(tents) -> str:
+    """Ausdruck: eigene Bezeichnung, sonst der Kurzname je ``typ_id`` aus dem Katalog, sonst der Typ."""
+    pairs = ", ".join(f"{QgsExpression.quotedString(t.id)}, {QgsExpression.quotedString(t.short_name)}" for t in tents)
+    return f'{_TENT_LABEL_PREFIX}{pairs}), "typ_id"), "typ")'
 
 
 def _type_color_expr(types, default: str) -> str:
