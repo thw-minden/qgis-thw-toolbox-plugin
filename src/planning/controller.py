@@ -34,14 +34,14 @@ from .hotbar import PlanningHotbar
 from .label_frame import LabelFrame
 from .layers import (
     ALL_ROLES,
+    DIMENSION_ADJUST_FIELD,
     FOOTPRINT_ROLES,
-    LABEL_FIELD,
     LABEL_ANGLE_FIELD,
     LABEL_DX_FIELD,
     LABEL_DY_FIELD,
     LABEL_EDIT_ROLES,
+    LABEL_FIELD,
     LABEL_SIZE_FIELD,
-    DIMENSION_ADJUST_FIELD,
     MEASURE_FIELD,
     MEASURE_ROLES,
     NOTE_ROLES,

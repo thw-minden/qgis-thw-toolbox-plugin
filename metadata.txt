@@ -1,7 +1,7 @@
 [general]
 name=THW Toolbox
 description=QGIS plugin designed for THW (Technisches Hilfswerk) operations and civil protection missions. Provides easy addition and management of tactical symbols on maps with drag & drop placement of SVG symbols for THW, Bundeswehr, fire departments, police and other organizations. Features intelligent sizing and feature management. Intended for use in civil protection and disaster response operations only.
-version=2.2.2
+version=2.3.0
 qgisMinimumVersion=3.44
 qgisMaximumVersion=4.99
 author=THW Minden
@@ -15,7 +15,17 @@ icon=icons/icon.svg
 experimental=False
 deprecated=False
 tags=THW,Feuerwehr,Polizei,Rettungswesen,Katastrophenschutz,taktische Zeichen,SVG,Symbole,Kartierung,Einsatzplanung
-changelog=2.2.2
+changelog=2.3.0
+    - New: Objektplanung with texts, points (optional radius), lines with arrowheads and areas; per-object colour, opacity and line width; object list in the dock
+    - New: undo / redo (Ctrl+Z, Ctrl+Y) for Objektplanung and tactical symbols, up to 100 steps per project
+    - New: measurements while drawing and on the map (lengths, perimeter, area, radius); freely movable, scalable and rotatable labels
+    - New: coordinate table (UTMREF or lat/lon) per object, $POS placeholder, UTMREF precision 10 m / 1 m / 0.1 m per project; address search jumps to coordinates
+    - New: export for drones as KMZ, whole Objektplanung as an MBTiles layer
+    - New: print templates: choose the main map scale and the unit symbol; setup assistant asks for the template details
+    - New: tent PRZ 33; tents labelled with short names on the map
+    - Changed: Objektplanung items listed by name in map legends, higher-contrast north arrow
+    - Removed: toolbar action "add temporary MGRS grid" (UTMREF grids remain in the print templates)
+    2.2.2
     - Fixed: the portable package (export) was missing data/, so Objektplanung had no tents or vehicles (GKW, MTW and others) and THW-Dienststellen were missing
     2.2.1
     IMPORTANT before updating: the update deletes the old plugin folder including tmp/. Using the old version, save open projects first, and open and save projects with Objektplanung (site planning) twice.

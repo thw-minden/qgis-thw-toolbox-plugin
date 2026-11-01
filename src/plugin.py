@@ -652,9 +652,7 @@ class THWToolboxPlugin:
 
     def _apply_mgrs_resolution(self, project):
         """Genauigkeit als Projektvariable: ``$POS`` auf der Karte liest sie – auch auf Rechnern ohne Plugin."""
-        QgsExpressionContextUtils.setProjectVariable(
-            project, MGRS_RESOLUTION_VARIABLE, self.settings.mgrs_resolution_m
-        )
+        QgsExpressionContextUtils.setProjectVariable(project, MGRS_RESOLUTION_VARIABLE, self.settings.mgrs_resolution_m)
         self.iface.mapCanvas().refreshAllLayers()
         self.schedule_details_update()
 

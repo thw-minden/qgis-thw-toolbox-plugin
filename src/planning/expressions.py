@@ -15,9 +15,7 @@ MGRS_RESOLUTION_VARIABLE = "thw_utmref_aufloesung"
 def _utm_crs_expr(geom_expr: str) -> str:
     """'EPSG:326xx' bzw. '327xx' der UTM-Zone, in der die Mitte von ``geom_expr`` (Layer-CRS) liegt."""
     center = f"transform(centroid({geom_expr}), @layer_crs, 'EPSG:4326')"
-    return (
-        f"'EPSG:' || to_string(if(y({center}) >= 0, 32600, 32700) + min(floor((x({center}) + 180) / 6) + 1, 60))"
-    )
+    return f"'EPSG:' || to_string(if(y({center}) >= 0, 32600, 32700) + min(floor((x({center}) + 180) / 6) + 1, 60))"
 
 
 def metric_length_expr(geom_expr: str) -> str:

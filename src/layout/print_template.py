@@ -30,7 +30,6 @@ import os
 import re
 import shutil
 from dataclasses import dataclass
-from xml.etree import ElementTree
 
 from qgis.core import (
     Qgis,
@@ -52,7 +51,7 @@ from qgis.core import (
     QgsSettings,
     QgsVectorLayer,
 )
-from qgis.PyQt.QtXml import QDomDocument
+from qgis.PyQt.QtXml import QDomDocument, QDomElement
 
 from ..logging_utils import get_logger
 from ..paths import profile_dir
@@ -118,9 +117,7 @@ _STANDARD_SCALES = (500, 1000, 2500, 5000, 10000, 25000, 50000, 100000, 200000, 
 # Format etwa denselben Ausschnitt (rund 3,3 × 2,6 km), größeres Papier also mehr Einzelheiten.
 EMPFOHLENE_MASSSTAEBE = {"A4": 15000, "A3": 10000, "A2": 7500, "A1": 5000, "A0": 3500}
 # Zur Auswahl im Druckvorlagen-Dialog, zusätzlich zu den empfohlenen
-MASSSTAB_VORSCHLAEGE = tuple(
-    sorted({1000, 2500, 5000, 10000, 25000, 50000, 100000, *EMPFOHLENE_MASSSTAEBE.values()})
-)
+MASSSTAB_VORSCHLAEGE = tuple(sorted({1000, 2500, 5000, 10000, 25000, 50000, 100000, *EMPFOHLENE_MASSSTAEBE.values()}))
 
 # (Muster, Ersetzung) für Textfelder der Vorlage
 _LABEL_REPLACEMENTS = (
@@ -323,26 +320,48 @@ def template_info(path: str) -> TemplateInfo:
 @functools.lru_cache(maxsize=32)
 def _template_info(path: str, _mtime: float) -> TemplateInfo:
     try:
-        root = ElementTree.parse(path).getroot()
-    except (OSError, ElementTree.ParseError) as e:
+        root = _xml_root(path)
+    except (OSError, ValueError) as e:
         logger.warning("Vorlage %s konnte nicht gelesen werden: %s", path, e)
         return TemplateInfo()
 
-    page = next((p for pc in root.iter("PageCollection") for p in pc.iter("LayoutItem")), None)
-    page_size = _size_mm(page.get("size")) if page is not None else None
+    page = next((p for pc in _elements(root, "PageCollection") for p in _elements(pc, "LayoutItem")), None)
+    page_size = _size_mm(page.attribute("size")) if page is not None else None
+    items = _elements(root, "LayoutItem")
     main_map = next(
-        (i for i in root.iter("LayoutItem") if i.get("type") == _LAYOUT_ITEM_MAP and i.get("id") == _MAIN_MAP_ID),
+        (i for i in items if i.attribute("type") == _LAYOUT_ITEM_MAP and i.attribute("id") == _MAIN_MAP_ID),
         None,
     )
-    unit_sign = any(i.get("id") == _UNIT_SIGN_ID for i in root.iter("LayoutItem"))
+    unit_sign = any(i.attribute("id") == _UNIT_SIGN_ID for i in items)
     if main_map is None:
         return TemplateInfo(paper=_paper_format(page_size), unit_sign=unit_sign)
     return TemplateInfo(
         paper=_paper_format(page_size),
-        map_size_mm=_size_mm(main_map.get("size")),
-        canvas_extent=any(g.get("name") in GITTER_NAMEN for g in main_map.iter("ComposerMapGrid")),
+        map_size_mm=_size_mm(main_map.attribute("size")),
+        canvas_extent=any(g.attribute("name") in GITTER_NAMEN for g in _elements(main_map, "ComposerMapGrid")),
         unit_sign=unit_sign,
     )
+
+
+def _xml_root(path: str) -> QDomElement:
+    """Wurzelelement der XML-Datei `path`. Wirft `OSError`, bzw. `ValueError` bei ungültigem XML.
+
+    QDomDocument statt ElementTree, das Bandit (B314) als unsicher meldet – plugins.qgis.org blockiert sonst die Version.
+    """
+    with open(path, "rb") as f:
+        content = f.read()
+    doc = QDomDocument()
+    doc.setContent(content)  # Rückgabewert unterscheidet sich zwischen PyQt5 und PyQt6
+    root = doc.documentElement()
+    if root.isNull():
+        raise ValueError("keine gültige XML-Datei")
+    return root
+
+
+def _elements(parent: QDomElement, tag: str) -> list[QDomElement]:
+    """Alle Nachfahren von `parent` mit dem Namen `tag`, in Dokumentreihenfolge."""
+    nodes = parent.elementsByTagName(tag)
+    return [nodes.at(i).toElement() for i in range(nodes.count())]
 
 
 def _size_mm(size: str | None) -> tuple[float, float] | None:
@@ -485,9 +504,9 @@ def _apply_unit_sign(layout: QgsPrintLayout, zeichen: str, assets_dir: str) -> N
 def _svg_aspect(path: str) -> float | None:
     """Breite / Höhe der SVG-Datei `path` nach ihrer viewBox, `None` wenn sie sich nicht lesen lässt."""
     try:
-        view_box = ElementTree.parse(path).getroot().get("viewBox", "")
+        view_box = _xml_root(path).attribute("viewBox", "")
         _, _, w, h = (float(v) for v in view_box.replace(",", " ").split())
-    except (OSError, ElementTree.ParseError, ValueError) as e:
+    except (OSError, ValueError) as e:
         logger.warning("Taktisches Zeichen %s ohne lesbare viewBox: %s", path, e)
         return None
     return w / h if h > 0 else None

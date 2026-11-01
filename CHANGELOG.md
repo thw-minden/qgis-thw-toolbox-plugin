@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [2.3.0]
 
 ### Hinzugefügt
 - **Setup-Assistent**: Die letzte Seite fragt die Angaben für die Druckvorlagen ab (Einsatz, Einsatzort, Ortsverband, Einheit, Kürzel, Bearbeiter) und teilt sie mit dem Druckvorlagen-Dialog

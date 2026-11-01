@@ -385,9 +385,7 @@ class SelectionDetails(QWidget):
         self._circle_label = form.labelForField(circle_row)
         self._dimensions = QCheckBox("Maße auf der Karte")
         self._dimensions.setToolTip("Radius des Kreises bzw. Länge jeder Kante auf der Karte zeigen")
-        self._dimensions.clicked.connect(
-            lambda: controller.set_selection_dimensions(_clicked_state(self._dimensions))
-        )
+        self._dimensions.clicked.connect(lambda: controller.set_selection_dimensions(_clicked_state(self._dimensions)))
         form.addRow("", self._dimensions)
         # Linien: Pfeilspitzen direkt schaltbar (Breite, Farbe und Größe der Spitzen unter „Gestaltung“)
         self._start_arrow = QCheckBox("am Anfang")
@@ -562,8 +560,8 @@ class SelectionDetails(QWidget):
         Nur Punkte bzw. nur Texte ausgewählt: statt der einzeiligen Bezeichnung das mehrzeilige Textfeld.
         """
         roles = {role for role, _f in planning}
-        notes = len(roles) == 1 and next(iter(roles)) in NOTE_ROLES and len(planning) == len(
-            self.controller.selection()
+        notes = (
+            len(roles) == 1 and next(iter(roles)) in NOTE_ROLES and len(planning) == len(self.controller.selection())
         )
         self._label_edit.setVisible(not notes)
         self._label_row.setVisible(not notes)

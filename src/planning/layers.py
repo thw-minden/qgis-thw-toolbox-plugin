@@ -117,8 +117,8 @@ LABEL_EDIT_ROLES = (ROLE_TEXTS, ROLE_POINTS, ROLE_ARROWS, ROLE_ZONES)
 OBJECT_KEY_PREFIX = "obj:"
 _LEGEND_FIELDS = {LABEL_FIELD, "bezeichnung", "typ_id"}
 LEGEND_KEY_EXPR = (
-    f'if(coalesce("{LABEL_FIELD}", true) OR coalesce("bezeichnung", \'\') = \'\', '
-    f'"typ_id", \'{OBJECT_KEY_PREFIX}\' || to_string($id))'
+    f"if(coalesce(\"{LABEL_FIELD}\", true) OR coalesce(\"bezeichnung\", '') = '', "
+    f"\"typ_id\", '{OBJECT_KEY_PREFIX}' || to_string($id))"
 )
 
 
@@ -157,6 +157,8 @@ def _dimension_text(adjust: str, text_expr: str) -> str:
 
 def _dimension_size(adjust: str) -> str:
     return f"{DIMENSION_SIZE_MM} * coalesce(map_get({adjust}, 's'), 1)"
+
+
 _POSITION_PROPERTY = _label_property("PositionPoint")
 _ROTATION_PROPERTY = _label_property("LabelRotation")
 _HALI_PROPERTY = _label_property("Hali")
@@ -170,6 +172,7 @@ def label_anchor_expr(role: str) -> str:
     if role == ROLE_ARROWS:
         return "line_interpolate_point($geometry, length($geometry) / 2)"
     return "$geometry"
+
 
 # Taktisches Zeichen je Objekt ein/aus (leer = an); nur die Layer, deren Objekte eins tragen, haben das Feld
 SIGN_FIELD = "zeichen"
@@ -190,8 +193,6 @@ _STYLE = f'json_to_map("{STYLE_FIELD}")'
 
 def _style_get(key: str) -> str:
     return f"map_get({_STYLE}, '{key}')"
-
-
 
 
 @dataclass(frozen=True)
@@ -234,6 +235,7 @@ def _area_expressions(
         stroke_style=f"if({get('stroke')} = '', 'no', coalesce({get('stroke_style')}, 'solid'))",
     )
 
+
 # Gestaltung je Pfeil, Punkt und Text (JSON im Feld ``gestaltung``, siehe object_style); leer = nach Typ
 _OBJECT_COLOR_EXPR = (
     f"set_color_part({_style_get('color')}, 'alpha', round(255 * coalesce({_style_get('opacity')}, 1)))"
@@ -273,7 +275,7 @@ _LEGACY_ZONE_LABEL_EXPR = 'coalesce(nullif("bezeichnung", \'\'), "typ")'
 
 # Zelte zeigen ohne eigene Bezeichnung ihren Kurznamen („SG30“); frühere Versionen den ganzen Typ
 _LEGACY_TENT_LABEL_EXPR = 'coalesce(nullif("bezeichnung", \'\'), "typ")'
-_TENT_LABEL_PREFIX = 'coalesce(nullif("bezeichnung", \'\'), map_get(map('
+_TENT_LABEL_PREFIX = "coalesce(nullif(\"bezeichnung\", ''), map_get(map("
 
 # Schraffur-Abstand und Linienstärke (mm)
 _HATCH_DISTANCE_MM = 2.5
@@ -1217,9 +1219,7 @@ def _zone_symbol(
     dots.setDisplacementXUnit(Qgis.RenderUnit.Millimeters)
     dot = QgsMarkerSymbol.createSimple({"name": "circle", "size": "0.7", "size_unit": "MM", "outline_style": "no"})
     dot.setColor(QColor(color))
-    dot.symbolLayer(0).setDataDefinedProperty(
-        QgsSymbolLayer.Property.FillColor, QgsProperty.fromExpression(ex.fill)
-    )
+    dot.symbolLayer(0).setDataDefinedProperty(QgsSymbolLayer.Property.FillColor, QgsProperty.fromExpression(ex.fill))
     dots.setSubSymbol(dot)
     _enable_for_patterns(dots, DOT_PATTERNS, ex.pattern)
     symbol.appendSymbolLayer(dots)
@@ -1449,9 +1449,7 @@ def _with_segment_dimensions(symbol):
 
 def _text_anchor_symbol() -> QgsMarkerSymbol:
     """Texte bestehen nur aus ihrer Beschriftung – der Punkt darunter bleibt unsichtbar."""
-    return QgsMarkerSymbol.createSimple(
-        {"name": "circle", "color": "0,0,0,0", "outline_style": "no", "size": "1"}
-    )
+    return QgsMarkerSymbol.createSimple({"name": "circle", "color": "0,0,0,0", "outline_style": "no", "size": "1"})
 
 
 def _metric_buffer_expr(distance_expr: str, segments: int) -> str:

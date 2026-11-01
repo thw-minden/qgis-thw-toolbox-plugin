@@ -23,7 +23,9 @@ from ..logging_utils import get_logger
 from ..tools.selection_frame import rotate_cursor
 from ..util.coordinates import WGS84, to_mgrs
 from .catalog import fmt_m
+from .dimension_handles import DimensionHandles
 from .geometry import MetricFrame, circle_polygon, split_line
+from .label_handles import LabelHandles
 from .layers import (
     DIMENSION_ADJUST_FIELD,
     FOOTPRINT_ROLES,
@@ -40,8 +42,6 @@ from .layers import (
     ROLE_VEHICLES,
     ROLE_ZONES,
 )
-from .dimension_handles import DimensionHandles
-from .label_handles import LabelHandles
 from .selection_overlay import HANDLE_PX, SelectionOverlay
 
 logger = get_logger(__name__)

@@ -80,9 +80,7 @@ class ObjectStyle:
         """Gestaltung des Radius-Kreises; ohne eigene die Darstellung in der Farbe des Punkts."""
         if self.circle is not None:
             return self.circle
-        return ZoneStyle(
-            fill=self.color, opacity=CIRCLE_OPACITY, stroke=self.color, stroke_width=CIRCLE_STROKE_WIDTH
-        )
+        return ZoneStyle(fill=self.color, opacity=CIRCLE_OPACITY, stroke=self.color, stroke_width=CIRCLE_STROKE_WIDTH)
 
 
 def parse_object_style(text) -> ObjectStyle | None:

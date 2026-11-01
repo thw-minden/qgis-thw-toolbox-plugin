@@ -74,9 +74,7 @@ class CoordinateTable(QWidget):
 
     def set_points(self, points: list[QgsPointXY], min_points: int, closed: bool = False):
         """Anzeigen, ohne ``edited`` auszulösen. ``min_points`` 1 (Punkt, Text): ohne Einfügen und Löschen."""
-        same = len(points) == len(self._points) and all(
-            p.compare(q, 1e-9) for p, q in zip(points, self._points)
-        )
+        same = len(points) == len(self._points) and all(p.compare(q, 1e-9) for p, q in zip(points, self._points))
         self._min_points = min_points
         self._closed = closed
         self._insert.setVisible(min_points > 1)
