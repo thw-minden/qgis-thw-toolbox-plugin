@@ -1,5 +1,39 @@
 # Changelog
 
+## [2.3.0]
+
+### Hinzugefügt
+- **Setup-Assistent**: Die letzte Seite fragt die Angaben für die Druckvorlagen ab (Einsatz, Einsatzort, Ortsverband, Einheit, Kürzel, Bearbeiter) und teilt sie mit dem Druckvorlagen-Dialog
+- **Maßstab der Hauptkarte wählbar** im Druckvorlagen-Dialog: automatisch, Empfehlung je Papierformat oder eigener Wert
+- **Zeichen der Einheit** oben rechts in den Toolbox-Vorlagen wählbar: Unbemannte Luftfahrtsysteme, Zugtrupp oder keins
+- **Texte und Punkte** in der Hotbar (Reihenfolge: Text, Punkt, Linie, Gebiet); Punkte optional mit Radius-Kreis
+- **Gestaltung je Linie, Punkt und Text** in den Details: Farbe, Deckkraft, Linienbreite; Radius-Kreis wie ein Gebiet
+- **Linien** mit Pfeilspitze am Anfang und/oder Ende, Punkte bearbeiten wie bei Gebieten
+- **Hotbar-Icons** zeigen den gewählten Typ (erzeugt mit `scripts/build_planning_icons.py`)
+- **Beschriftungen frei platzieren**: Beschriftung eines ausgewählten Texts, Punkts, einer Linie oder eines Gebiets verschieben, an den Ecken skalieren und daneben drehen (Shift: 15°); Rechtsklick „Beschriftung zurücksetzen“
+- **Objektliste im Dock**: alle Texte, Punkte, Linien und Gebiete; Klick wählt aus und zeigt das Objekt
+- **Messen**: beim Zeichnen Segmentlänge, Gesamtlänge bzw. Umfang und Fläche; je Objekt „Maße auf der Karte“ (Kantenlängen, Radius); Kreisfläche und -umfang in den Details
+- **Maße einzeln anpassen**: Maß anklicken, verschieben und an den Ecken skalieren; Entf blendet es aus; Rechtsklick „Maße zurücksetzen“
+- **Koordinaten**: Tabelle in den Details (UTMREF bzw. Breite/Länge eintippen, Punkte einfügen/löschen, kopieren); `$POS` in Texten und Punktbeschreibungen wird zur UTMREF; UTMREF am Mauszeiger beim Ziehen eines Punkts
+- **Rückgängig / Wiederherstellen** in der Objektplanung mit Strg+Z bzw. Strg+Y (Strg+Umschalt+Z): Setzen, Zeichnen, Verschieben, Löschen, Punkte, Beschriftungen, Maße, Gestaltung, Koordinaten – auch taktische Zeichen (Setzen, Verschieben, Drehen, Größe, Beschriftung, Löschen, Duplizieren); bis zu 100 Schritte je Projekt. Wirkt mit Fokus auf der Karte und solange kein Layer im QGIS-Bearbeitungsmodus ist
+- **Export für Drohnen** aus der Objektplanung: Auswahl als KMZ mit Bezeichnung und tatsächlicher Farbe (Gebiete mit Füllung bzw. nur Umriss) – im Rechtsklick-Menü, in den Details und im Dock; die ganze Objektplanung samt Beschriftungen, Maßen und taktischen Zeichen als eine MBTiles-Ebene
+- **UTMREF-Genauigkeit** je Projekt in den Einstellungen: 10 m, 1 m oder 0,1 m – für Details, Tabellen und `$POS`; die Eingabe von Koordinaten nimmt jede Genauigkeit an (auch mit Nachkommastellen)
+- **Adress-Suche** springt bei UTMREF bzw. Breite/Länge direkt zur Koordinate und markiert sie mit Fadenkreuz und pulsierendem Ring
+- **Zelt PRZ 33** (aufblasbar, 6,02 × 5,60 m) im Katalog der Objektplanung
+
+### Geändert
+- **Zelte auf der Karte** mit Kurznamen beschriftet (z. B. „SG30“, „PRZ33“, Feld `kurz` im Katalog); bestehende Zelt-Layer werden beim Öffnen umgestellt
+- **Nordpfeil** aller Druckvorlagen kontrastreicher, mit „N“ an der Spitze
+- Vorlagen der THW-Leitung und eigene Vorlagen öffnen auf der Mitte des Kartenfensters; der rote Rahmen der Übersichtskarten liegt über der Hintergrundkarte
+- MBTiles-Zoomstufen-Dialog breit genug für Titel und Hinweis
+- Gebietstypen: rot, gelb, blau – gefüllt oder ohne Füllung; Pfeiltypen heißen jetzt „Linie …“
+- Gebiete ohne Bezeichnung tragen keine Beschriftung mehr
+- **Legende der Objektplanung**: Punkte, Linien und Gebiete stehen mit ihrem Namen in der Zeichenerklärung, wenn er nicht auf der Karte steht (Beschriftung aus) – mit einem Symbol wie auf der Karte; Typnamen wie „Punkt rot“ entfallen
+- Schriftgröße in den Details kompakter
+
+### Entfernt
+- Toolbar-Aktion „MGRS-Gitter temporär hinzufügen“ samt Gitter-Layer; UTMREF-Gitter gibt es weiterhin in den Druckvorlagen
+
 ## [2.2.2]
 
 ### Behoben

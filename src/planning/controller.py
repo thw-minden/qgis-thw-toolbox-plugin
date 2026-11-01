@@ -1,5 +1,6 @@
 """Steuerung der Objektplanung: verbindet Dock, Hotbar, Kartenwerkzeuge und Layer."""
 
+import json
 import math
 
 from qgis.core import (
@@ -21,17 +22,30 @@ from qgis.PyQt.QtWidgets import QApplication
 from ..layer.labeling import label_size_pt
 from ..logging_utils import get_logger
 from ..ui.symbol_picker import Symbol, symbol_catalog, symbol_prefs
+from ..util.coordinates import WGS84
 from .capacity_dialog import CapacityDialog
 from .catalog import FootprintType, fmt_m, load_catalog
+from .dimension_handles import read_adjustments
 from .dock import PlanningDock
 from .drop_filter import PlanningDropFilter
+from .export import export_mbtiles, export_selection_kmz
 from .geometry import MetricFrame, align_snap, grid_centers, rotated_frame, tent_polygon
 from .hotbar import PlanningHotbar
+from .label_frame import LabelFrame
 from .layers import (
     ALL_ROLES,
+    DIMENSION_ADJUST_FIELD,
     FOOTPRINT_ROLES,
+    LABEL_ANGLE_FIELD,
+    LABEL_DX_FIELD,
+    LABEL_DY_FIELD,
+    LABEL_EDIT_ROLES,
     LABEL_FIELD,
     LABEL_SIZE_FIELD,
+    MEASURE_FIELD,
+    MEASURE_ROLES,
+    NOTE_ROLES,
+    OBJECT_STYLE_ROLES,
     POINT_ROLES,
     ROLE_ARROWS,
     ROLE_CABLES,
@@ -39,22 +53,27 @@ from .layers import (
     ROLE_GENERATORS,
     ROLE_LIGHTS,
     ROLE_MARKERS,
+    ROLE_POINTS,
     ROLE_TENTS,
+    ROLE_TEXTS,
     ROLE_VEHICLES,
     ROLE_ZONES,
     SIGN_FIELD,
     SIGN_ROLES,
+    TEXT_SIZE_DEFAULT_PT,
     PlanningLayers,
     label_size,
     label_visible,
     sign_visible,
 )
+from .object_style import ARROWS_BOTH, ARROWS_END, ARROWS_START, ObjectStyle, arrow_mode, object_style_of
 from .tools import (
     AreaTool,
     ArrowTool,
     CableTool,
     FootprintTool,
     MarkerTool,
+    NoteTool,
     PointTool,
     SelectTool,
     VertexTool,
@@ -89,14 +108,30 @@ TOOL_GENERATOR = "generator"
 TOOL_LIGHT = "light"
 TOOL_ZONE = "zone"
 TOOL_ARROW = "arrow"
+TOOL_POINT = "point"
+TOOL_TEXT = "text"
 TOOL_EDIT = "edit"
 TOOL_MARKER = "marker"
 # Taktische Zeichen in der Hotbar bzw. auf den Tasten 1–9
 MAX_MARKER_SLOTS = 9
 
 POINT_TOOL_ROLES = {TOOL_DISTRIBUTOR: ROLE_DISTRIBUTORS, TOOL_GENERATOR: ROLE_GENERATORS, TOOL_LIGHT: ROLE_LIGHTS}
-# Werkzeuge, deren Typ über ``point_ids`` gewählt wird (Punkt-Objekte, Gebiete, Pfeile)
-TYPE_TOOL_ROLES = {**POINT_TOOL_ROLES, TOOL_ZONE: ROLE_ZONES, TOOL_ARROW: ROLE_ARROWS}
+# Punkte und Texte: per Klick gesetzt, danach gleich beschriftet
+NOTE_TOOL_ROLES = {TOOL_POINT: ROLE_POINTS, TOOL_TEXT: ROLE_TEXTS}
+# Werkzeuge, deren Typ über ``point_ids`` gewählt wird (Punkt-Objekte, Gebiete, Pfeile, Punkte, Texte)
+TYPE_TOOL_ROLES = {**POINT_TOOL_ROLES, TOOL_ZONE: ROLE_ZONES, TOOL_ARROW: ROLE_ARROWS, **NOTE_TOOL_ROLES}
+# Umriss eines Punkts bzw. eines Texts ohne gezeichnete Beschriftung (Pixel)
+_NOTE_OUTLINE_PX = 6
+
+
+def _float_or_none(value) -> float | None:
+    """Zahl aus einem Attribut; NULL (None bzw. QVariant-NULL unter QGIS 3) ergibt None."""
+    if value is None or (hasattr(value, "isNull") and value.isNull()):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class PlanningController(QObject):
@@ -123,6 +158,7 @@ class PlanningController(QObject):
             FootprintType("eigen", "Eigenes Fahrzeug", 6.0, 2.5, 0.0, "THW_Fahrzeuge/Kraftfahrzeug.svg")
         )
         self.layers = PlanningLayers(plugin_dir, self.catalog)
+        self.layers.canvas = self.canvas
         self.dock: PlanningDock | None = None
         self.hotbar: PlanningHotbar | None = None
         self._tools: dict[str, object] = {}
@@ -136,6 +172,9 @@ class PlanningController(QObject):
         self.guy_inside_area = settings.value(_SETTINGS_PREFIX + "abspannung_in_flaeche", True, type=bool)
         self.align_enabled = settings.value(_SETTINGS_PREFIX + "ausrichten", True, type=bool)
         self.hotbar_enabled = settings.value(_SETTINGS_PREFIX + "hotbar", True, type=bool)
+        # Neue Linien mit Pfeilspitze am Ende bzw. am Anfang (umschaltbar im ▾ der Hotbar bzw. im Dock)
+        self.arrow_heads = settings.value(_SETTINGS_PREFIX + "pfeilspitze", True, type=bool)
+        self.arrow_start = settings.value(_SETTINGS_PREFIX + "pfeilspitze_anfang", False, type=bool)
         self._canvas_active = False
         self.rotation = 0.0
         # SVG des Zeichens, das das Werkzeug „Zeichen setzen“ gerade in der Hand hat
@@ -154,6 +193,8 @@ class PlanningController(QObject):
                 (ROLE_LIGHTS, self.catalog.beleuchtung),
                 (ROLE_ZONES, self.catalog.gebiete),
                 (ROLE_ARROWS, self.catalog.pfeile),
+                (ROLE_POINTS, self.catalog.punkte),
+                (ROLE_TEXTS, self.catalog.texte),
             )
         }
 
@@ -162,6 +203,49 @@ class PlanningController(QObject):
         self.canvas.mapToolSet.connect(self._on_map_tool_set)
         QgsProject.instance().writeProject.connect(self.layers.on_project_write)
         self.layers.selection_changed.connect(self._on_selection_changed)
+        # Rückgängig gilt nur innerhalb eines Projekts
+        QgsProject.instance().cleared.connect(self.layers.history.clear)
+        QgsProject.instance().readProject.connect(self._clear_history)
+
+    # ------------------------------------------------------------------
+    # Export für Drohnen
+    # ------------------------------------------------------------------
+
+    def export_selection_kmz(self) -> bool:
+        """Ausgewählte Objekte als KMZ – mit eigener Bezeichnung und Gestaltung."""
+        return export_selection_kmz(self, self.iface.mainWindow())
+
+    def export_mbtiles(self) -> bool:
+        """Ganze Objektplanung samt taktischen Zeichen als MBTiles."""
+        return export_mbtiles(self, self.iface.mainWindow())
+
+    # ------------------------------------------------------------------
+    # Rückgängig / Wiederherstellen
+    # ------------------------------------------------------------------
+
+    def _clear_history(self, *_args):
+        self.layers.history.clear()
+
+    def undo(self) -> bool:
+        return self._step_history(undo=True)
+
+    def redo(self) -> bool:
+        return self._step_history(undo=False)
+
+    def _step_history(self, undo: bool) -> bool:
+        history = self.layers.history
+        # Eine laufende Punktbearbeitung bzw. Geste zeigt sonst einen veralteten Stand
+        if self.active_tool_kind()[0] not in (TOOL_SELECT, None):
+            self.back_to_select()
+        done = history.undo() if undo else history.redo()
+        undo_left, redo_left = history.counts()
+        if done:
+            text = "Rückgängig gemacht" if undo else "Wiederhergestellt"
+            hint = f"{text} – noch {undo_left} rückgängig, {redo_left} wiederherstellbar"
+        else:
+            hint = "Nichts rückgängig zu machen" if undo else "Nichts wiederherzustellen"
+        self.iface.statusBarIface().showMessage(f"Objektplanung: {hint}", 3000)
+        return done
 
     def _on_selection_changed(self):
         if self.plugin is not None:
@@ -170,10 +254,10 @@ class PlanningController(QObject):
         QTimer.singleShot(0, self.edit_single_zone)
 
     def edit_single_zone(self):
-        """Ein einzeln ausgewähltes Gebiet geht direkt in die Punktbearbeitung (wie ein Pfad in Figma).
+        """Ein einzeln ausgewähltes Gebiet bzw. eine Linie geht direkt in die Punktbearbeitung (wie ein Pfad in Figma).
 
-        Drehen und Skalieren gibt es für Gebiete nicht, verschieben lässt es sich weiterhin
-        durch Ziehen im Gebiet. Während einer Mausgeste wartet das bis zum Loslassen.
+        Drehen und Skalieren gibt es dafür nicht, verschieben lässt es sich weiterhin
+        durch Ziehen im Gebiet bzw. an der Linie. Während einer Mausgeste wartet das bis zum Loslassen.
         """
         kind = self.active_tool_kind()[0]
         if kind not in (TOOL_SELECT, TOOL_EDIT) or QApplication.mouseButtons() != Qt.MouseButton.NoButton:
@@ -185,10 +269,20 @@ class PlanningController(QObject):
                 return
             # Die Auswahl hat gewechselt (Details-Liste, Duplizieren …): Punktbearbeitung des alten Objekts beenden
             self.back_to_select()
-        if shape is not None and shape[0] == ROLE_ZONES:
+        if shape is not None:
             self.edit_vertices(*shape)
 
     def unload(self):
+        # Vorschau-Intervall der Karte nicht zurückgehalten lassen
+        self.layers.release_preview()
+        for signal, slot in (
+            (QgsProject.instance().cleared, self.layers.history.clear),
+            (QgsProject.instance().readProject, self._clear_history),
+        ):
+            try:
+                signal.disconnect(slot)
+            except (TypeError, RuntimeError):
+                pass
         if self.dock:
             try:
                 self.dock.visibilityChanged.disconnect(self._on_dock_visibility)
@@ -440,6 +534,8 @@ class PlanningController(QObject):
             ROLE_LIGHTS: self.catalog.beleuchtung,
             ROLE_ZONES: self.catalog.gebiete,
             ROLE_ARROWS: self.catalog.pfeile,
+            ROLE_POINTS: self.catalog.punkte,
+            ROLE_TEXTS: self.catalog.texte,
         }[role]
 
     def current_point_type(self, role: str):
@@ -466,6 +562,18 @@ class PlanningController(QObject):
     def set_guy_inside_area(self, value: bool):
         self.guy_inside_area = bool(value)
         QgsSettings().setValue(_SETTINGS_PREFIX + "abspannung_in_flaeche", self.guy_inside_area)
+
+    def set_arrow_heads(self, value: bool):
+        """Neue Linien mit oder ohne Pfeilspitze am Ende zeichnen."""
+        self.arrow_heads = bool(value)
+        QgsSettings().setValue(_SETTINGS_PREFIX + "pfeilspitze", self.arrow_heads)
+        self.state_changed.emit()
+
+    def set_arrow_start(self, value: bool):
+        """Neue Linien mit oder ohne Pfeilspitze am Anfang zeichnen."""
+        self.arrow_start = bool(value)
+        QgsSettings().setValue(_SETTINGS_PREFIX + "pfeilspitze_anfang", self.arrow_start)
+        self.state_changed.emit()
 
     def set_align_enabled(self, value: bool):
         self.align_enabled = bool(value)
@@ -510,6 +618,8 @@ class PlanningController(QObject):
             tool = ZoneTool(self.canvas, self)
         elif kind == TOOL_ARROW:
             tool = ArrowTool(self.canvas, self)
+        elif kind in NOTE_TOOL_ROLES:
+            tool = NoteTool(self.canvas, self, NOTE_TOOL_ROLES[kind])
         elif kind == TOOL_MARKER:
             symbol = symbol_catalog(self.plugin_dir).by_path(type_id)
             tool = MarkerTool(self.canvas, self, type_id, symbol.name if symbol else type_id)
@@ -802,7 +912,7 @@ class PlanningController(QObject):
         for role, geoms in geometries.items():
             if role == ROLE_MARKERS:
                 self.plugin.move_markers(geoms)
-                self.layers.changed.emit()
+                self.layers.notify_changed()
                 continue
             attrs = None
             if rotation_delta and role in FOOTPRINT_ROLES:
@@ -855,6 +965,9 @@ class PlanningController(QObject):
                 # Umriss des gezeichneten Symbols statt des bloßen Punkts
                 geoms.append(self.marker_outline(f))
                 continue
+            if role in NOTE_ROLES:
+                geoms.append(self.note_outline(role, f))
+                continue
             g = QgsGeometry(f.geometry())
             g.transform(QgsCoordinateTransform(self.layers.layer(role).crs(), canvas_crs, project))
             geoms.append(g)
@@ -888,7 +1001,8 @@ class PlanningController(QObject):
             ]
         if len(selected) == 1 and selected[0][0] != ROLE_MARKERS:
             role, f = selected[0]
-            badge = f.attribute("bezeichnung") or f.attribute("typ") or ""
+            # Mehrzeilige Texte: nur die erste Zeile
+            badge = ((f.attribute("bezeichnung") or "").strip().splitlines() or [f.attribute("typ") or ""])[0]
         else:
             badge = f"{len(selected)} Objekte"
         return geoms, corners, badge
@@ -934,16 +1048,19 @@ class PlanningController(QObject):
 
     def selection_labels_visible(self) -> list[bool]:
         """Je Objekt bzw. Zeichen der Auswahl: wird seine Beschriftung auf der Karte gezeigt?"""
-        return [label_visible(role, f) for role, f in self.selection()]
+        # Texte zählen nicht mit: sie sind ihre Beschriftung und bleiben immer sichtbar
+        return [label_visible(role, f) for role, f in self.selection() if role != ROLE_TEXTS]
 
     def set_selection_labels_visible(self, visible: bool):
-        """Beschriftung der Auswahl ein- oder ausblenden – auch die Zeichen einer Mehrfachauswahl."""
+        """Beschriftung der Auswahl ein- oder ausblenden – auch die Zeichen einer Mehrfachauswahl, nie die Texte."""
         for role, fids in self.selection_ids().items():
+            if role == ROLE_TEXTS:
+                continue
             if role == ROLE_MARKERS:
                 for fid in fids:
                     self.plugin.toggle_label_visibility(fid, visible)
                 # Zeichen liegen nicht in den Objektplanungs-Layern: die Details eigens auffrischen
-                self.layers.changed.emit()
+                self.layers.notify_changed()
             else:
                 self.layers.change_features(role, {}, {fid: {LABEL_FIELD: visible} for fid in fids})
 
@@ -964,18 +1081,33 @@ class PlanningController(QObject):
             if role == ROLE_MARKERS:
                 for fid in fids:
                     self.plugin.set_label_size(fid, size_pt)
-                self.layers.changed.emit()
+                self.layers.notify_changed()
             else:
                 self.layers.change_features(role, {}, {fid: {LABEL_SIZE_FIELD: size_pt} for fid in fids})
 
-    def zone_type_color(self, feature) -> str:
-        """Farbe des Gebietstyps (Katalog) – Grundlage der Darstellung ohne eigene Gestaltung."""
+    def type_color(self, role: str, feature) -> str:
+        """Farbe des Typs (Katalog) – Grundlage der Darstellung ohne eigene Gestaltung."""
+        shape_type = self._shape_type(role, feature)
+        return shape_type.farbe if shape_type is not None else "#1565c0"
+
+    def _shape_type(self, role: str, feature):
+        """Typ eines Gebiets, einer Linie, eines Punkts oder Texts – bei Gebieten auch die früherer Versionen."""
         type_id = feature.attribute("typ_id")
-        return next((t.farbe for t in self.catalog.gebiete if t.id == type_id), "#1565c0")
+        types = self.catalog.zone_types() if role == ROLE_ZONES else self.point_types(role)
+        return next((t for t in types if t.id == type_id), types[0] if types else None)
+
+    def zone_type_color(self, feature) -> str:
+        return self.type_color(ROLE_ZONES, feature)
+
+    def _zone_style(self, feature) -> ZoneStyle:
+        """Gestaltung eines Gebiets; ohne eigene Angabe nach Typ (Farbe, gefüllt oder nicht)."""
+        shape_type = self._shape_type(ROLE_ZONES, feature)
+        filled = shape_type.gefuellt if shape_type is not None else True
+        return zone_style_of(feature, self.zone_type_color(feature), filled)
 
     def selection_zone_styles(self) -> list[ZoneStyle]:
         """Gestaltung je ausgewähltem Gebiet (ohne eigene Angabe: nach Typ)."""
-        return [zone_style_of(f, self.zone_type_color(f)) for role, f in self.selection() if role == ROLE_ZONES]
+        return [self._zone_style(f) for role, f in self.selection() if role == ROLE_ZONES]
 
     def update_selection_zone_styles(self, changes: dict):
         """Geänderte Angaben (Muster, Farbe, Rand …) auf alle ausgewählten Gebiete anwenden.
@@ -983,7 +1115,7 @@ class PlanningController(QObject):
         Jedes Gebiet behält dabei seine übrigen Einstellungen, z. B. die eigene Farbe.
         """
         attrs = {
-            f.id(): {STYLE_FIELD: zone_style_of(f, self.zone_type_color(f)).updated(**changes).to_json()}
+            f.id(): {STYLE_FIELD: self._zone_style(f).updated(**changes).to_json()}
             for role, f in self.selection()
             if role == ROLE_ZONES
         }
@@ -995,6 +1127,177 @@ class PlanningController(QObject):
         fids = self.selection_ids().get(ROLE_ZONES, set())
         if fids:
             self.layers.change_features(ROLE_ZONES, {}, {fid: {STYLE_FIELD: None} for fid in fids})
+
+    def selection_style_role(self) -> str | None:
+        """Pfeile, Punkte oder Texte: die Rolle, wenn die Auswahl nur aus Objekten dieser einen Rolle besteht."""
+        roles = {role for role, _f in self.selection()}
+        if len(roles) == 1:
+            role = next(iter(roles))
+            if role in OBJECT_STYLE_ROLES:
+                return role
+        return None
+
+    def selection_object_styles(self) -> list[ObjectStyle]:
+        """Gestaltung je ausgewähltem Pfeil, Punkt bzw. Text (ohne eigene Angabe: nach Typ)."""
+        return [
+            object_style_of(f, self.type_color(role, f)) for role, f in self.selection() if role in OBJECT_STYLE_ROLES
+        ]
+
+    def update_selection_object_styles(self, changes: dict):
+        """Geänderte Angaben (Farbe, Linienbreite, Spitzen …) auf die ausgewählten Pfeile, Punkte und Texte anwenden.
+
+        Jedes Objekt behält dabei seine übrigen Einstellungen, z. B. die eigene Farbe.
+        """
+        attrs: dict[str, dict] = {}
+        for role, f in self.selection():
+            if role in OBJECT_STYLE_ROLES:
+                style = object_style_of(f, self.type_color(role, f)).updated(**changes)
+                attrs.setdefault(role, {})[f.id()] = {STYLE_FIELD: style.to_json()}
+        for role, values in attrs.items():
+            self.layers.change_features(role, {}, values)
+
+    def reset_selection_object_styles(self):
+        """Eigene Gestaltung der ausgewählten Pfeile, Punkte und Texte entfernen – wieder Darstellung nach Typ."""
+        for role, fids in self.selection_ids().items():
+            if role in OBJECT_STYLE_ROLES:
+                self.layers.change_features(role, {}, {fid: {STYLE_FIELD: None} for fid in fids})
+
+    def selection_arrows(self, at_end: bool) -> list[bool]:
+        """Je ausgewählter Linie: hat sie eine Pfeilspitze am Ende (``at_end``) bzw. am Anfang?"""
+        modes = (ARROWS_END, ARROWS_BOTH) if at_end else (ARROWS_START, ARROWS_BOTH)
+        return [
+            object_style_of(f, self.type_color(role, f)).arrows in modes
+            for role, f in self.selection()
+            if role == ROLE_ARROWS
+        ]
+
+    def set_selection_arrows(self, at_end: bool, on: bool):
+        """Pfeilspitze am Ende bzw. am Anfang der ausgewählten Linien schalten; die am anderen Ende bleibt."""
+        attrs = {}
+        for role, f in self.selection():
+            if role != ROLE_ARROWS:
+                continue
+            style = object_style_of(f, self.type_color(role, f))
+            start = style.arrows in (ARROWS_START, ARROWS_BOTH)
+            end = style.arrows in (ARROWS_END, ARROWS_BOTH)
+            if at_end:
+                end = on
+            else:
+                start = on
+            attrs[f.id()] = {STYLE_FIELD: style.updated(arrows=arrow_mode(start, end)).to_json()}
+        if attrs:
+            self.layers.change_features(ROLE_ARROWS, {}, attrs)
+
+    def selection_circle_styles(self) -> list[ZoneStyle]:
+        """Gestaltung des Radius-Kreises je ausgewähltem Punkt (ohne eigene: in der Farbe des Punkts)."""
+        return [
+            object_style_of(f, self.type_color(role, f)).circle_style()
+            for role, f in self.selection()
+            if role == ROLE_POINTS
+        ]
+
+    def update_selection_circle_styles(self, changes: dict):
+        """Muster, Füllung und Rand des Radius-Kreises der ausgewählten Punkte ändern."""
+        attrs = {}
+        for role, f in self.selection():
+            if role == ROLE_POINTS:
+                style = object_style_of(f, self.type_color(role, f))
+                circle = style.circle_style().updated(**changes)
+                attrs[f.id()] = {STYLE_FIELD: style.updated(circle=circle).to_json()}
+        if attrs:
+            self.layers.change_features(ROLE_POINTS, {}, attrs)
+
+    def reset_selection_circle_styles(self):
+        """Eigene Gestaltung des Radius-Kreises entfernen – er folgt wieder der Farbe des Punkts."""
+        attrs = {}
+        for role, f in self.selection():
+            if role == ROLE_POINTS:
+                style = object_style_of(f, self.type_color(role, f))
+                attrs[f.id()] = {STYLE_FIELD: style.updated(circle=None).to_json()}
+        if attrs:
+            self.layers.change_features(ROLE_POINTS, {}, attrs)
+
+    def selection_dimensions(self) -> list[bool]:
+        """Je ausgewähltem Punkt, Linie bzw. Gebiet: stehen seine Maße auf der Karte?"""
+        return [
+            bool(_float_or_none(f.attribute(MEASURE_FIELD)))
+            for role, f in self.selection()
+            if role in MEASURE_ROLES and f.fields().indexFromName(MEASURE_FIELD) >= 0
+        ]
+
+    def set_selection_dimensions(self, shown: bool):
+        """Maße (Radius bzw. Segmentlängen) der Auswahl auf der Karte ein- oder ausblenden."""
+        for role, fids in self.selection_ids().items():
+            if role in MEASURE_ROLES:
+                self.layers.change_features(role, {}, {fid: {MEASURE_FIELD: bool(shown)} for fid in fids})
+                self.layers.refresh_dimensions(role)
+
+    def dimension_target(self) -> tuple[str, QgsFeature] | None:
+        """Das einzeln ausgewählte Objekt, dessen Maße auf der Karte stehen (Punkt nur mit Radius)."""
+        selected = self.selection()
+        if len(selected) != 1:
+            return None
+        role, feature = selected[0]
+        if role not in MEASURE_ROLES or not _float_or_none(feature.attribute(MEASURE_FIELD)):
+            return None
+        if role == ROLE_POINTS and not (_float_or_none(feature.attribute("radius")) or 0) > 0:
+            return None
+        return role, feature
+
+    def set_dimension_adjustment(self, role: str, fid: int, key: str, adjust: dict):
+        """Anpassung eines einzelnen Maßes (Versatz, Größe, ausgeblendet) speichern."""
+        layer = self.layers.layer(role)
+        feature = layer.getFeature(fid) if layer is not None else None
+        if feature is None or not feature.isValid():
+            return
+        adjustments = read_adjustments(feature)
+        adjustments[key] = adjust
+        self.layers.change_features(role, {}, {fid: {DIMENSION_ADJUST_FIELD: json.dumps(adjustments)}})
+
+    def selection_dimensions_adjusted(self) -> bool:
+        """Hat ein ausgewähltes Objekt von Hand verschobene, skalierte oder ausgeblendete Maße?"""
+        return any(read_adjustments(f) for role, f in self.selection() if role in MEASURE_ROLES)
+
+    def reset_selection_dimension_adjustments(self):
+        """Alle Maße der Auswahl wieder an ihren gewohnten Platz, in Normalgröße und sichtbar."""
+        for role, fids in self.selection_ids().items():
+            if role in MEASURE_ROLES:
+                self.layers.change_features(role, {}, {fid: {DIMENSION_ADJUST_FIELD: None} for fid in fids})
+
+    def set_vertices(self, role: str, fid: int, points_wgs: list[QgsPointXY]) -> bool:
+        """Punkte eines Texts, Punkts, einer Linie bzw. eines Gebiets aus Koordinaten (WGS 84) neu setzen."""
+        layer = self.layers.layer(role)
+        if layer is None or not points_wgs:
+            return False
+        transform = QgsCoordinateTransform(WGS84, layer.crs(), QgsProject.instance())
+        points = [transform.transform(p) for p in points_wgs]
+        if role in NOTE_ROLES:
+            geom = QgsGeometry.fromPointXY(points[0])
+        elif role == ROLE_ZONES:
+            if len(points) < 3:
+                return False
+            geom = QgsGeometry.fromPolygonXY([points + [points[0]]])
+        else:
+            if len(points) < 2:
+                return False
+            geom = QgsGeometry.fromPolylineXY(points)
+        # Andere Punktzahl: die Segmente sind neu nummeriert, angepasste Maße passen nicht mehr
+        old = layer.getFeature(fid)
+        attrs = None
+        if role in MEASURE_ROLES and old.isValid() and old.hasGeometry():
+            if old.geometry().constGet().nCoordinates() != geom.constGet().nCoordinates():
+                attrs = {fid: {DIMENSION_ADJUST_FIELD: None}}
+        return self.layers.change_features(role, {fid: geom}, attrs)
+
+    def selection_radii(self) -> list[float]:
+        """Radius-Kreis je ausgewähltem Punkt (Meter, 0 = keiner)."""
+        return [float(f.attribute("radius") or 0) for role, f in self.selection() if role == ROLE_POINTS]
+
+    def set_selection_radius(self, radius_m: float):
+        fids = self.selection_ids().get(ROLE_POINTS, set())
+        if fids:
+            value = max(0.0, float(radius_m))
+            self.layers.change_features(ROLE_POINTS, {}, {fid: {"radius": value} for fid in fids})
 
     def selection_signs_visible(self) -> list[bool]:
         """Je Fahrzeug, Stromerzeuger bzw. Leuchte der Auswahl: zeigt es sein taktisches Zeichen?"""
@@ -1032,6 +1335,9 @@ class PlanningController(QObject):
             if role == ROLE_MARKERS:
                 # Zeichen sind Punkte – für den Versatz zählt der Rahmen ihres Symbols
                 g = self.marker_outline(f)
+            elif role in NOTE_ROLES:
+                # Ebenso Punkte und Texte: es zählt die Beschriftung
+                g = self.note_outline(role, f)
             else:
                 g = QgsGeometry(f.geometry())
                 g.transform(QgsCoordinateTransform(self.layers.layer(role).crs(), canvas_crs, project))
@@ -1156,6 +1462,203 @@ class PlanningController(QObject):
         return self.layers.add_features(role, [feat])
 
     # ------------------------------------------------------------------
+    # Punkte und Texte
+    # ------------------------------------------------------------------
+
+    def place_note(self, role: str, point: QgsPointXY, keep_tool: bool = False) -> bool:
+        """Punkt bzw. Text an ``point`` (Layer-CRS) setzen; ohne ``keep_tool`` wird er ausgewählt und beschriftet."""
+        layer = self.layers.layer(role)
+        obj = self.current_point_type(role)
+        if layer is None or obj is None:
+            return False
+        feat = self.layers.new_feature(role)
+        feat.setGeometry(QgsGeometry.fromPointXY(point))
+        feat.setAttribute("typ_id", obj.id)
+        feat.setAttribute("typ", obj.name)
+        if role == ROLE_TEXTS:
+            # Ein Text ohne Inhalt wäre unsichtbar – der Platzhalter ist in den Details gleich markiert
+            feat.setAttribute("bezeichnung", "Text")
+            feat.setAttribute(LABEL_SIZE_FIELD, TEXT_SIZE_DEFAULT_PT)
+        else:
+            feat.setAttribute("bezeichnung", "")
+            feat.setAttribute("radius", 0.0)
+        before = set(layer.allFeatureIds())
+        if not self.layers.add_features(role, [feat]):
+            return False
+        if keep_tool:
+            return True
+        self.back_to_select()
+        self.select([(role, fid) for fid in set(layer.allFeatureIds()) - before])
+        # Erst nach dem Umschalten der Details: dort steht dann der neue Punkt bzw. Text
+        QTimer.singleShot(0, self.focus_label)
+        return True
+
+    def _note_labels(self, positions, roles_wanted=NOTE_ROLES) -> list[tuple[str, int, QgsGeometry]]:
+        """Beschriftungen der Rollen ``roles_wanted`` als (Rolle, Feature-ID, Umriss im Canvas-CRS)."""
+        roles = {}
+        for role in roles_wanted:
+            layer = self.layers.layer(role)
+            if layer is not None:
+                roles[layer.id()] = role
+        result = []
+        for pos in positions:
+            role = roles.get(pos.layerID)
+            if role is None or pos.isUnplaced:
+                continue
+            geom = pos.labelGeometry if hasattr(pos, "labelGeometry") else QgsGeometry()
+            if geom is None or geom.isEmpty():
+                geom = QgsGeometry.fromRect(pos.labelRect)
+            result.append((role, pos.featureId, QgsGeometry(geom)))
+        return result
+
+    def label_at(self, map_point: QgsPointXY) -> tuple[str, QgsFeature] | None:
+        """Text, Punkt, Linie oder Gebiet, dessen Beschriftung unter ``map_point`` (Canvas-CRS) liegt."""
+        results = self.canvas.labelingResults()
+        if results is None:
+            return None
+        for role, fid, _geom in self._note_labels(results.labelsAtPosition(map_point), LABEL_EDIT_ROLES):
+            feat = self.layers.layer(role).getFeature(fid)
+            if feat.isValid():
+                return role, feat
+        return None
+
+    def note_outline(self, role: str, feature) -> QgsGeometry:
+        """Umriss eines Punkts bzw. Texts im Canvas-CRS: Punkt samt gezeichneter Beschriftung.
+
+        Ohne gezeichnete Beschriftung (noch nicht gerendert, ausgeblendet) ein kleines Quadrat um den Punkt.
+        """
+        canvas_crs = self.canvas.mapSettings().destinationCrs()
+        point = QgsGeometry(feature.geometry())
+        point.transform(QgsCoordinateTransform(self.layers.layer(role).crs(), canvas_crs, QgsProject.instance()))
+        center = point.asPoint()
+        half = _NOTE_OUTLINE_PX * self.canvas.mapUnitsPerPixel()
+        box = QgsRectangle(center.x() - half, center.y() - half, center.x() + half, center.y() + half)
+        results = self.canvas.labelingResults()
+        if results is not None:
+            for hit_role, fid, geom in self._note_labels(results.labelsWithinRect(self.canvas.extent())):
+                if hit_role == role and fid == feature.id():
+                    label_box = geom.boundingBox()
+                    # Ein Text ist seine Beschriftung; ein Punkt umfasst Punkt und Beschreibung
+                    if role == ROLE_TEXTS:
+                        return QgsGeometry.fromRect(label_box)
+                    box.combineExtentWith(label_box)
+                    break
+        return QgsGeometry.fromRect(box)
+
+    # ------------------------------------------------------------------
+    # Beschriftung frei platzieren (Texte, Punkte, Linien, Gebiete)
+    # ------------------------------------------------------------------
+
+    def label_target(self) -> tuple[str, QgsFeature] | None:
+        """Das einzeln ausgewählte Objekt, dessen Beschriftung sich verschieben, skalieren und drehen lässt."""
+        selected = self.selection()
+        if len(selected) != 1:
+            return None
+        role, feature = selected[0]
+        if role not in LABEL_EDIT_ROLES or not (feature.attribute("bezeichnung") or "").strip():
+            return None
+        if role != ROLE_TEXTS and not label_visible(role, feature):
+            return None
+        return role, feature
+
+    def label_frame(self, role: str, feature) -> LabelFrame | None:
+        """Gezeichnete Beschriftung als gedrehter Rahmen im Canvas-CRS; None, wenn sie nicht zu sehen ist."""
+        results = self.canvas.labelingResults()
+        if results is None:
+            return None
+        for hit_role, fid, geom in self._note_labels(results.labelsWithinRect(self.canvas.extent()), (role,)):
+            if hit_role != role or fid != feature.id():
+                continue
+            angle = _float_or_none(feature.attribute(LABEL_ANGLE_FIELD))
+            return LabelFrame.from_geometry(geom, angle, label_size(feature))
+        return None
+
+    def label_anchor(self, role: str, feature) -> QgsPointXY:
+        """Ankerpunkt der Beschriftung im Layer-CRS – wie ``layers.label_anchor_expr``."""
+        geom = feature.geometry()
+        if role == ROLE_ZONES:
+            return geom.centroid().asPoint()
+        if role == ROLE_ARROWS:
+            return geom.interpolate(geom.length() / 2.0).asPoint()
+        return geom.asPoint()
+
+    def set_label_placement(self, role: str, fid: int, center: QgsPointXY, angle: float, size_pt: float):
+        """Beschriftung mit ihrer Mitte an ``center`` (Canvas-CRS) legen, gedreht um ``angle`` Grad im Uhrzeigersinn.
+
+        Gespeichert wird der Versatz zum Ankerpunkt – verschiebt man das Objekt, wandert die Beschriftung mit.
+        Ein Text ist seine Beschriftung: er selbst wird verschoben.
+        """
+        layer = self.layers.layer(role)
+        feature = layer.getFeature(fid) if layer is not None else None
+        if feature is None or not feature.isValid() or not feature.hasGeometry():
+            return
+        point = QgsCoordinateTransform(
+            self.canvas.mapSettings().destinationCrs(), layer.crs(), QgsProject.instance()
+        ).transform(center)
+        angle = (angle + 180.0) % 360.0 - 180.0
+        attrs = {
+            LABEL_ANGLE_FIELD: round(angle, 1) if abs(angle) >= 0.05 else None,
+            LABEL_SIZE_FIELD: round(size_pt, 1),
+        }
+        if role == ROLE_TEXTS:
+            self.layers.change_features(role, {fid: QgsGeometry.fromPointXY(point)}, {fid: attrs})
+            return
+        anchor = self.label_anchor(role, feature)
+        attrs[LABEL_DX_FIELD] = point.x() - anchor.x()
+        attrs[LABEL_DY_FIELD] = point.y() - anchor.y()
+        self.layers.change_features(role, {}, {fid: attrs})
+
+    def annotation_objects(self) -> list[tuple[str, list[tuple[str, int, str]]]]:
+        """Texte, Punkte, Linien und Gebiete fürs Dock: je Art (Titel, [(Rolle, Feature-ID, Name)]), ohne leere."""
+        result = []
+        kinds = ((ROLE_TEXTS, "Texte"), (ROLE_POINTS, "Punkte"), (ROLE_ARROWS, "Linien"), (ROLE_ZONES, "Gebiete"))
+        for role, title in kinds:
+            layer = self.layers.layer(role)
+            if layer is None:
+                continue
+            entries = []
+            for f in layer.getFeatures():
+                # Mehrzeilige Texte: die erste Zeile; ohne Bezeichnung der Typ
+                lines = (f.attribute("bezeichnung") or "").strip().splitlines()
+                entries.append((role, f.id(), lines[0] if lines else (f.attribute("typ") or title)))
+            if entries:
+                result.append((title, sorted(entries, key=lambda e: e[2].lower())))
+        return result
+
+    def select_and_show(self, role: str, fid: int):
+        """Objekt auswählen und die Karte darauf mitten (Maßstab bleibt)."""
+        layer = self.layers.layer(role)
+        feature = layer.getFeature(fid) if layer is not None else None
+        if feature is None or not feature.isValid() or not feature.hasGeometry():
+            return
+        self.back_to_select()
+        self.select([(role, fid)])
+        center = QgsGeometry(feature.geometry())
+        center.transform(
+            QgsCoordinateTransform(layer.crs(), self.canvas.mapSettings().destinationCrs(), QgsProject.instance())
+        )
+        self.canvas.setCenter(center.centroid().asPoint())
+        self.canvas.refresh()
+
+    def selection_labels_placed(self) -> bool:
+        """Hat ein ausgewähltes Objekt eine von Hand verschobene oder gedrehte Beschriftung?"""
+        fields = (LABEL_DX_FIELD, LABEL_DY_FIELD, LABEL_ANGLE_FIELD)
+        return any(
+            _float_or_none(f.attribute(name)) is not None
+            for role, f in self.selection()
+            if role in LABEL_EDIT_ROLES
+            for name in fields
+            if f.fields().indexFromName(name) >= 0
+        )
+
+    def reset_selection_label_placement(self):
+        """Beschriftung der Auswahl wieder an ihren gewohnten Platz, ungedreht."""
+        cleared = {LABEL_DX_FIELD: None, LABEL_DY_FIELD: None, LABEL_ANGLE_FIELD: None}
+        for role, fids in self.selection_ids().items():
+            if role in LABEL_EDIT_ROLES:
+                self.layers.change_features(role, {}, {fid: dict(cleared) for fid in fids})
+
+    # ------------------------------------------------------------------
     # Gebiete und Pfeile
     # ------------------------------------------------------------------
 
@@ -1177,6 +1680,10 @@ class PlanningController(QObject):
         feat.setAttribute("typ_id", obj.id)
         feat.setAttribute("typ", obj.name)
         feat.setAttribute("bezeichnung", "")
+        arrows = arrow_mode(self.arrow_start, self.arrow_heads)
+        if role == ROLE_ARROWS and arrows != ARROWS_END:
+            # Spitze am Ende ist die Darstellung nach Typ – nur Abweichungen brauchen eine eigene Gestaltung
+            feat.setAttribute(STYLE_FIELD, ObjectStyle.default(obj.farbe).updated(arrows=arrows).to_json())
         return self.layers.add_features(role, [feat])
 
     # ------------------------------------------------------------------

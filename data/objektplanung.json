@@ -1,14 +1,15 @@
 {
-  "_hinweis": "Richtwerte für die Objektplanung. Maße in Metern (Grundfläche ohne Abspannung). Bitte vor dem Einsatz mit den Herstellerangaben / der STAN abgleichen. Die Werte lassen sich hier oder direkt im Dock anpassen.",
+  "_hinweis": "Richtwerte für die Objektplanung. Maße in Metern (Grundfläche ohne Abspannung). Bitte vor dem Einsatz mit den Herstellerangaben / der STAN abgleichen. Die Werte lassen sich hier oder direkt im Dock anpassen. „kurz“ ist der Name für die Beschriftung auf der Karte.",
   "zelte": [
-    {"id": "sg300", "name": "Zelt SG 300", "laenge": 6.0, "breite": 5.0, "abspannung": 1.5},
-    {"id": "sg500", "name": "Zelt SG 500", "laenge": 10.0, "breite": 5.0, "abspannung": 1.5},
-    {"id": "sg20", "name": "Zelt SG 20", "laenge": 5.0, "breite": 4.0, "abspannung": 1.5},
-    {"id": "sg30", "name": "Zelt SG 30", "laenge": 6.0, "breite": 5.0, "abspannung": 1.5},
-    {"id": "sg50", "name": "Zelt SG 50", "laenge": 9.0, "breite": 5.6, "abspannung": 1.5},
-    {"id": "pav33", "name": "Faltpavillon 3 x 3 m", "laenge": 3.0, "breite": 3.0, "abspannung": 0.5},
-    {"id": "pav36", "name": "Faltpavillon 3 x 6 m", "laenge": 6.0, "breite": 3.0, "abspannung": 0.5},
-    {"id": "pav48", "name": "Faltpavillon 4 x 8 m", "laenge": 8.0, "breite": 4.0, "abspannung": 0.5}
+    {"id": "sg300", "name": "Zelt SG 300", "kurz": "SG300", "laenge": 6.0, "breite": 5.0, "abspannung": 1.5},
+    {"id": "sg500", "name": "Zelt SG 500", "kurz": "SG500", "laenge": 10.0, "breite": 5.0, "abspannung": 1.5},
+    {"id": "sg20", "name": "Zelt SG 20", "kurz": "SG20", "laenge": 5.0, "breite": 4.0, "abspannung": 1.5},
+    {"id": "sg30", "name": "Zelt SG 30", "kurz": "SG30", "laenge": 6.0, "breite": 5.0, "abspannung": 1.5},
+    {"id": "sg50", "name": "Zelt SG 50", "kurz": "SG50", "laenge": 9.0, "breite": 5.6, "abspannung": 1.5},
+    {"id": "prz33", "name": "Zelt PRZ 33 (aufblasbar)", "kurz": "PRZ33", "laenge": 6.02, "breite": 5.6, "abspannung": 1.5},
+    {"id": "pav33", "name": "Faltpavillon 3 x 3 m", "kurz": "Pavillon 3x3", "laenge": 3.0, "breite": 3.0, "abspannung": 0.5},
+    {"id": "pav36", "name": "Faltpavillon 3 x 6 m", "kurz": "Pavillon 3x6", "laenge": 6.0, "breite": 3.0, "abspannung": 0.5},
+    {"id": "pav48", "name": "Faltpavillon 4 x 8 m", "kurz": "Pavillon 4x8", "laenge": 8.0, "breite": 4.0, "abspannung": 0.5}
   ],
   "_hinweis_fahrzeuge": "Fahrzeugmaße = Länge über alles × Breite ohne Spiegel, Anhänger inkl. Deichsel. Richtwerte – je nach Fahrgestell/Baujahr abweichend, bitte mit Fahrzeugschein abgleichen. Spiegel und Türen über den Mindestabstand berücksichtigen.",
   "fahrzeuge": [
@@ -55,17 +56,31 @@
     {"id": "ballon2000", "name": "Leuchtballon 2000 W", "leistung_w": 2000, "radius": 30, "zeichen": "Maßnahmen/Beleuchten.svg"},
     {"id": "lichtmast", "name": "Lichtmast 4 × 1000 W", "leistung_w": 4000, "radius": 40, "zeichen": "THW_Fahrzeuge/Anhänger_Lichtmast.svg"}
   ],
-  "_hinweis_formen": "Gebiete und Pfeile werden frei gezeichnet; der Typ legt nur Name und Farbe fest.",
+  "_hinweis_formen": "Gebiete und Linien werden frei gezeichnet, Punkte und Texte per Klick gesetzt; der Typ legt nur Name und Standardfarbe fest (je Objekt in den Details anpassbar), bei Gebieten mit \"gefuellt\": false ohne Füllung.",
   "gebiete": [
-    {"id": "abschnitt", "name": "Einsatzabschnitt", "farbe": "#1565c0"},
-    {"id": "gefahr", "name": "Gefahrenbereich", "farbe": "#c62828"},
-    {"id": "bereitstellung", "name": "Bereitstellungsraum", "farbe": "#2e7d32"},
-    {"id": "sperrung", "name": "Absperrbereich", "farbe": "#ef6c00"}
+    {"id": "rot", "name": "Gebiet rot (gefüllt)", "farbe": "#c62828"},
+    {"id": "gelb", "name": "Gebiet gelb (gefüllt)", "farbe": "#fbc02d"},
+    {"id": "blau", "name": "Gebiet blau (gefüllt)", "farbe": "#1565c0"},
+    {"id": "rot_umriss", "name": "Gebiet rot (ohne Füllung)", "farbe": "#c62828", "gefuellt": false},
+    {"id": "gelb_umriss", "name": "Gebiet gelb (ohne Füllung)", "farbe": "#fbc02d", "gefuellt": false},
+    {"id": "blau_umriss", "name": "Gebiet blau (ohne Füllung)", "farbe": "#1565c0", "gefuellt": false}
   ],
   "pfeile": [
-    {"id": "rot", "name": "Pfeil rot", "farbe": "#c62828"},
-    {"id": "blau", "name": "Pfeil blau", "farbe": "#1565c0"},
-    {"id": "schwarz", "name": "Pfeil schwarz", "farbe": "#212121"},
-    {"id": "gruen", "name": "Pfeil grün", "farbe": "#2e7d32"}
+    {"id": "rot", "name": "Linie rot", "farbe": "#c62828"},
+    {"id": "blau", "name": "Linie blau", "farbe": "#1565c0"},
+    {"id": "schwarz", "name": "Linie schwarz", "farbe": "#212121"},
+    {"id": "gruen", "name": "Linie grün", "farbe": "#2e7d32"}
+  ],
+  "punkte": [
+    {"id": "rot", "name": "Punkt rot", "farbe": "#c62828"},
+    {"id": "blau", "name": "Punkt blau", "farbe": "#1565c0"},
+    {"id": "schwarz", "name": "Punkt schwarz", "farbe": "#212121"},
+    {"id": "gruen", "name": "Punkt grün", "farbe": "#2e7d32"}
+  ],
+  "texte": [
+    {"id": "schwarz", "name": "Text schwarz", "farbe": "#212121"},
+    {"id": "rot", "name": "Text rot", "farbe": "#c62828"},
+    {"id": "blau", "name": "Text blau", "farbe": "#1565c0"},
+    {"id": "gruen", "name": "Text grün", "farbe": "#2e7d32"}
   ]
 }

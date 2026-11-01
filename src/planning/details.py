@@ -4,27 +4,31 @@ Liegt als Seite im Details-Dock (``ui.feature_dock.FeatureDock``). Ein einzelnes
 taktisches Zeichen zeigt das Dock mit seinen eigenen Einstellungen.
 """
 
+import math
 import os
 from collections import Counter
 
-from qgis.core import QgsCoordinateTransform, QgsProject
-from qgis.PyQt.QtCore import Qt, QTimer
+from qgis.core import QgsCoordinateTransform, QgsPointXY, QgsProject
+from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtWidgets import (
-    QApplication,
     QCheckBox,
     QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from ..ui.coordinate_table import CoordinateTable
 from ..ui.font_size_box import FontSizeBox
+from ..ui.object_style_popup import KIND_ARROW, KIND_POINT, KIND_TEXT, ObjectStyleButton
 from ..ui.theme import muted_style
 from ..ui.zone_style_popup import ZoneStyleButton
 from ..util.coordinates import WGS84, to_mgrs
@@ -32,13 +36,16 @@ from .catalog import fmt_m
 from .geometry import MetricFrame
 from .layers import (
     FOOTPRINT_ROLES,
+    NOTE_ROLES,
     ROLE_ARROWS,
     ROLE_CABLES,
     ROLE_DISTRIBUTORS,
     ROLE_GENERATORS,
     ROLE_LIGHTS,
     ROLE_MARKERS,
+    ROLE_POINTS,
     ROLE_TENTS,
+    ROLE_TEXTS,
     ROLE_VEHICLES,
     ROLE_ZONES,
     SIGN_ROLES,
@@ -54,10 +61,19 @@ ROLE_TITLES = {
     ROLE_GENERATORS: "Stromerzeuger",
     ROLE_LIGHTS: "Leuchte",
     ROLE_ZONES: "Gebiet",
-    ROLE_ARROWS: "Pfeil",
+    ROLE_ARROWS: "Linie",
+    ROLE_POINTS: "Punkt",
+    ROLE_TEXTS: "Text",
     ROLE_MARKERS: "Taktisches Zeichen",
 }
 _LABEL_HINT = "z.B. Zelt 1, Küche, NEA Nord"
+_NOTE_HINTS = {
+    ROLE_POINTS: "Beschreibung auf der Karte, z.B. „Sammelstelle $POS“ – $POS wird zur UTMREF, mehrzeilig möglich",
+    ROLE_TEXTS: "Text auf der Karte – $POS wird zur UTMREF, mehrzeilig möglich",
+}
+_STYLE_KINDS = {ROLE_ARROWS: KIND_ARROW, ROLE_POINTS: KIND_POINT, ROLE_TEXTS: KIND_TEXT}
+# Objekte mit Koordinaten-Tabelle in den Details
+COORDINATE_ROLES = (ROLE_TEXTS, ROLE_POINTS, ROLE_ARROWS, ROLE_ZONES)
 
 
 def _num(feature, field: str) -> float:
@@ -153,39 +169,36 @@ def properties(role: str, feature, crs) -> list[tuple[str, str]]:
         rows.append(("Umfang", f"{fmt_m(round(geom.constGet().perimeter()))} m"))
     elif role == ROLE_ARROWS:
         rows.append(("Länge", measure_text(role, [feature], crs)))
-    if feature.hasGeometry():
+    elif role == ROLE_POINTS and _num(feature, "radius") > 0:
+        radius = _num(feature, "radius")
+        rows.append(("Kreisfläche", _area(math.pi * radius * radius)))
+        rows.append(("Kreisumfang", f"{fmt_m(round(2 * math.pi * radius, 1))} m"))
+    # Punkte und Texte: ihre Koordinate steht in der Tabelle darunter
+    if feature.hasGeometry() and role not in NOTE_ROLES:
         # Wie bei den Zeichen: UTMREF und Breite/Länge (Mitte des Objekts)
         utmref, latlon = _coords(feature.geometry().centroid().asPoint(), crs)
         rows.append(("UTMREF", utmref))
         rows.append(("Breite/Länge", latlon))
-        if role == ROLE_ZONES:
-            for number, (utmref, latlon) in enumerate(zone_points(feature, crs), 1):
-                rows.append((f"Punkt {number}", f"{utmref}\n{latlon}"))
     return rows
 
 
-def zone_points(feature, crs) -> list[tuple[str, str]]:
-    """Eckpunkte eines Gebiets (Außenrand, ohne den schließenden Punkt) als (UTMREF, „Breite Länge“)."""
+def vertex_points(role: str, feature, crs) -> list[QgsPointXY]:
+    """Punkte des Objekts in WGS 84: Gebiet ohne den schließenden Punkt, Linie in Zeichenrichtung."""
     geom = feature.geometry()
     if geom is None or geom.isEmpty():
         return []
-    polygons = geom.asMultiPolygon() if geom.isMultipart() else [geom.asPolygon()]
-    points = []
-    for polygon in polygons:
-        if not polygon:
-            continue
-        ring = list(polygon[0])
+    if role == ROLE_ZONES:
+        polygons = geom.asMultiPolygon() if geom.isMultipart() else [geom.asPolygon()]
+        ring = list(polygons[0][0]) if polygons and polygons[0] else []
         if len(ring) > 1 and ring[0] == ring[-1]:
             ring.pop()
-        points.extend(_coords(point, crs) for point in ring)
-    return points
-
-
-def zone_points_text(feature, crs) -> str:
-    """Eckpunkte zum Kopieren: je Zeile Nummer, UTMREF und Breite/Länge, durch Tabulator getrennt."""
-    return "\n".join(
-        f"{number}\t{utmref}\t{latlon}" for number, (utmref, latlon) in enumerate(zone_points(feature, crs), 1)
-    )
+    elif role == ROLE_ARROWS:
+        parts = geom.asMultiPolyline() if geom.isMultipart() else [geom.asPolyline()]
+        ring = list(parts[0]) if parts else []
+    else:
+        ring = [geom.asPoint()]
+    transform = QgsCoordinateTransform(crs, WGS84, QgsProject.instance())
+    return [transform.transform(QgsPointXY(p)) for p in ring]
 
 
 def _coords(point, crs) -> tuple[str, str]:
@@ -221,6 +234,50 @@ def _clicked_state(box: QCheckBox) -> bool:
     return visible
 
 
+class _NoteEdit(QPlainTextEdit):
+    """Mehrzeilige Beschreibung bzw. Text: Enter beginnt eine neue Zeile, Strg+Enter oder Verlassen übernimmt."""
+
+    edited = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setTabChangesFocus(True)
+        self.setFixedHeight(self.fontMetrics().lineSpacing() * 4 + 12)
+        # Feste Höhe allein reicht nicht: mit der Standard-Policy „Expanding“ verteilt das Formular den freien
+        # Platz des Docks auf die Zeilen, und die Schriftgröße landet mitten in einer riesigen Lücke
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._dirty = False
+        self.textChanged.connect(self._on_changed)
+
+    def _on_changed(self):
+        self._dirty = True
+
+    def set_text(self, text: str):
+        """Anzeigen, ohne ``edited`` auszulösen."""
+        self.blockSignals(True)
+        self.setPlainText(text)
+        self.blockSignals(False)
+        self._dirty = False
+
+    def _commit(self):
+        if self._dirty:
+            self._dirty = False
+            self.edited.emit()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and (
+            event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        ):
+            self._commit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event):
+        self._commit()
+        super().focusOutEvent(event)
+
+
 class SelectionDetails(QWidget):
     """Objektseite der Details: Angaben, Bezeichnung und Aktionen zur Auswahl.
 
@@ -250,6 +307,12 @@ class SelectionDetails(QWidget):
         self._label_edit = QLineEdit()
         self._label_edit.editingFinished.connect(self._on_label_edited)
         form.addRow("Bezeichnung:", self._label_edit)
+        self._label_row = form.labelForField(self._label_edit)
+        # Punkte und Texte: mehrzeilig, die Beschreibung bzw. der Text steht so auf der Karte
+        self._note_edit = _NoteEdit()
+        self._note_edit.edited.connect(self._on_note_edited)
+        form.addRow("Text:", self._note_edit)
+        self._note_label = form.labelForField(self._note_edit)
         self._labels_shown = QCheckBox("Beschriftung auf der Karte")
         self._labels_shown.setToolTip("Bezeichnung bzw. Typ dieses Objekts auf der Karte zeigen (je Objekt schaltbar)")
         self._labels_shown.clicked.connect(self._on_labels_shown_clicked)
@@ -288,11 +351,64 @@ class SelectionDetails(QWidget):
         zone_style_row.addStretch()
         form.addRow("Gestaltung:", zone_style_row)
         self._zone_style_label = form.labelForField(zone_style_row)
+        # Pfeile, Punkte und Texte: Farbe (Standard: Typfarbe) und Feinheiten im Popup
+        self._object_style = ObjectStyleButton()
+        self._object_style.changed.connect(controller.update_selection_object_styles)
+        self._object_style.reset.connect(controller.reset_selection_object_styles)
+        object_style_row = QHBoxLayout()
+        object_style_row.addWidget(self._object_style)
+        object_style_row.addStretch()
+        form.addRow("Gestaltung:", object_style_row)
+        self._object_style_label = form.labelForField(object_style_row)
+        self._radius = QDoubleSpinBox()
+        self._radius.setRange(0.0, 100_000.0)
+        self._radius.setDecimals(1)
+        self._radius.setSingleStep(10.0)
+        self._radius.setSuffix(" m")
+        self._radius.setSpecialValueText("kein Radius")
+        self._radius.setKeyboardTracking(False)
+        self._radius.setToolTip("Maßstabsgetreuer Kreis um den Punkt, z. B. für Gefahren- oder Sperrbereiche")
+        self._radius.valueChanged.connect(controller.set_selection_radius)
+        form.addRow("Radius:", self._radius)
+        self._radius_label = form.labelForField(self._radius)
+        # Radius-Kreis eines Punkts: Muster, Füllung und Rand wie bei einem Gebiet
+        self._circle_style = ZoneStyleButton(
+            title="Gestaltung des Radius-Kreises",
+            reset_tooltip="Eigene Gestaltung entfernen: der Kreis folgt wieder der Farbe des Punkts",
+        )
+        self._circle_style.changed.connect(controller.update_selection_circle_styles)
+        self._circle_style.reset.connect(controller.reset_selection_circle_styles)
+        circle_row = QHBoxLayout()
+        circle_row.addWidget(self._circle_style)
+        circle_row.addStretch()
+        form.addRow("Radius-Kreis:", circle_row)
+        self._circle_label = form.labelForField(circle_row)
+        self._dimensions = QCheckBox("Maße auf der Karte")
+        self._dimensions.setToolTip("Radius des Kreises bzw. Länge jeder Kante auf der Karte zeigen")
+        self._dimensions.clicked.connect(lambda: controller.set_selection_dimensions(_clicked_state(self._dimensions)))
+        form.addRow("", self._dimensions)
+        # Linien: Pfeilspitzen direkt schaltbar (Breite, Farbe und Größe der Spitzen unter „Gestaltung“)
+        self._start_arrow = QCheckBox("am Anfang")
+        self._start_arrow.clicked.connect(lambda: self._on_arrow_clicked(False))
+        self._end_arrow = QCheckBox("am Ende")
+        self._end_arrow.clicked.connect(lambda: self._on_arrow_clicked(True))
+        arrows_row = QHBoxLayout()
+        arrows_row.addWidget(self._start_arrow)
+        arrows_row.addWidget(self._end_arrow)
+        arrows_row.addStretch()
+        form.addRow("Pfeilspitze:", arrows_row)
+        self._arrows_label = form.labelForField(arrows_row)
         layout.addLayout(form)
 
         # Angaben zum einzelnen Objekt – werden bei jeder Aktualisierung neu aufgebaut
         self._props = QFormLayout()
         layout.addLayout(self._props)
+        self._coords_label = QLabel("Koordinaten:")
+        layout.addWidget(self._coords_label)
+        self._coords = CoordinateTable()
+        self._coords.edited.connect(self._on_coords_edited)
+        self._coords_target: tuple[str, int] | None = None
+        layout.addWidget(self._coords)
 
         self._list = QTreeWidget()
         self._list.setHeaderLabels(["Objekt", "Angabe"])
@@ -313,7 +429,10 @@ class SelectionDetails(QWidget):
         self._delete = QPushButton("Löschen")
         self._delete.setToolTip("Löschen (Entf)")
         self._delete.clicked.connect(lambda: controller.delete_selection())
-        for button in (self._duplicate, self._rotate, self._delete):
+        self._kmz = QPushButton("KMZ …")
+        self._kmz.setToolTip("Auswahl als KMZ für die Drohne speichern – mit Bezeichnung und Farbe")
+        self._kmz.clicked.connect(lambda: controller.export_selection_kmz())
+        for button in (self._duplicate, self._rotate, self._kmz, self._delete):
             row.addWidget(button)
         layout.addLayout(row)
         layout.addStretch()
@@ -349,7 +468,10 @@ class SelectionDetails(QWidget):
             self._subtitle.setText(", ".join(f"{n}× {name}" if n > 1 else name for name, n in counts.most_common()))
 
         self._show_label(planning)
-        _show_states(self._labels_shown, [label_visible(role, f) for role, f in items])
+        # Ein Text ist nur seine Beschriftung – ausgeblendet bliebe nichts mehr auf der Karte
+        only_texts = all(role == ROLE_TEXTS for role, _f in items)
+        self._labels_shown.setVisible(not only_texts)
+        _show_states(self._labels_shown, [label_visible(role, f) for role, f in items if role != ROLE_TEXTS])
         self._font_size.set_sizes(self.controller.selection_label_sizes())
         # Nur Fahrzeuge, Stromerzeuger und Leuchten tragen ein taktisches Zeichen
         signs = [sign_visible(f) for role, f in items if role in SIGN_ROLES]
@@ -364,6 +486,33 @@ class SelectionDetails(QWidget):
         self._zone_style_label.setVisible(bool(zone_styles))
         if zone_styles:
             self._zone_style.set_style(zone_styles[0])
+        style_role = self.controller.selection_style_role()
+        object_styles = self.controller.selection_object_styles() if style_role else []
+        self._object_style.setVisible(bool(object_styles))
+        self._object_style_label.setVisible(bool(object_styles))
+        if object_styles:
+            self._object_style.set_style(object_styles[0], _STYLE_KINDS[style_role])
+        lines = style_role == ROLE_ARROWS
+        for box, label in ((self._start_arrow, None), (self._end_arrow, self._arrows_label)):
+            box.setVisible(lines)
+            if label is not None:
+                label.setVisible(lines)
+        if lines:
+            _show_states(self._start_arrow, self.controller.selection_arrows(at_end=False))
+            _show_states(self._end_arrow, self.controller.selection_arrows(at_end=True))
+        radii = self.controller.selection_radii() if style_role == ROLE_POINTS else []
+        self._radius.setVisible(bool(radii))
+        self._radius_label.setVisible(bool(radii))
+        if radii:
+            self._radius.blockSignals(True)
+            self._radius.setValue(radii[0])
+            self._radius.blockSignals(False)
+        # Die Gestaltung des Kreises erst, wenn ein Punkt einen Radius hat
+        circle = any(radius > 0 for radius in radii)
+        self._circle_style.setVisible(circle)
+        self._circle_label.setVisible(circle)
+        if circle:
+            self._circle_style.set_style(self.controller.selection_circle_styles()[0])
         if footprint:
             self._rotation_value = _num(single[1], "rotation") % 360.0
             self._rotation.blockSignals(True)
@@ -378,22 +527,57 @@ class SelectionDetails(QWidget):
                 text = QLabel(value)
                 text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
                 self._props.addRow(f"{label}:", text)
-            if role == ROLE_ZONES and feature.hasGeometry():
-                points = zone_points_text(feature, self._crs(role))
-                copy = QPushButton("Eckpunkte kopieren")
-                copy.setToolTip("Alle Eckpunkte (UTMREF und Breite/Länge) in die Zwischenablage kopieren")
-                copy.clicked.connect(lambda _checked=False, text=points: QApplication.clipboard().setText(text))
-                self._props.addRow("", copy)
+        # Texte, Punkte, Linien, Gebiete: Koordinaten zum Ansehen, Kopieren und Eintippen
+        coords = single is not None and single[0] in COORDINATE_ROLES and single[1].hasGeometry()
+        self._coords_label.setVisible(coords)
+        self._coords.setVisible(coords)
+        if coords:
+            role, feature = single
+            self._coords_target = (role, feature.id())
+            minimum = {ROLE_ZONES: 3, ROLE_ARROWS: 2}.get(role, 1)
+            self._coords.set_points(vertex_points(role, feature, self._crs(role)), minimum, closed=role == ROLE_ZONES)
+        # Maße auf der Karte: Linien und Gebiete immer, Punkte erst mit Radius
+        dims = self.controller.selection_dimensions() if style_role in (ROLE_POINTS, ROLE_ARROWS) else []
+        if style_role is None and all(r == ROLE_ZONES for r, _f in items):
+            dims = self.controller.selection_dimensions()
+        dims_shown = bool(dims) and (style_role != ROLE_POINTS or circle)
+        self._dimensions.setVisible(dims_shown)
+        if dims_shown:
+            _show_states(self._dimensions, dims)
 
         self._fill_list(items if single is None else [])
         self._rotate.setEnabled(any(role in FOOTPRINT_ROLES for role, _f in items))
+        # Taktische Zeichen allein lassen sich nicht als KMZ speichern
+        self._kmz.setEnabled(any(role != ROLE_MARKERS for role, _f in items))
 
     def _crs(self, role: str):
         layer = self.controller.layer(role)
         return layer.crs() if layer is not None else QgsProject.instance().crs()
 
     def _show_label(self, planning):
-        """Bezeichnung gilt nur für Objekte der Objektplanung; Zeichen haben ihre Beschriftung."""
+        """Bezeichnung gilt nur für Objekte der Objektplanung; Zeichen haben ihre Beschriftung.
+
+        Nur Punkte bzw. nur Texte ausgewählt: statt der einzeiligen Bezeichnung das mehrzeilige Textfeld.
+        """
+        roles = {role for role, _f in planning}
+        notes = (
+            len(roles) == 1 and next(iter(roles)) in NOTE_ROLES and len(planning) == len(self.controller.selection())
+        )
+        self._label_edit.setVisible(not notes)
+        self._label_row.setVisible(not notes)
+        self._note_edit.setVisible(notes)
+        self._note_label.setVisible(notes)
+        if notes:
+            role = next(iter(roles))
+            self._note_label.setText("Text:" if role == ROLE_TEXTS else "Beschreibung:")
+            texts = {(f.attribute("bezeichnung") or "") for _role, f in planning}
+            text = next(iter(texts)) if len(texts) == 1 else ""
+            if self._note_edit.toPlainText() != text:
+                self._note_edit.set_text(text)
+            self._note_edit.setPlaceholderText(
+                _NOTE_HINTS[role] if len(texts) <= 1 else "unterschiedlich – Eingabe gilt für alle"
+            )
+            return
         self._label_edit.setEnabled(bool(planning))
         labels = {item_name(role, f) for role, f in planning}
         uniform = len(labels) <= 1
@@ -452,6 +636,22 @@ class SelectionDetails(QWidget):
         self._label_edit.setModified(False)
         self.controller.set_selection_label(self._label_edit.text().strip())
 
+    def _on_arrow_clicked(self, at_end: bool):
+        box = self._end_arrow if at_end else self._start_arrow
+        self.controller.set_selection_arrows(at_end, _clicked_state(box))
+
+    def _on_coords_edited(self, points):
+        if self._coords_target is not None:
+            self.controller.set_vertices(*self._coords_target, points)
+
+    def _on_note_edited(self):
+        text = self._note_edit.toPlainText().strip()
+        # Ein leerer Text wäre auf der Karte nicht mehr zu sehen (und nicht mehr anzuklicken)
+        if not text and self.controller.selection_style_role() == ROLE_TEXTS:
+            self.refresh()
+            return
+        self.controller.set_selection_label(text)
+
     def _on_rotation_edited(self, value: float):
         delta = (value - self._rotation_value + 180.0) % 360.0 - 180.0
         if abs(delta) >= 0.5:
@@ -459,6 +659,9 @@ class SelectionDetails(QWidget):
             self.controller.rotate_selection(delta)
 
     def focus_label(self):
-        if self._label_edit.isEnabled():
+        if not self._note_edit.isHidden():
+            self._note_edit.setFocus()
+            self._note_edit.selectAll()
+        elif self._label_edit.isEnabled():
             self._label_edit.setFocus()
             self._label_edit.selectAll()

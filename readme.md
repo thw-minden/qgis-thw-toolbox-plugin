@@ -76,7 +76,7 @@ Umfassende Sammlung von über 1000 taktischen Zeichen:
 
 ### Voraussetzungen
 
-- **QGIS** 3.0 oder höher
+- **QGIS** 3.44 oder höher (auch QGIS 4)
 - **Python** 3.x (wird mit QGIS mitgeliefert)
 - **Betriebssystem** - Windows, Linux oder macOS
 
@@ -210,7 +210,6 @@ Danke an **Steven Recktenwald** als Ideengeber für das Feature „Leitungsrolle
 |-----------|--------|--------|
 | Taktische Zeichen | CC BY 4.0 | [jonas-koeritz/Taktische-Zeichen](https://github.com/jonas-koeritz/Taktische-Zeichen) |
 | Google Roboto Font | Apache 2.0 | [Google Fonts](https://fonts.google.com/specimen/Roboto) |
-| Nordpfeil | wie QGIS | QGIS-SVG-Sammlung (`arrows/NorthArrow_04.svg`) |
 | THW-Logo | gemeinfrei (amtliches Werk, § 5 UrhG); Verwendung als Kennzeichen eingeschränkt | [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:THW.svg) |
 | Bundesadler mit THW-Schriftzug | Hoheitszeichen; Verwendung nur durch berechtigte Stellen | `templates/assets/logo.svg` |
 
@@ -229,7 +228,7 @@ Dieses Plugin steht unter der **MIT-Lizenz**; ausgenommen sind das THW-Logo und 
 **Plugin erscheint nicht in der Toolbar**
 - Plugin im Plugin-Manager aktiviert?
 - QGIS neu starten
-- QGIS-Version mindestens 3.0?
+- QGIS-Version mindestens 3.44?
 
 **Symbole werden nicht angezeigt**
 - Layer "THW Toolbox Marker" sichtbar?

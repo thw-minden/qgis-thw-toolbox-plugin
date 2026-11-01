@@ -17,6 +17,7 @@ class FootprintType:
     ``abspannung`` ist bei Zelten der Raum für die Abspannleinen rund um
     die Grundfläche; bei Fahrzeugen 0. ``zeichen`` ist das taktische Zeichen
     (Pfad relativ zu ``svgs/``), das in der Grundfläche angezeigt wird.
+    ``kurz`` ist der kurze Name für die Beschriftung auf der Karte (z. B. „SG30“).
     """
 
     id: str
@@ -25,6 +26,11 @@ class FootprintType:
     breite: float
     abspannung: float = 1.0
     zeichen: str = ""
+    kurz: str = ""
+
+    @property
+    def short_name(self) -> str:
+        return self.kurz or self.name
 
     @property
     def flaeche(self) -> float:
@@ -74,24 +80,46 @@ class LightType:
 
 @dataclass
 class ShapeType:
-    """Gebiet oder Pfeil: frei gezeichnete Form, der Typ bestimmt Name und Farbe."""
+    """Gebiet, Linie, Punkt oder Text: der Typ bestimmt Name und Standardfarbe (Gebiete: auch, ob gefüllt)."""
 
     id: str
     name: str
     farbe: str
+    gefuellt: bool = True
 
 
 _DEFAULT_ZONES = [
+    ShapeType("rot", "Gebiet rot (gefüllt)", "#c62828"),
+    ShapeType("gelb", "Gebiet gelb (gefüllt)", "#fbc02d"),
+    ShapeType("blau", "Gebiet blau (gefüllt)", "#1565c0"),
+    ShapeType("rot_umriss", "Gebiet rot (ohne Füllung)", "#c62828", gefuellt=False),
+    ShapeType("gelb_umriss", "Gebiet gelb (ohne Füllung)", "#fbc02d", gefuellt=False),
+    ShapeType("blau_umriss", "Gebiet blau (ohne Füllung)", "#1565c0", gefuellt=False),
+]
+# Gebietstypen früherer Versionen: nicht mehr zur Wahl, aber vorhandene Gebiete werden weiter dargestellt
+_LEGACY_ZONES = [
     ShapeType("abschnitt", "Einsatzabschnitt", "#1565c0"),
     ShapeType("gefahr", "Gefahrenbereich", "#c62828"),
     ShapeType("bereitstellung", "Bereitstellungsraum", "#2e7d32"),
     ShapeType("sperrung", "Absperrbereich", "#ef6c00"),
 ]
 _DEFAULT_ARROWS = [
-    ShapeType("rot", "Pfeil rot", "#c62828"),
-    ShapeType("blau", "Pfeil blau", "#1565c0"),
-    ShapeType("schwarz", "Pfeil schwarz", "#212121"),
-    ShapeType("gruen", "Pfeil grün", "#2e7d32"),
+    ShapeType("rot", "Linie rot", "#c62828"),
+    ShapeType("blau", "Linie blau", "#1565c0"),
+    ShapeType("schwarz", "Linie schwarz", "#212121"),
+    ShapeType("gruen", "Linie grün", "#2e7d32"),
+]
+_DEFAULT_POINTS = [
+    ShapeType("rot", "Punkt rot", "#c62828"),
+    ShapeType("blau", "Punkt blau", "#1565c0"),
+    ShapeType("schwarz", "Punkt schwarz", "#212121"),
+    ShapeType("gruen", "Punkt grün", "#2e7d32"),
+]
+_DEFAULT_TEXTS = [
+    ShapeType("schwarz", "Text schwarz", "#212121"),
+    ShapeType("rot", "Text rot", "#c62828"),
+    ShapeType("blau", "Text blau", "#1565c0"),
+    ShapeType("gruen", "Text grün", "#2e7d32"),
 ]
 
 
@@ -105,6 +133,8 @@ class Catalog:
     beleuchtung: list[LightType] = field(default_factory=list)
     gebiete: list[ShapeType] = field(default_factory=list)
     pfeile: list[ShapeType] = field(default_factory=list)
+    punkte: list[ShapeType] = field(default_factory=list)
+    texte: list[ShapeType] = field(default_factory=list)
 
     def tent(self, type_id: str) -> FootprintType | None:
         return next((t for t in self.zelte if t.id == type_id), None)
@@ -123,6 +153,11 @@ class Catalog:
 
     def light(self, type_id: str) -> LightType | None:
         return next((li for li in self.beleuchtung if li.id == type_id), None)
+
+    def zone_types(self) -> list[ShapeType]:
+        """Alle darzustellenden Gebietstypen: die wählbaren und die früherer Versionen."""
+        ids = {t.id for t in self.gebiete}
+        return self.gebiete + [t for t in _LEGACY_ZONES if t.id not in ids]
 
 
 def load_catalog(plugin_dir: str | None = None) -> Catalog:
@@ -190,6 +225,8 @@ def load_catalog(plugin_dir: str | None = None) -> Catalog:
             logger.warning("Ungültiger Beleuchtungs-Eintrag im Katalog: %s", entry)
     catalog.gebiete = _load_shapes(raw.get("gebiete", [])) or list(_DEFAULT_ZONES)
     catalog.pfeile = _load_shapes(raw.get("pfeile", [])) or list(_DEFAULT_ARROWS)
+    catalog.punkte = _load_shapes(raw.get("punkte", [])) or list(_DEFAULT_POINTS)
+    catalog.texte = _load_shapes(raw.get("texte", [])) or list(_DEFAULT_TEXTS)
     return catalog
 
 
@@ -197,9 +234,16 @@ def _load_shapes(entries: list) -> list[ShapeType]:
     result = []
     for entry in entries:
         try:
-            result.append(ShapeType(id=str(entry["id"]), name=str(entry["name"]), farbe=str(entry["farbe"])))
+            result.append(
+                ShapeType(
+                    id=str(entry["id"]),
+                    name=str(entry["name"]),
+                    farbe=str(entry["farbe"]),
+                    gefuellt=bool(entry.get("gefuellt", True)),
+                )
+            )
         except (KeyError, TypeError, ValueError):
-            logger.warning("Ungültiger Gebiet-/Pfeil-Eintrag im Katalog: %s", entry)
+            logger.warning("Ungültiger Gebiet-/Pfeil-/Punkt-/Text-Eintrag im Katalog: %s", entry)
     return result
 
 
@@ -215,6 +259,7 @@ def _load_footprints(entries: list, default_guy: float) -> list[FootprintType]:
                     breite=float(entry["breite"]),
                     abspannung=float(entry.get("abspannung", default_guy)),
                     zeichen=str(entry.get("zeichen", "")),
+                    kurz=str(entry.get("kurz", "")),
                 )
             )
         except (KeyError, TypeError, ValueError):

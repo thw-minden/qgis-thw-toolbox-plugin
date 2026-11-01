@@ -35,6 +35,7 @@ class ConfigDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(self._build_default_icon_group())
         layout.addWidget(self._build_label_group())
+        layout.addWidget(self._build_coordinate_group())
         if planning is not None:
             layout.addWidget(self._build_canvas_group())
 
@@ -109,6 +110,21 @@ class ConfigDialog(QDialog):
         box.setLayout(form)
         return box
 
+    def _build_coordinate_group(self) -> QGroupBox:
+        box = QGroupBox("Koordinaten")
+        form = QFormLayout()
+        self._combo_mgrs = QComboBox()
+        for dm, text in ((100, "10 m (4 Stellen)"), (10, "1 m (5 Stellen)"), (1, "0,1 m (6 Stellen)")):
+            self._combo_mgrs.addItem(text, dm)
+        self._combo_mgrs.setCurrentIndex(max(0, self._combo_mgrs.findData(self._settings.mgrs_resolution_dm)))
+        self._combo_mgrs.setToolTip(
+            "Stellen je Rechts- und Hochwert in Details, Tabellen und $POS auf der Karte (gilt für dieses Projekt).\n"
+            "Die Eingabe von Koordinaten nimmt jede Genauigkeit an."
+        )
+        form.addRow("UTMREF-Genauigkeit", self._combo_mgrs)
+        box.setLayout(form)
+        return box
+
     def _build_canvas_group(self) -> QGroupBox:
         box = QGroupBox("Karte")
         form = QFormLayout()
@@ -133,3 +149,4 @@ class ConfigDialog(QDialog):
         self._settings.label_enable = self._cb_label_enable.isChecked()
         self._settings.label_font_size_mm = self._sb_label_font_size.value() / _MM_TO_INT
         self._settings.label_buffer_size_mm = self._sb_label_buffer_size.value() / _MM_TO_INT
+        self._settings.mgrs_resolution_dm = self._combo_mgrs.currentData()

@@ -117,8 +117,22 @@ class DjiMbtilesExporter:
         zoom_min: int,
         zoom_max: int,
     ) -> bool:
-        extent_4326 = _layer_extent_in_wgs84(layer)
-        if extent_4326 is None or extent_4326.isEmpty():
+        return self.export_layers([layer], target_path, zoom_min, zoom_max, _layer_extent_in_wgs84(layer), layer.name())
+
+    def export_layers(
+        self,
+        layers: list[QgsMapLayer],
+        target_path: str,
+        zoom_min: int,
+        zoom_max: int,
+        extent_4326: QgsRectangle | None,
+        name: str,
+    ) -> bool:
+        """Mehrere Layer gemeinsam in eine MBTiles-Datei zeichnen, z. B. die ganze Objektplanung samt Zeichen.
+
+        ``extent_4326``: Ausdehnung in WGS 84 – Beschriftungen und Kreise ragen über die Layer-Ausdehnung hinaus.
+        """
+        if extent_4326 is None or extent_4326.isEmpty() or not layers:
             self._on_error(
                 "Ebenenlayer-Export (Drohne)",
                 "Layer hat keine verwertbare Ausdehnung",
@@ -127,14 +141,14 @@ class DjiMbtilesExporter:
             return False
 
         self._on_progress(
-            f"Erzeuge MBTiles für „{layer.name()}“ (Zoom {zoom_min}–{zoom_max}) — das kann einige Minuten dauern …"
+            f"Erzeuge MBTiles für „{name}“ (Zoom {zoom_min}–{zoom_max}) — das kann einige Minuten dauern …"
         )
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         # The `native:tilesxyzmbtiles` algorithm renders whatever is visible
         # in the layer tree — MAP_THEME is not reliably honored across QGIS
         # versions. So we solo the target layer by toggling visibility
         # directly and restore the previous state afterwards.
-        previous_visibility = _solo_layer_visibility(layer)
+        previous_visibility = _solo_layer_visibility(layers)
         try:
             params = {
                 "EXTENT": (
@@ -157,7 +171,7 @@ class DjiMbtilesExporter:
                 target_path,
                 zoom_min,
                 zoom_max,
-                layer.id(),
+                ", ".join(lyr.id() for lyr in layers),
             )
             feedback = _ProgressFeedback(self._on_feedback, self._on_cancel_check)
             processing.run("native:tilesxyzmbtiles", params, feedback=feedback)
@@ -177,21 +191,34 @@ class DjiMbtilesExporter:
         return True
 
 
-def _solo_layer_visibility(layer: QgsVectorLayer) -> dict[str, bool]:
-    """Hide every layer in the tree except `layer`; return previous state."""
+def _solo_layer_visibility(layers: list[QgsMapLayer]) -> dict:
+    """Hide every layer in the tree except ``layers``; return the previous state (layers and groups).
+
+    Groups containing a wanted layer are switched on too, otherwise e.g. a hidden „Objektplanung“
+    group would keep its layers out of the export.
+    """
     root = QgsProject.instance().layerTreeRoot()
-    previous = {n.layerId(): n.isVisible() for n in root.findLayers()}
+    wanted = {lyr.id() for lyr in layers}
+    previous = {
+        "layers": {n.layerId(): n.itemVisibilityChecked() for n in root.findLayers()},
+        "groups": [(g, g.itemVisibilityChecked()) for g in root.findGroups(True)],
+    }
     for node in root.findLayers():
-        node.setItemVisibilityChecked(node.layerId() == layer.id())
+        node.setItemVisibilityChecked(node.layerId() in wanted)
+        if node.layerId() in wanted:
+            node.setItemVisibilityCheckedParentRecursive(True)
     return previous
 
 
-def _restore_layer_visibility(previous: dict[str, bool]) -> None:
+def _restore_layer_visibility(previous: dict) -> None:
     try:
         root = QgsProject.instance().layerTreeRoot()
+        for group, checked in previous.get("groups", []):
+            group.setItemVisibilityChecked(checked)
+        layers = previous.get("layers", {})
         for node in root.findLayers():
-            if node.layerId() in previous:
-                node.setItemVisibilityChecked(previous[node.layerId()])
+            if node.layerId() in layers:
+                node.setItemVisibilityChecked(layers[node.layerId()])
     except Exception as e:
         logger.warning("Konnte Layer-Sichtbarkeit nicht zurücksetzen: %s", e)
 
@@ -223,6 +250,8 @@ class _ZoomDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
         self.setWindowTitle("MBTiles-Zoomstufen")
+        # Ohne Mindestbreite schrumpft Qt den Dialog auf die Zahlenfelder – Titel und Hinweis werden abgeschnitten
+        self.setMinimumWidth(420)
 
         self.min_spin = QSpinBox(self)
         self.min_spin.setRange(0, 22)
@@ -250,6 +279,9 @@ class _ZoomDialog(QDialog):
         layout.addLayout(form)
         layout.addWidget(info)
         layout.addWidget(buttons)
+        # Höhe folgt dem umbrochenen Text bei der endgültigen Breite
+        layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)
+        self.adjustSize()
 
     @classmethod
     def ask(cls, parent) -> tuple[int, int] | None:

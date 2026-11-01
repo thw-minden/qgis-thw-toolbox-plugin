@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import closing
 from typing import Callable, Optional
 
 from qgis.core import (
@@ -218,7 +219,8 @@ def rehydrate_cache(plugin_dir: str) -> int:
 
     db_path = QgsApplication.userStylePath()
     try:
-        with sqlite3.connect(db_path) as con:
+        # `with` on the connection only commits/rolls back; `closing` actually closes it
+        with closing(sqlite3.connect(db_path)) as con:
             placeholders = ",".join("?" * len(name_to_path))
             # placeholders is only "?,?,?…" derived from len() — values are bound below.
             cur = con.execute(

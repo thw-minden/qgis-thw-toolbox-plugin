@@ -2,6 +2,7 @@ import html
 import os
 import zipfile
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from qgis.core import (
     QgsCoordinateReferenceSystem,
@@ -23,6 +24,20 @@ logger = get_logger(__name__)
 
 _KML_CRS = QgsCoordinateReferenceSystem("EPSG:4326")
 _DEFAULT_COLOR = QColor(255, 140, 0, 160)  # Orange, semi-transparent
+
+
+@dataclass
+class KmlItem:
+    """Ein fertig aufbereitetes Objekt für ``export_items``: Geometrie im ``crs``, Name und Farben.
+
+    ``fill`` ist die Flächenfarbe samt Deckkraft (Alpha 0 = nur Umriss), ``line`` die von Linie und Rand.
+    """
+
+    geometry: QgsGeometry
+    crs: QgsCoordinateReferenceSystem
+    label: str
+    fill: QColor
+    line: QColor
 
 
 class DjiKmlExporter:
@@ -79,18 +94,25 @@ class DjiKmlExporter:
         return self.export(layer, target_path)
 
     def export(self, layer: QgsVectorLayer, target_path: str) -> bool:
+        return self._export(lambda: self._build_kml(layer), layer.name(), target_path)
+
+    def export_items(self, items: list[KmlItem], target_path: str, name: str) -> bool:
+        """Einzelne Objekte (z. B. ausgewählte Gebiete der Objektplanung) mit eigenem Namen und eigener Farbe."""
+        return self._export(lambda: _items_kml(items, name), name, target_path)
+
+    def _export(self, build: Callable[[], str], name: str, target_path: str) -> bool:
         fmt = "KMZ" if target_path.lower().endswith(".kmz") else "KML"
-        self._on_progress(f"Exportiere Layer „{layer.name()}“ als {fmt} …")
+        self._on_progress(f"Exportiere „{name}“ als {fmt} …")
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             try:
-                kml_text = self._build_kml(layer)
+                kml_text = build()
             except Exception as e:
                 logger.exception("KML-Erzeugung fehlgeschlagen")
                 self._on_error(
                     "Flugrouten-Export (Drohne)",
                     "KML konnte nicht erzeugt werden",
-                    f"Layer: {layer.name()}\nFehler: {e}",
+                    f"Inhalt: {name}\nFehler: {e}",
                 )
                 return False
 
@@ -123,7 +145,7 @@ class DjiKmlExporter:
             renderer.startRender(render_ctx, layer.fields())
 
         placemarks: list[str] = []
-        styles: dict[str, QColor] = {}
+        styles: dict[str, tuple[QColor, QColor]] = {}
 
         try:
             for feat in layer.getFeatures(QgsFeatureRequest()):
@@ -140,7 +162,8 @@ class DjiKmlExporter:
                         continue
 
                 color = _feature_color(renderer, feat, render_ctx)
-                style_id = _register_color(styles, color)
+                # Wie bisher: Rand in derselben Farbe, deckend
+                style_id = _register_color(styles, color, QColor(color.red(), color.green(), color.blue()))
 
                 label = _feature_label(feat, display_field)
                 placemarks.extend(_geometry_to_placemarks(geom, style_id, label))
@@ -148,15 +171,34 @@ class DjiKmlExporter:
             if renderer is not None:
                 renderer.stopRender(render_ctx)
 
-        style_blocks = "\n".join(_style_block(sid, col) for sid, col in styles.items())
-        doc_name = html.escape(layer.name() or "Layer")
-        return (
-            '<?xml version="1.0" encoding="UTF-8"?>\n'
-            '<kml xmlns="http://www.opengis.net/kml/2.2">\n'
-            "<Document>\n"
-            f"<name>{doc_name}</name>\n"
-            f"{style_blocks}\n" + "\n".join(placemarks) + "\n</Document>\n</kml>\n"
-        )
+        return _document(layer.name() or "Layer", styles, placemarks)
+
+
+def _items_kml(items: list[KmlItem], name: str) -> str:
+    placemarks: list[str] = []
+    styles: dict[str, tuple[QColor, QColor]] = {}
+    for item in items:
+        geom = QgsGeometry(item.geometry)
+        if geom.isEmpty():
+            continue
+        transform = _reproject_transform(item.crs)
+        if not transform.isShortCircuited():
+            geom.transform(transform)
+        style_id = _register_color(styles, item.fill, item.line)
+        placemarks.extend(_geometry_to_placemarks(geom, style_id, item.label))
+    return _document(name, styles, placemarks)
+
+
+def _document(name: str, styles: dict, placemarks: list[str]) -> str:
+    style_blocks = "\n".join(_style_block(sid, fill, line) for sid, (fill, line) in styles.items())
+    doc_name = html.escape(name)
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<kml xmlns="http://www.opengis.net/kml/2.2">\n'
+        "<Document>\n"
+        f"<name>{doc_name}</name>\n"
+        f"{style_blocks}\n" + "\n".join(placemarks) + "\n</Document>\n</kml>\n"
+    )
 
 
 def _reproject_transform(source_crs: QgsCoordinateReferenceSystem) -> QgsCoordinateTransform:
@@ -180,24 +222,30 @@ def _feature_color(renderer, feat, render_ctx) -> QColor:
     return QColor(_DEFAULT_COLOR)
 
 
-def _register_color(styles: dict[str, QColor], color: QColor) -> str:
-    key = f"s_{color.red():02x}{color.green():02x}{color.blue():02x}{color.alpha():02x}"
+def _hex(color: QColor) -> str:
+    return f"{color.red():02x}{color.green():02x}{color.blue():02x}{color.alpha():02x}"
+
+
+def _register_color(styles: dict, fill: QColor, line: QColor) -> str:
+    key = f"s_{_hex(fill)}_{_hex(line)}"
     if key not in styles:
-        styles[key] = color
+        styles[key] = (QColor(fill), QColor(line))
     return key
 
 
-def _style_block(style_id: str, color: QColor) -> str:
+def _kml_color(color: QColor) -> str:
     # KML color format is aabbggrr (alpha, blue, green, red) — yes, reversed.
-    kml_color = f"{color.alpha():02x}{color.blue():02x}{color.green():02x}{color.red():02x}"
-    # Stroke: opaque version of the same color, slightly darker would be ideal
-    # but keeping it identical keeps the style block small and predictable.
-    line_color = f"ff{color.blue():02x}{color.green():02x}{color.red():02x}"
+    return f"{color.alpha():02x}{color.blue():02x}{color.green():02x}{color.red():02x}"
+
+
+def _style_block(style_id: str, fill: QColor, line: QColor) -> str:
+    # Ohne Füllung (Alpha 0) nur der Umriss
+    filled = 1 if fill.alpha() > 0 else 0
     return (
         f'<Style id="{style_id}">'
-        f"<LineStyle><color>{line_color}</color><width>2</width></LineStyle>"
-        f"<PolyStyle><color>{kml_color}</color><fill>1</fill><outline>1</outline></PolyStyle>"
-        f"<IconStyle><color>{line_color}</color></IconStyle>"
+        f"<LineStyle><color>{_kml_color(line)}</color><width>2</width></LineStyle>"
+        f"<PolyStyle><color>{_kml_color(fill)}</color><fill>{filled}</fill><outline>1</outline></PolyStyle>"
+        f"<IconStyle><color>{_kml_color(line)}</color></IconStyle>"
         "</Style>"
     )
 

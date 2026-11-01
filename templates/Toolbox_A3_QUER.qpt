@@ -2106,7 +2106,7 @@
    </layer>
   </symbol>
  </LayoutItem>
- <LayoutItem anchorPoint="0" background="true" blendMode="0" excludeFromExports="0" file="./GRAFIKEN/LAYOUT/Nordpfeil.svg" frame="false" frameJoinStyle="miter" groupUuid="" id="Nordpfeil" itemRotation="0" mapUuid="{bd3b57af-8a5b-440e-8187-1fc08d75f654}" mode="2" northMode="1" northOffset="0" opacity="1" outlineWidthM="0.3,mm" pictureHeight="8.99371" pictureRotation="0.0637983" pictureWidth="5.65584" position="332.125,34.125,mm" positionLock="false" positionOnPage="332.125,34.125,mm" referencePoint="0" resizeMode="0" size="6.875,9,mm" svgBorderColor="0,0,0,255,rgb:0,0,0,1" svgBorderWidth="0.2" svgFillColor="255,255,255,255,rgb:1,1,1,1" templateUuid="{5885091e-b3aa-4ad9-9e87-838a34c02cfa}" type="65640" uuid="{5885091e-b3aa-4ad9-9e87-838a34c02cfa}" visibility="1" zValue="2">
+ <LayoutItem anchorPoint="0" background="true" blendMode="0" excludeFromExports="0" file="./GRAFIKEN/LAYOUT/North.svg" frame="false" frameJoinStyle="miter" groupUuid="" id="Nordpfeil" itemRotation="0" mapUuid="{bd3b57af-8a5b-440e-8187-1fc08d75f654}" mode="2" northMode="1" northOffset="0" opacity="1" outlineWidthM="0.3,mm" pictureHeight="8.99371" pictureRotation="0.0637983" pictureWidth="5.65584" position="332.125,34.125,mm" positionLock="false" positionOnPage="332.125,34.125,mm" referencePoint="0" resizeMode="0" size="6.875,9,mm" svgBorderColor="0,0,0,255,rgb:0,0,0,1" svgBorderWidth="0.2" svgFillColor="255,255,255,255,rgb:1,1,1,1" templateUuid="{5885091e-b3aa-4ad9-9e87-838a34c02cfa}" type="65640" uuid="{5885091e-b3aa-4ad9-9e87-838a34c02cfa}" visibility="1" zValue="2">
   <FrameColor alpha="255" blue="0" green="0" red="0"/>
   <BackgroundColor alpha="150" blue="255" green="255" red="255"/>
   <LayoutObject>

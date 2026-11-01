@@ -1,5 +1,6 @@
 """Umrechnung WGS84 (Breite/Länge) ↔ UTMREF/MGRS und Parser für Koordinaten-Eingaben."""
 
+import math
 import re
 
 from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsPointXY, QgsProject
@@ -33,15 +34,37 @@ _BAND_MIN_NORTHING = {
     "X": 7_900_000,
 }
 
-_MGRS_RE = re.compile(r"^(\d{1,2})([C-HJ-NP-X])([A-HJ-NP-Z])([A-HJ-NP-V])(\d*)$")
+# Zone, Band und 100-km-Quadrat; danach Rechts- und Hochwert in beliebiger Schreibweise (siehe _split_digits)
+_MGRS_RE = re.compile(r"^\s*(\d{1,2})\s*([C-HJ-NP-X])\s*([A-HJ-NP-Z])\s*([A-HJ-NP-V])\s*(.*?)\s*$")
+# Rechts-/Hochwert mit Nachkommastellen, z. B. „94254,3“ (immer 5 Stellen vor dem Komma)
+_DECIMAL_VALUE_RE = re.compile(r"^\d{5}([.,]\d+)?$")
+
+# Angezeigte UTMREF-Auflösung in Metern (Einstellung „UTMREF-Genauigkeit“): 10 m, 1 m oder 0,1 m
+MGRS_RESOLUTIONS_M = (10.0, 1.0, 0.1)
+_resolution_m = 1.0
+
+
+def set_mgrs_resolution(resolution_m: float) -> None:
+    """Auflösung, mit der ``to_mgrs`` ohne eigene Angabe schreibt (aus den Projekt-Einstellungen)."""
+    global _resolution_m
+    _resolution_m = resolution_m if resolution_m in MGRS_RESOLUTIONS_M else 1.0
+
+
+def mgrs_resolution() -> float:
+    return _resolution_m
 
 
 def _transform(src: QgsCoordinateReferenceSystem, dst: QgsCoordinateReferenceSystem, point: QgsPointXY) -> QgsPointXY:
     return QgsCoordinateTransform(src, dst, QgsProject.instance()).transform(point)
 
 
-def to_mgrs(lat: float, lon: float) -> str:
-    """WGS84 → UTMREF mit 1 m Auflösung, z. B. ``32U MC 94254 93123``."""
+def to_mgrs(lat: float, lon: float, resolution_m: float | None = None) -> str:
+    """WGS84 → UTMREF, z. B. ``32U MC 94254 93123`` bei 1 m.
+
+    ``resolution_m`` (Standard: Einstellung „UTMREF-Genauigkeit“) bestimmt die Stellen je Rechts- und
+    Hochwert: 10 m → 4, 1 m → 5, 0,1 m → 6. Wie bei UTMREF üblich wird abgeschnitten, nicht gerundet.
+    """
+    resolution = resolution_m or _resolution_m
     if not -80.0 <= lat < 84.0:
         raise ValueError("UTMREF ist nur zwischen 80° S und 84° N definiert")
     zone = min(_utm_zone(lon), 60)
@@ -51,34 +74,34 @@ def to_mgrs(lat: float, lon: float) -> str:
     # 83000 nach der Rückrechnung (82999,9999…) eine 82999
     easting, northing = round(utm.x(), 3), round(utm.y(), 3)
     square = _mgrs_100km(zone, easting, northing)
-    return f"{zone}{_latitude_band(lat)} {square} {int(easting) % 100_000:05d} {int(northing) % 100_000:05d}"
+    digits = 5 - round(math.log10(resolution))
+    # Kleiner Zuschlag gegen Gleitkomma-Reste (12344,9999… statt 12345)
+    east = int(math.floor((easting % 100_000) / resolution + 1e-6))
+    north = int(math.floor((northing % 100_000) / resolution + 1e-6))
+    return f"{zone}{_latitude_band(lat)} {square} {east:0{digits}d} {north:0{digits}d}"
 
 
 def from_mgrs(text: str) -> QgsPointXY:
     """UTMREF → WGS84-Punkt (x = Länge, y = Breite).
 
-    Leerzeichen sind beliebig, die Ziffern werden je zur Hälfte auf Ost- und
-    Nordwert verteilt (``32UMC9425493123``, ``32U MC 942 931`` usw.).
-    Kürzere Angaben bezeichnen wie üblich die Südwest-Ecke des Planquadrats.
+    Unabhängig von der eingestellten Anzeige-Genauigkeit: Leerzeichen sind beliebig, die Ziffern werden
+    je zur Hälfte auf Ost- und Nordwert verteilt, 1 bis 6 Stellen je Wert (``32UMC9425493123``,
+    ``32U MC 942 931``, ``32U MC 942543 931237`` für 0,1 m). Ebenso Werte mit Nachkommastellen,
+    z. B. ``32U MC 94254,3 93123,7``. Kürzere Angaben bezeichnen wie üblich die Südwest-Ecke des Planquadrats.
     """
-    match = _MGRS_RE.match("".join(text.upper().split()))
+    match = _MGRS_RE.match(text.upper())
     if not match:
         raise ValueError("Format z. B. 32U MC 94254 93123")
     zone = int(match[1])
-    band, col, row, digits = match[2], match[3], match[4], match[5]
+    band, col, row = match[2], match[3], match[4]
     if not 1 <= zone <= 60:
         raise ValueError("Zone muss zwischen 1 und 60 liegen")
-    if len(digits) % 2 or len(digits) > 10:
-        raise ValueError("Ost- und Nordwert brauchen gleich viele Ziffern (max. je 5)")
 
     col_set = COL_SETS[(zone - 1) % 3]
     if col not in col_set:
         raise ValueError(f"100-km-Quadrat {col}{row} gibt es in Zone {zone} nicht")
 
-    precision = len(digits) // 2
-    factor = 10 ** (5 - precision)
-    east = int(digits[:precision]) * factor if precision else 0
-    north = int(digits[precision:]) * factor if precision else 0
+    east, north = _split_digits(match[5])
 
     easting = (col_set.index(col) + 1) * 100_000 + east
     rowset = ROW_ODD if zone % 2 == 1 else ROW_EVEN
@@ -89,6 +112,29 @@ def from_mgrs(text: str) -> QgsPointXY:
     epsg = (32600 if band >= "N" else 32700) + zone
     utm_crs = QgsCoordinateReferenceSystem.fromEpsgId(epsg)
     return _transform(utm_crs, WGS84, QgsPointXY(easting, row_northing + north))
+
+
+def _split_digits(text: str) -> tuple[float, float]:
+    """Rechts- und Hochwert innerhalb des 100-km-Quadrats (Meter) aus dem Rest der Eingabe."""
+    parts = text.split()
+    if len(parts) == 2 and any(c in text for c in ".,"):
+        if not all(_DECIMAL_VALUE_RE.match(p) for p in parts):
+            raise ValueError("Mit Nachkommastellen: je 5 Stellen vor dem Komma, z. B. 94254,3 93123,7")
+        east, north = (float(p.replace(",", ".")) for p in parts)
+        return east, north
+    if len(parts) == 2 and len(parts[0]) != len(parts[1]):
+        raise ValueError("Ost- und Nordwert brauchen gleich viele Ziffern (je 1 bis 6)")
+    digits = "".join(parts)
+    if not digits.isdigit() and digits:
+        raise ValueError("Format z. B. 32U MC 94254 93123")
+    if len(digits) % 2 or len(digits) > 12:
+        raise ValueError("Ost- und Nordwert brauchen gleich viele Ziffern (je 1 bis 6)")
+    precision = len(digits) // 2
+    if not precision:
+        return 0.0, 0.0
+    # 6 Stellen = Dezimeter: 10^(5-6) = 0,1
+    factor = 10.0 ** (5 - precision)
+    return int(digits[:precision]) * factor, int(digits[precision:]) * factor
 
 
 def parse_decimal_pair(text: str) -> QgsPointXY | None:

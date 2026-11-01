@@ -5,6 +5,8 @@ from qgis.PyQt.QtGui import QRegularExpressionValidator
 from qgis.PyQt.QtWidgets import QComboBox
 
 _SIZES = (6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 72)
+# Die Liste klappt nur so weit auf, der Rest wird gescrollt
+_VISIBLE_ITEMS = 8
 MIN_PT = 4.0
 MAX_PT = 200.0
 
@@ -25,6 +27,11 @@ class FontSizeBox(QComboBox):
         self.addItems([_text(size) for size in _SIZES])
         self.lineEdit().setValidator(QRegularExpressionValidator(QRegularExpression(r"\d{1,3}([.,]\d)?"), self))
         self.setToolTip("Schriftgröße der Beschriftung in Punkt (pt)")
+        self.setMaxVisibleItems(_VISIBLE_ITEMS)
+        # Platz für „100,5“ und den Pfeil – sonst richtet sich die Breite nach dem Platzhalter „unterschiedlich“
+        self.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.setMinimumContentsLength(5)
+        self.setFixedWidth(self.sizeHint().width())
         self._shown: float | None = None
         self.activated.connect(self._commit)
         self.lineEdit().editingFinished.connect(self._commit)
@@ -35,7 +42,12 @@ class FontSizeBox(QComboBox):
         self._shown = next(iter(distinct)) if len(distinct) == 1 else None
         self.blockSignals(True)
         self.setEditText(_text(self._shown))
-        self.lineEdit().setPlaceholderText("unterschiedlich" if len(distinct) > 1 else "")
+        # Im schmalen Feld nur ein Strich; der Tooltip sagt, was gemeint ist
+        self.lineEdit().setPlaceholderText("–" if len(distinct) > 1 else "")
+        self.setToolTip(
+            "Schriftgröße der Beschriftung in Punkt (pt)"
+            + ("\nDie Auswahl hat unterschiedliche Größen – eine Eingabe gilt für alle" if len(distinct) > 1 else "")
+        )
         self.blockSignals(False)
 
     def _commit(self, *_args):

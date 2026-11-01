@@ -1767,7 +1767,7 @@
           <Layer name="basemap.de Farbe (Vektor, Web-Mercator)" provider="xyzvectortiles" source="styleUrl=https://sgx.geodatenzentrum.de/gdz_basemapde_vektor/styles/bm_web_col.json&amp;type=xyz&amp;url=https://sgx.geodatenzentrum.de/gdz_basemapde_vektor/tiles/v2/bm_web_de_3857/%7Bz%7D/%7Bx%7D/%7By%7D.pbf&amp;zmax=15&amp;zmin=0&amp;http-header:referer=">basemap_de___Farbe_0cbce9ef_d68f_4bf4_8fa9_724ff5c0b388</Layer>
           <Layer name="Schummerung (BKG)" provider="wms" source="contextualWMSLegend=0&amp;crs=EPSG:25832&amp;dpiMode=7&amp;featureCount=10&amp;format=image/jpeg&amp;layers=de_basemapde_web_raster_combshade&amp;styles&amp;tilePixelRatio=0&amp;url=https://sgx.geodatenzentrum.de/wms_basemapde_schummerung">_0eb77364_d4e8_4f2a_a7f7_caf197a9edad</Layer>
         </LayerSet>
-        <ComposerMapOverview blendMode="0" centered="0" frameMap="{264a2e28-47df-4526-9f67-31730042edc1}" inverted="0" name="Übersicht 1" position="0" show="1" uuid="{720e151a-3985-4b95-987e-cf9d85f70036}">
+        <ComposerMapOverview blendMode="0" centered="0" frameMap="{264a2e28-47df-4526-9f67-31730042edc1}" inverted="0" name="Übersicht 1" position="3" show="1" uuid="{720e151a-3985-4b95-987e-cf9d85f70036}">
           <symbol alpha="1" clip_to_extent="1" force_rhr="0" frame_rate="10" is_animated="0" name="" type="fill">
             <data_defined_properties>
               <Option type="Map">
@@ -2213,7 +2213,7 @@
         </LayoutObject>
         <Extent xmax="516127.3328099999926053" xmin="510160.8511900000157766" ymax="5855362.02112950291484594" ymin="5850707.59887049812823534" />
         <LayerSet />
-        <ComposerMapOverview blendMode="0" centered="0" frameMap="{264a2e28-47df-4526-9f67-31730042edc1}" inverted="0" name="Übersicht 1" position="0" show="1" uuid="{c6f974b8-2c09-45a6-9944-c47d2b8407e3}">
+        <ComposerMapOverview blendMode="0" centered="0" frameMap="{264a2e28-47df-4526-9f67-31730042edc1}" inverted="0" name="Übersicht 1" position="3" show="1" uuid="{c6f974b8-2c09-45a6-9944-c47d2b8407e3}">
           <symbol alpha="1" clip_to_extent="1" force_rhr="0" frame_rate="10" is_animated="0" name="" type="fill">
             <data_defined_properties>
               <Option type="Map">
@@ -2375,7 +2375,7 @@
           </layer>
         </symbol>
       </LayoutItem>
-      <LayoutItem anchorPoint="4" background="true" blendMode="0" excludeFromExports="0" file="./GRAFIKEN/LAYOUT/Nordpfeil.svg" frame="false" frameJoinStyle="miter" groupUuid="" id="Nordpfeil" itemRotation="0" mapUuid="{264a2e28-47df-4526-9f67-31730042edc1}" mode="0" northMode="0" northOffset="0" opacity="1" outlineWidthM="0.600714,mm" pictureHeight="28.5876" pictureRotation="0" pictureWidth="17.9778" position="27.0207,48.077,mm" positionLock="true" positionOnPage="27.0207,48.077,mm" referencePoint="0" resizeMode="0" size="21.8264,28.5876,mm" svgBorderColor="0,0,0,255,rgb:0,0,0,1" svgBorderWidth="0.2" svgFillColor="255,255,255,255,rgb:1,1,1,1" templateUuid="{5826b838-441d-4fe8-9840-33a694821a8e}" type="65640" uuid="{5826b838-441d-4fe8-9840-33a694821a8e}" visibility="1" zValue="5">
+      <LayoutItem anchorPoint="4" background="true" blendMode="0" excludeFromExports="0" file="./GRAFIKEN/LAYOUT/North.svg" frame="false" frameJoinStyle="miter" groupUuid="" id="Nordpfeil" itemRotation="0" mapUuid="{264a2e28-47df-4526-9f67-31730042edc1}" mode="0" northMode="0" northOffset="0" opacity="1" outlineWidthM="0.600714,mm" pictureHeight="28.5876" pictureRotation="0" pictureWidth="17.9778" position="27.0207,48.077,mm" positionLock="true" positionOnPage="27.0207,48.077,mm" referencePoint="0" resizeMode="0" size="21.8264,28.5876,mm" svgBorderColor="0,0,0,255,rgb:0,0,0,1" svgBorderWidth="0.2" svgFillColor="255,255,255,255,rgb:1,1,1,1" templateUuid="{5826b838-441d-4fe8-9840-33a694821a8e}" type="65640" uuid="{5826b838-441d-4fe8-9840-33a694821a8e}" visibility="1" zValue="5">
         <FrameColor alpha="255" blue="0" green="0" red="0" />
         <BackgroundColor alpha="255" blue="255" green="255" red="255" />
         <LayoutObject>

@@ -3,6 +3,7 @@ import os
 from qgis.core import (
     Qgis,
     QgsCoordinateTransform,
+    QgsExpressionContextUtils,
     QgsProject,
     QgsVectorLayer,
 )
@@ -32,14 +33,16 @@ from .layer.canvas_fit import zoom_if_tiny
 from .layer.feature_ops import FeatureOperations
 from .layer.labeling import apply_labeling
 from .layer.layer_manager import LAYER_DISPLAY_NAME, LayerManager
+from .layer.marker_history import MarkerHistory
 from .layer.renderer import apply_renderer, has_file_svg_paths
 from .layout.legend import add_legend_action, refresh_legends
-from .layout.mgrs_grid import build_mgrs_grid_layer
 from .layout.tile_export import add_designer_action
 from .logging_utils import get_logger
 from .paths import plugin_root
 from .planning.controller import PlanningController
 from .planning.details import SelectionDetails
+from .planning.expressions import MGRS_RESOLUTION_VARIABLE
+from .planning.layers import ROLE_MARKERS
 from .settings import THWToolboxSettings
 from .tools import style_library
 from .tools.canvas_drop_filter import CanvasDropFilter
@@ -47,6 +50,7 @@ from .tools.identify_tool import IdentifyTool
 from .tools.layer_functions import move_dienststellen_next_to_project, update_layer_tree_sources
 from .tools.move_tool import MoveTool
 from .tools.own_position import OwnPositionLocator
+from .tools.undo_shortcuts import UndoShortcutFilter
 from .ui.config_dialog import ConfigDialog
 from .ui.feature_dock import FeatureDock
 from .ui.marker_table_dialog import MarkerTableDialog
@@ -91,6 +95,8 @@ class THWToolboxPlugin:
         # Nutzer mit der Deaktivierungs-Warnung zu konfrontieren.
         self._project_clearing = False
         self.planning = None
+        # Taktische Zeichen in der Rückgängig-Historie (angelegt mit dem Marker-Layer)
+        self._marker_history = None
         # Details zur Auswahl (Zeichen, Objekte, Mehrfachauswahl) – für Toolbox und Objektplanung gemeinsam
         self.details = None
         self._details_timer = None
@@ -187,13 +193,6 @@ class THWToolboxPlugin:
         for designer in self.iface.openLayoutDesigners():
             self._add_designer_action(designer)
 
-        # MGRS-Gitter als temporären Layer hinzufügen
-        mgrs_icon = QIcon(os.path.join(self.plugin_dir, "icons", "mgrs.svg"))
-        self.mgrs_grid_action = QAction(mgrs_icon, "MGRS-Gitter temporär hinzufügen", self.iface.mainWindow())
-        self.mgrs_grid_action.triggered.connect(self._add_mgrs_grid_layer)
-        self.iface.addToolBarIcon(self.mgrs_grid_action)
-        self.iface.addPluginToMenu("THW Toolbox", self.mgrs_grid_action)
-
         # Objektplanung: Zelte, Flächen-Kapazität, Stromverteilung
         planning_icon = QIcon(os.path.join(self.plugin_dir, "icons", "objektplanung.svg"))
         self.planning_action = QAction(planning_icon, "Objektplanung", self.iface.mainWindow())
@@ -255,6 +254,7 @@ class THWToolboxPlugin:
         QgsProject.instance().writeProject.connect(self._on_project_save)
         # Projekte älterer Versionen beim Öffnen auf eingebettete Zeichen umstellen
         QgsProject.instance().readProject.connect(self._on_project_read)
+        self._read_mgrs_resolution(QgsProject.instance())
         # Reagiere auf Layer-Entfernung, damit wir das Plugin sauber deaktivieren,
         # wenn der Marker-Layer aus dem Projekt gelöscht wird.
         QgsProject.instance().layersWillBeRemoved.connect(self._on_layers_will_be_removed)
@@ -265,6 +265,19 @@ class THWToolboxPlugin:
         except AttributeError:
             pass
         QgsProject.instance().cleared.connect(self._on_project_cleared)
+
+        # Strg+Z / Strg+Y: Objektplanung rückgängig machen bzw. wiederherstellen – mit Fokus auf der Karte
+        # und solange kein Vektorlayer bearbeitet wird (dann gilt das Rückgängig von QGIS). Der Filter sitzt
+        # nur an der Karte; an der ganzen Anwendung brachte er QGIS beim Start zum Absturz.
+        self._undo_filter = UndoShortcutFilter(
+            is_available=self._planning_undo_available,
+            on_undo=lambda: self.planning.undo() if self.planning else None,
+            on_redo=lambda: self.planning.redo() if self.planning else None,
+            parent=self.canvas,
+        )
+        # Den Fokus kann die Karte selbst oder ihr Viewport haben
+        self.canvas.installEventFilter(self._undo_filter)
+        self.canvas.viewport().installEventFilter(self._undo_filter)
 
         # Default-Style-Cache nachfüllen (QGIS-4 lädt nicht zuverlässig alle
         # DB-Einträge in mSymbols beim Start). Deferred via QTimer, damit der
@@ -283,6 +296,12 @@ class THWToolboxPlugin:
         # Plugin deaktivieren falls aktiv
         if self.action and self.action.isChecked():
             self.deactivate()
+
+        if getattr(self, "_undo_filter", None) is not None:
+            self.canvas.removeEventFilter(self._undo_filter)
+            self.canvas.viewport().removeEventFilter(self._undo_filter)
+            self._undo_filter.deleteLater()
+            self._undo_filter = None
 
         if self._details_timer is not None:
             self._details_timer.stop()
@@ -353,10 +372,6 @@ class THWToolboxPlugin:
                 except RuntimeError:  # Designer bereits geschlossen
                     pass
             self._designer_actions = None
-        if getattr(self, "mgrs_grid_action", None):
-            self.iface.removeToolBarIcon(self.mgrs_grid_action)
-            self.iface.removePluginMenu("THW Toolbox", self.mgrs_grid_action)
-            self.mgrs_grid_action = None
         if self.export_action:
             self.iface.removePluginMenu("THW Toolbox", self.export_action)
         if getattr(self, "planning_action", None):
@@ -408,6 +423,7 @@ class THWToolboxPlugin:
                 self._check_map_available,
             )
         self.layer = self.layer_manager.init_layer()
+        self._hook_marker_history()
         if self.feature_ops is None:
             self.feature_ops = FeatureOperations(
                 layer_provider=lambda: self.layer,
@@ -626,6 +642,20 @@ class THWToolboxPlugin:
         if self.move_tool:
             self.move_tool.refresh_selection()
 
+    def _read_mgrs_resolution(self, project):
+        """UTMREF-Genauigkeit des Projekts übernehmen – auch ohne aktive Toolbox (Details, Suche, Tabellen)."""
+        value, ok = project.readNumEntry(self.settings.PLUGIN_NAME, "mgrs_resolution_dm", 0)
+        if ok and value in self.settings.MGRS_RESOLUTIONS_DM:
+            self.settings.mgrs_resolution_dm = value
+        else:
+            self.settings.mgrs_resolution_dm = self.settings.MGRS_RESOLUTION_DM_DEFAULT
+
+    def _apply_mgrs_resolution(self, project):
+        """Genauigkeit als Projektvariable: ``$POS`` auf der Karte liest sie – auch auf Rechnern ohne Plugin."""
+        QgsExpressionContextUtils.setProjectVariable(project, MGRS_RESOLUTION_VARIABLE, self.settings.mgrs_resolution_m)
+        self.iface.mapCanvas().refreshAllLayers()
+        self.schedule_details_update()
+
     def _on_project_read(self, _doc=None):
         """Projekt geöffnet: Zeichen älterer Projekte in das Symbol einbetten (einmalige Migration).
 
@@ -635,6 +665,7 @@ class THWToolboxPlugin:
         aufgefrischt und das Projekt als geändert markiert; nach dem Speichern ist es
         eigenständig. Läuft auch, wenn die Toolbox gerade nicht aktiv ist.
         """
+        self._read_mgrs_resolution(QgsProject.instance())
         try:
             project = QgsProject.instance()
             layers = [layer for layer in project.mapLayersByName(LAYER_DISPLAY_NAME) if has_file_svg_paths(layer)]
@@ -673,6 +704,10 @@ class THWToolboxPlugin:
         if not new_layer or new_layer is self.layer:
             return
         self.layer = new_layer
+        # Feature-IDs des alten Layers gelten nicht mehr: Rückgängig beginnt hier neu
+        self._hook_marker_history()
+        if self.planning:
+            self.planning.layers.history.clear()
         self._update_tool_references()
         self._init_renderer(new_layer)
         if self.marker_table and self.marker_table.isVisible():
@@ -718,6 +753,8 @@ class THWToolboxPlugin:
         new_feature = self.feature_ops.place_feature(svg_path, point, fit_canvas=True)
         if not new_feature:
             return None
+        if self._marker_history is not None:
+            self._marker_history.record_added([new_feature.id()])
 
         if hasattr(self, "svg_dock_widget"):
             self.svg_dock_widget.refresh_marker_list()
@@ -912,6 +949,8 @@ class THWToolboxPlugin:
         if not self.feature_ops:
             return []
         new_fids = self.feature_ops.duplicate(fids, geometries)
+        if new_fids and self._marker_history is not None:
+            self._marker_history.record_added(new_fids)
         if new_fids:
             if hasattr(self, "svg_dock_widget"):
                 self.svg_dock_widget.refresh_marker_list()
@@ -927,6 +966,8 @@ class THWToolboxPlugin:
             for fid, geom in geometries.items():
                 layer.changeGeometry(fid, geom)
         else:
+            if self._marker_history is not None:
+                self._marker_history.record_moved(geometries)
             layer.dataProvider().changeGeometryValues(geometries)
             layer.updateExtents()
         layer.triggerRepaint()
@@ -1126,6 +1167,36 @@ class THWToolboxPlugin:
     def _open_template_dialog(self):
         TemplateDialog(self.plugin_dir, self.iface.mainWindow()).exec()
 
+    def _hook_marker_history(self):
+        """Taktische Zeichen in die Rückgängig-Historie der Objektplanung aufnehmen."""
+        if self.layer is None:
+            return
+        if self._marker_history is None:
+            self._marker_history = MarkerHistory(
+                self._planning_controller().layers.history, ROLE_MARKERS, self._after_marker_undo, parent=self.canvas
+            )
+        self._marker_history.attach(self.layer)
+
+    def _after_marker_undo(self, fids):
+        """Nach Rückgängig/Wiederherstellen bei Zeichen: Symbole (eins je Zeichen), Auswahl, Ansichten auffrischen."""
+        self._update_renderer()
+        if self.move_tool:
+            # Hebt die Auswahl auf, wenn das Zeichen dabei verschwunden ist
+            self.move_tool.refresh_selection()
+        self.refresh_marker_views(fids)
+        if self.planning:
+            self.planning.layers.notify_changed()
+        self.canvas.refresh()
+
+    def _planning_undo_available(self) -> bool:
+        """Objektplanung vorhanden und kein Vektorlayer im QGIS-Bearbeitungsmodus."""
+        if self.planning is None:
+            return False
+        return not any(
+            isinstance(layer, QgsVectorLayer) and layer.isEditable()
+            for layer in QgsProject.instance().mapLayers().values()
+        )
+
     def _planning_controller(self) -> PlanningController:
         """Steuerung von Hotbar und Auswahlwerkzeug – für taktische Zeichen und Objektplanung gemeinsam."""
         if self.planning is None:
@@ -1170,23 +1241,6 @@ class THWToolboxPlugin:
         if front is not None and not front.isHidden():
             front.raise_()
 
-    def _add_mgrs_grid_layer(self):
-        extent = self.canvas.extent()
-        crs = self.canvas.mapSettings().destinationCrs()
-        if not crs.isValid() or extent.isEmpty():
-            self._show_error_alert(
-                "MGRS-Gitter",
-                "Keine gültige Kartenansicht.",
-                "Öffnen Sie zuerst eine Karte und zoomen Sie auf den gewünschten Bereich.",
-            )
-            return
-        layer, message = build_mgrs_grid_layer(extent, crs, interval=1000)
-        if layer is None:
-            self._show_error_alert("MGRS-Gitter", message, None)
-            return
-        QgsProject.instance().addMapLayer(layer)
-        self.iface.messageBar().pushMessage("MGRS-Gitter", message, Qgis.MessageLevel.Success)
-
     def _open_setup_dialog(self, mode: str | None = None):
         """Öffnet den Setup-Dialog im gewählten Modus (Standard: Einstellung aus QgsSettings, Assistent).
 
@@ -1214,6 +1268,7 @@ class THWToolboxPlugin:
             if self.feature_ops and new_icon_defaults() != before:
                 self.feature_ops.forget_last_size()
             self.settings.save_settings(QgsProject.instance())
+            self._apply_mgrs_resolution(QgsProject.instance())
             if self.layer:
                 self._init_renderer(self.layer)
 

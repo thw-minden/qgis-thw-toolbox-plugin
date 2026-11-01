@@ -1,10 +1,11 @@
-"""Dock der Objektplanung: Zelte, Fahrzeuge, Strom, Beleuchtung, Gebiete und Pfeile, Auswahl, Bilanz."""
+"""Dock der Objektplanung: Zelte, Fahrzeuge, Strom, Beleuchtung, Gebiete, Pfeile, Punkte und Texte, Auswahl, Bilanz."""
 
 from dataclasses import dataclass
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QBrush, QColor, QDrag
 from qgis.PyQt.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDockWidget,
     QDoubleSpinBox,
@@ -27,7 +28,9 @@ from .layers import (
     ROLE_ARROWS,
     ROLE_GENERATORS,
     ROLE_LIGHTS,
+    ROLE_POINTS,
     ROLE_TENTS,
+    ROLE_TEXTS,
     ROLE_VEHICLES,
     ROLE_ZONES,
 )
@@ -48,13 +51,18 @@ _HINTS = {
     "light": "Klick setzt Leuchte (Kreis = ausgeleuchteter Bereich) · Esc zurück zur Auswahl",
     "zone": "Eckpunkte des Gebiets anklicken · Rechtsklick / Enter / Doppelklick schließt ab · "
     "Rücktaste entfernt Punkt · Esc verwirft",
-    "arrow": "Start anklicken, dann den Verlauf · Rechtsklick / Enter / Doppelklick setzt die Spitze · "
-    "Rücktaste entfernt Punkt · Esc verwirft",
+    "arrow": "Start anklicken, dann den Verlauf · Rechtsklick / Enter / Doppelklick beendet die Linie · "
+    "Rücktaste entfernt Punkt · Esc verwirft · Pfeilspitzen am Anfang / Ende im ▾ bzw. hier umschalten; "
+    "Spitzen, Breite und Farbe je Linie in den Details unter „Gestaltung“",
+    "point": "Klick setzt den Punkt, danach Beschreibung und Radius in den Details · Shift+Klick: mehrere · "
+    "Esc zurück zur Auswahl",
+    "text": "Klick setzt den Text, danach den Text in den Details schreiben (Enter: neue Zeile, "
+    "Strg+Enter übernimmt) · Shift+Klick: mehrere · Esc zurück zur Auswahl",
     "select": "Klick wählt aus – auch taktische Zeichen · Shift+Klick ergänzt · Rahmen aufziehen wählt mehrere "
     "(Karte verschieben: mittlere Maustaste oder Leertaste) · Ziehen verschiebt "
     "(Alt+Ziehen kopiert) · an den Ecken ziehen dreht (Shift: 15°) · Pfeiltasten schieben 0,5 m (Shift: 5 m) · "
-    "Entf löscht · D dupliziert · Doppelklick / Enter: Bezeichnung · ein Gebiet auswählen bzw. Doppelklick "
-    "auf einen Pfeil: Punkte bearbeiten · Rechtsklick: Menü",
+    "Entf löscht · D dupliziert · Doppelklick / Enter: Bezeichnung · ein Gebiet bzw. eine Linie auswählen: "
+    "Punkte bearbeiten · Rechtsklick: Menü",
     "edit": "Eckpunkte (□) ziehen verschiebt · kleine Punkte (○) auf den Kanten ziehen fügt einen Eckpunkt ein · "
     "Rechtsklick / Entf löscht einen Eckpunkt (ohne angefassten Punkt: das Ganze) · im Gebiet ziehen verschiebt "
     "es · Klick daneben wählt dort aus · Enter / Esc beendet",
@@ -138,6 +146,7 @@ class PlanningDock(QDockWidget):
         self._tool_buttons: list[tuple[QPushButton, str, str | None]] = []
         self._footprints: dict[str, _FootprintWidgets] = {}
         self._point_combos: dict[str, QComboBox] = {}
+        self._summary_stale = True
 
         content = QWidget()
         layout = QVBoxLayout(content)
@@ -152,6 +161,7 @@ class PlanningDock(QDockWidget):
         layout.addWidget(self._build_lights())
         layout.addWidget(self._build_shapes())
         layout.addWidget(self._build_edit())
+        layout.addWidget(self._build_export())
         layout.addWidget(self._build_summary(), 1)
 
         self._hint = _muted("")
@@ -259,12 +269,58 @@ class PlanningDock(QDockWidget):
         return box
 
     def _build_shapes(self) -> QGroupBox:
-        box = QGroupBox("Gebiete und Pfeile")
+        box = QGroupBox("Texte, Punkte, Linien und Gebiete")
         layout = QVBoxLayout(box)
+        layout.addLayout(self._point_row(ROLE_TEXTS, "text", "Text setzen", drag=False))
+        layout.addLayout(self._point_row(ROLE_POINTS, "point", "Punkt setzen", drag=False))
+        layout.addLayout(self._point_row(ROLE_ARROWS, "arrow", "Linie zeichnen", drag=False))
+        arrows_row = QHBoxLayout()
+        arrows_row.addWidget(QLabel("Neue Linien mit Pfeilspitze:"))
+        self._arrow_start = QCheckBox("am Anfang")
+        self._arrow_start.setChecked(self.controller.arrow_start)
+        self._arrow_start.toggled.connect(self.controller.set_arrow_start)
+        arrows_row.addWidget(self._arrow_start)
+        self._arrow_heads = QCheckBox("am Ende")
+        self._arrow_heads.setChecked(self.controller.arrow_heads)
+        self._arrow_heads.toggled.connect(self.controller.set_arrow_heads)
+        arrows_row.addWidget(self._arrow_heads)
+        arrows_row.addStretch()
+        layout.addLayout(arrows_row)
         layout.addLayout(self._point_row(ROLE_ZONES, "zone", "Gebiet zeichnen", drag=False))
-        layout.addLayout(self._point_row(ROLE_ARROWS, "arrow", "Pfeil zeichnen", drag=False))
-        layout.addWidget(_muted("Der Typ bestimmt die Farbe; der Name kommt aus der Bezeichnung in den Details."))
+        layout.addWidget(
+            _muted(
+                "Der Typ bestimmt die Farbe; unter „Gestaltung“ in den Details lässt sie sich je Objekt anpassen. "
+                "Der Name bzw. Text kommt aus der Bezeichnung in den Details."
+            )
+        )
+        # Alle Texte, Punkte, Linien und Gebiete des Projekts; Klick wählt aus und zeigt das Objekt
+        self._objects = QTreeWidget()
+        self._objects.setHeaderHidden(True)
+        self._objects.setMinimumHeight(120)
+        self._objects.itemClicked.connect(self._on_object_clicked)
+        layout.addWidget(self._objects)
         return box
+
+    def _refresh_objects(self):
+        self._objects.clear()
+        for title, entries in self.controller.annotation_objects():
+            parent = QTreeWidgetItem([f"{title} ({len(entries)})"])
+            font = parent.font(0)
+            font.setBold(True)
+            parent.setFont(0, font)
+            parent.setFlags(parent.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            for role, fid, name in entries:
+                child = QTreeWidgetItem([name])
+                child.setData(0, Qt.ItemDataRole.UserRole, (role, fid))
+                parent.addChild(child)
+            self._objects.addTopLevelItem(parent)
+            parent.setExpanded(True)
+        self._objects.setVisible(self._objects.topLevelItemCount() > 0)
+
+    def _on_object_clicked(self, item, _column):
+        hit = item.data(0, Qt.ItemDataRole.UserRole)
+        if hit:
+            self.controller.select_and_show(*hit)
 
     def _point_row(self, role: str, kind: str, text: str, drag: bool = True) -> QHBoxLayout:
         combo = QComboBox()
@@ -289,6 +345,21 @@ class PlanningDock(QDockWidget):
                 "Auswahl mit den QGIS-Auswahlwerkzeugen funktioniert auch (Gruppe „Objektplanung“)."
             )
         )
+        return box
+
+    def _build_export(self) -> QGroupBox:
+        box = QGroupBox("Export für Drohnen")
+        layout = QVBoxLayout(box)
+        kmz = QPushButton("Auswahl als KMZ …")
+        kmz.setToolTip("Ausgewählte Objekte mit Bezeichnung und Farbe, z. B. Gebiete als Flugbereiche (DJI Pilot 2)")
+        kmz.clicked.connect(lambda: self.controller.export_selection_kmz())
+        mbtiles = QPushButton("Objektplanung als MBTiles …")
+        mbtiles.setToolTip(
+            "Alle Objekte samt Beschriftungen, Maßen und taktischen Zeichen als Kachel-Ebene (Zoomstufen wählbar)"
+        )
+        mbtiles.clicked.connect(lambda: self.controller.export_mbtiles())
+        layout.addWidget(kmz)
+        layout.addWidget(mbtiles)
         return box
 
     def _build_summary(self) -> QGroupBox:
@@ -343,6 +414,12 @@ class PlanningDock(QDockWidget):
                 w.rotation.blockSignals(False)
             if w.combo.itemData(w.combo.currentIndex()) != self.controller.selected_ids.get(role):
                 self._load_footprint(role)
+        c = self.controller
+        for box, value in ((self._arrow_heads, c.arrow_heads), (self._arrow_start, c.arrow_start)):
+            if box.isChecked() != value:
+                box.blockSignals(True)
+                box.setChecked(value)
+                box.blockSignals(False)
         for role, combo in self._point_combos.items():
             index = combo.findData(self.controller.point_ids.get(role))
             if index >= 0 and index != combo.currentIndex():
@@ -375,7 +452,18 @@ class PlanningDock(QDockWidget):
     # Bilanz
     # ------------------------------------------------------------------
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._summary_stale:
+            self.refresh_summary()
+
     def refresh_summary(self):
+        # Bilanz und Objektliste kosten bei vielen Objekten spürbar Zeit: nur bauen, wenn man sie sieht
+        if not self.isVisible():
+            self._summary_stale = True
+            return
+        self._summary_stale = False
+        self._refresh_objects()
         data = self.controller.summary()
         self._summary.clear()
 

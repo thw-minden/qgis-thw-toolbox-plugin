@@ -6,8 +6,9 @@ connection (so the source shows up in the QGIS browser) and can optionally
 also add a live layer to the current project.
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 from urllib.parse import quote
 
 from qgis.core import (
@@ -946,17 +947,26 @@ def create_map_layer(map_layer: MapLayer) -> QgsMapLayer:
 GROUP_NAME_BASEMAPS = "Hintergrundkarten"
 
 
-def _add_keeping_crs(project: QgsProject, layer) -> None:
-    """Layer zum Projekt hinzufügen, ohne dass sich das Projekt-Koordinatensystem ändert.
+@contextmanager
+def _keep_project_crs() -> Iterator[None]:
+    """Prevents QGIS from overwriting an already set project CRS with the CRS of the first added layer.
 
-    In einem leeren Projekt übernimmt QGIS sonst das System des ersten Layers –
-    bei OSM EPSG:3857 statt der eingestellten UTM-Zone.
+    With the default setting "Use CRS of first layer added", the layer tree canvas bridge adopts the
+    first spatial layer's CRS - deferred, so even a CRS set beforehand gets overwritten. Auto setup is
+    disabled while layers are added, and the pending canvas update is flushed before restoring it,
+    so the bridge no longer treats later updates as "first layers".
     """
-    crs = project.crs()
-    project.addMapLayer(layer, False)
-    if crs.isValid() and project.crs() != crs:
-        logger.debug("Projekt-CRS nach Hinzufügen von %s zurückgesetzt auf %s", layer.name(), crs.authid())
-        project.setCrs(crs)
+    bridge = iface.layerTreeCanvasBridge() if iface is not None else None
+    if bridge is None or not QgsProject.instance().crs().isValid():
+        yield
+        return
+    previous = bridge.autoSetupOnFirstLayer()
+    bridge.setAutoSetupOnFirstLayer(False)
+    try:
+        yield
+    finally:
+        bridge.setCanvasLayers()
+        bridge.setAutoSetupOnFirstLayer(previous)
 
 
 def add_basemap_to_project(bm: MapLayer, visible: bool = False):
@@ -970,23 +980,24 @@ def add_basemap_to_project(bm: MapLayer, visible: bool = False):
         logger.debug("Basemap layer could not be created: %s", bm.name)
         return
 
-    _add_keeping_crs(project, layer)
+    with _keep_project_crs():
+        project.addMapLayer(layer, False)
 
-    bm_group = root.findGroup(GROUP_NAME_BASEMAPS)
-    if bm_group is None:
-        bm_group = root.addGroup(GROUP_NAME_BASEMAPS)
+        bm_group = root.findGroup(GROUP_NAME_BASEMAPS)
+        if bm_group is None:
+            bm_group = root.addGroup(GROUP_NAME_BASEMAPS)
 
-    group = bm_group.findGroup(bm.category)
-    if group is None:
-        group = bm_group.addGroup(bm.category)
+        group = bm_group.findGroup(bm.category)
+        if group is None:
+            group = bm_group.addGroup(bm.category)
 
-    group.addLayer(layer)
+        group.addLayer(layer)
 
-    node = root.findLayer(layer.id())
-    if node is not None:
-        node.setItemVisibilityChecked(visible)
-        if visible:
-            node.setItemVisibilityCheckedParentRecursive(True)
+        node = root.findLayer(layer.id())
+        if node is not None:
+            node.setItemVisibilityChecked(visible)
+            if visible:
+                node.setItemVisibilityCheckedParentRecursive(True)
     logger.debug("Basemap layer %s added", bm.name)
 
 
@@ -1003,23 +1014,24 @@ def add_layer_to_project(map_layer: MapLayer, visible: bool = False):
         logger.debug("Additional layer could not be created: %s", map_layer.name)
         return
 
-    _add_keeping_crs(project, layer)
+    with _keep_project_crs():
+        project.addMapLayer(layer, False)
 
-    add_layer_group = root.findGroup(GROUP_NAME_ADD_LAYERS)
-    if add_layer_group is None:
-        add_layer_group = root.insertGroup(0, GROUP_NAME_ADD_LAYERS)
+        add_layer_group = root.findGroup(GROUP_NAME_ADD_LAYERS)
+        if add_layer_group is None:
+            add_layer_group = root.insertGroup(0, GROUP_NAME_ADD_LAYERS)
 
-    group = add_layer_group.findGroup(map_layer.category)
-    if group is None:
-        group = add_layer_group.addGroup(map_layer.category)
+        group = add_layer_group.findGroup(map_layer.category)
+        if group is None:
+            group = add_layer_group.addGroup(map_layer.category)
 
-    group.addLayer(layer)
+        group.addLayer(layer)
 
-    node = root.findLayer(layer.id())
-    if node is not None:
-        node.setItemVisibilityChecked(visible)
-        if visible:
-            node.setItemVisibilityCheckedParentRecursive(True)
+        node = root.findLayer(layer.id())
+        if node is not None:
+            node.setItemVisibilityChecked(visible)
+            if visible:
+                node.setItemVisibilityCheckedParentRecursive(True)
     logger.debug("Additional layer %s added", map_layer.name)
 
 

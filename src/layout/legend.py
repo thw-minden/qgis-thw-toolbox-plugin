@@ -38,7 +38,8 @@ from qgis.PyQt.QtWidgets import QAction, QMainWindow, QMenu, QToolBar, QToolButt
 
 from ..layer.background import DEFAULT_SCALE
 from ..layer.renderer import category_value, svg_symbol_layer
-from ..planning.layers import ROLE_PROPERTY
+from ..planning.layers import OBJECT_KEY_PREFIX, ROLE_ARROWS, ROLE_POINTS, ROLE_PROPERTY, ROLE_TEXTS, ROLE_ZONES
+from ..planning.legend_symbols import legend_label, legend_symbol
 
 # Layer-Eigenschaft: 1/0 überstimmt die Regel aus `_default_in_legend`
 LEGEND_PROPERTY = "thw_toolbox/legende"
@@ -46,6 +47,10 @@ LEGEND_PROPERTY = "thw_toolbox/legende"
 TITLES_PROPERTY = "thw_toolbox/legende_ueberschriften"
 # Überschrift der taktischen Zeichen statt des Layernamens
 MARKER_TITLE = "Taktische Zeichen"
+
+
+# Objektplanung: Legende je Objekt statt je Typ (siehe _planning_objects)
+_OBJECT_LEGEND_ROLES = (ROLE_POINTS, ROLE_ARROWS, ROLE_ZONES)
 
 
 def _is_marker_layer(layer) -> bool:
@@ -56,7 +61,12 @@ def _is_marker_layer(layer) -> bool:
 
 
 def _default_in_legend(layer: QgsMapLayer) -> bool:
-    """Regel ohne Angabe des Nutzers: Vektorlayer ja, Hintergrund- und Rasterkarten nein."""
+    """Regel ohne Angabe des Nutzers: Vektorlayer ja, Hintergrund- und Rasterkarten nein.
+
+    Die Texte der Objektplanung stehen für sich (der Layer zeichnet nur Beschriftungen) – auch nein.
+    """
+    if layer.customProperty(ROLE_PROPERTY) == ROLE_TEXTS:
+        return False
     return isinstance(layer, QgsVectorLayer) and layer.isSpatial()
 
 
@@ -128,6 +138,11 @@ def apply_legend(legend: QgsLayoutItemLegend) -> None:
     size_mm = legend.maximumSymbolSize() or legend.symbolHeight()
     for node in root.findLayers():
         layer = node.layer()
+        role = layer.customProperty(ROLE_PROPERTY)
+        # Punkte, Linien, Gebiete: nur Objekte, deren Name nicht auf der Karte steht – sonst ganz heraus
+        if role in _OBJECT_LEGEND_ROLES and not _planning_objects(model, node, role):
+            node.parent().removeChildNode(node)
+            continue
         if _is_marker_layer(layer):
             _unify_markers(model, node, size_mm, legend.linkedMap())
             node.setCustomProperty("legend/title-label", MARKER_TITLE)
@@ -321,6 +336,37 @@ def _unify_markers(model, node_layer, size_mm: float, map_item) -> None:
             QgsMapLayerLegendUtils.setLegendNodeUserLabel(node_layer, index, label.replace("_", " "))
     QgsMapLayerLegendUtils.setLegendNodeOrder(node_layer, sorted(index for index, _ in chosen.values()))
     model.refreshLayerLegend(node_layer)
+
+
+def _planning_objects(model, node_layer, role: str) -> bool:
+    """Punkte, Linien bzw. Gebiete: je Objekt mit verborgenem Namen ein Eintrag mit Name und passendem Symbol.
+
+    Solche Objekte haben im Renderer eine eigene Kategorie (``planning.layers.LEGEND_KEY_EXPR``); die
+    Kategorien je Typ fallen heraus – „Punkt rot“ erklärt nichts, ein Name auf der Karte erklärt sich selbst.
+    False, wenn nichts zu erklären bleibt.
+    """
+    layer = node_layer.layer()
+    node_layer.removeCustomProperty("legend/node-order")
+    model.refreshLayerLegend(node_layer)
+    renderer = layer.renderer()
+    if not hasattr(renderer, "categories"):
+        return True
+    keep = []
+    for index, category in enumerate(renderer.categories()):
+        value = str(category.value())
+        if not value.startswith(OBJECT_KEY_PREFIX):
+            continue
+        feature = layer.getFeature(int(value[len(OBJECT_KEY_PREFIX) :]))
+        if not feature.isValid():
+            continue
+        QgsMapLayerLegendUtils.setLegendNodeCustomSymbol(node_layer, index, legend_symbol(role, feature))
+        QgsMapLayerLegendUtils.setLegendNodeUserLabel(node_layer, index, legend_label(role, feature, layer))
+        keep.append(index)
+    if not keep:
+        return False
+    QgsMapLayerLegendUtils.setLegendNodeOrder(node_layer, keep)
+    model.refreshLayerLegend(node_layer)
+    return True
 
 
 def _legend_symbol(symbol, size_mm: float):

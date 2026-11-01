@@ -10,7 +10,8 @@ from qgis.core import (
     QgsProject,
     QgsRectangle,
 )
-from qgis.PyQt.QtCore import QObject, QSize, Qt, QThread, pyqtSignal
+from qgis.gui import QgsVertexMarker
+from qgis.PyQt.QtCore import QObject, QSize, Qt, QThread, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QFont
 from qgis.PyQt.QtWidgets import (
     QApplication,
@@ -26,6 +27,7 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
 )
 
+from ..util.coordinates import WGS84, from_mgrs, parse_decimal_pair
 from .theme import muted_style
 
 _NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
@@ -33,6 +35,8 @@ _USER_AGENT = "QGIS-THW-Toolbox-Plugin/1.0 (https://github.com/thw-minden/qgis-t
 _REQUEST_TIMEOUT = 10
 _MIN_QUERY_LEN = 3
 _COUNTRY_CODES = "de,at,ch"
+# Sprung zu einer eingegebenen Koordinate: mindestens so nah heranzoomen
+_COORDINATE_SCALE = 10000
 
 # Erkennt z.B. "Pflugstraße 7", "Hauptstr. 12a", optional gefolgt von ", Berlin" oder ", 10117 Berlin"
 _HOUSENUMBER_RE = re.compile(r"^\s*(?P<street>.+?)\s+(?P<number>\d+\s*[a-zA-Z]?)\s*(?:,\s*(?P<rest>.+))?\s*$")
@@ -198,7 +202,7 @@ class NominatimSearchDialog(QDialog):
 
         search_row = QHBoxLayout()
         self._input = QLineEdit()
-        self._input.setPlaceholderText("Adresse oder Ort eingeben...")
+        self._input.setPlaceholderText("Adresse, Ort oder Koordinate (UTMREF bzw. Breite Länge) eingeben...")
         self._input.returnPressed.connect(self._search)
         search_row.addWidget(self._input)
 
@@ -226,6 +230,10 @@ class NominatimSearchDialog(QDialog):
 
     def _search(self):
         query = self._input.text().strip()
+        point = _coordinate(query)
+        if point is not None:
+            self._jump_to(point)
+            return
         if len(query) < _MIN_QUERY_LEN:
             self._status.setText(f"Bitte mindestens {_MIN_QUERY_LEN} Zeichen eingeben")
             return
@@ -271,6 +279,17 @@ class NominatimSearchDialog(QDialog):
             item.setData(_SUBTITLE_ROLE, subtitle)
             self._results.addItem(item)
 
+    def _jump_to(self, point_wgs: QgsPointXY):
+        """Zur eingegebenen Koordinate springen und sie kurz aufblinken lassen."""
+        dst_crs = self._canvas.mapSettings().destinationCrs()
+        center = QgsCoordinateTransform(WGS84, dst_crs, QgsProject.instance()).transform(point_wgs)
+        self._canvas.setCenter(center)
+        if self._canvas.scale() > _COORDINATE_SCALE:
+            self._canvas.zoomScale(_COORDINATE_SCALE)
+        self._canvas.refresh()
+        _PositionHighlight(self._canvas, center)
+        self.accept()
+
     def _zoom_to_item(self, item):
         data = item.data(Qt.ItemDataRole.UserRole)
         if not data:
@@ -304,6 +323,72 @@ class NominatimSearchDialog(QDialog):
         self._canvas.setExtent(rect)
         self._canvas.refresh()
         self.accept()
+
+
+class _PositionHighlight(QObject):
+    """Markiert eine angesprungene Koordinate: Fadenkreuz auf dem Punkt, darum ein pulsierender Ring.
+
+    Hängt an der Karte (nicht am Suchdialog, der sich gleich schließt) und räumt sich selbst auf.
+    """
+
+    _COLOR = QColor(229, 57, 53)
+    _TICK_MS = 40
+    _PULSE_MS = 900
+    _PULSES = 3
+    _HOLD_MS = 4000
+    _RING_MIN_PX, _RING_MAX_PX = 16, 64
+
+    def __init__(self, canvas, point: QgsPointXY):
+        super().__init__(canvas)
+        self._canvas = canvas
+        # Weißer Rand unter dem Fadenkreuz: auf dunklen wie hellen Hintergrundkarten sichtbar
+        self._halo = self._marker(point, QgsVertexMarker.IconType.ICON_CROSS, 32, 8, QColor(255, 255, 255))
+        self._cross = self._marker(point, QgsVertexMarker.IconType.ICON_CROSS, 28, 4)
+        self._dot = self._marker(point, QgsVertexMarker.IconType.ICON_CIRCLE, 9, 2, fill=self._COLOR)
+        self._ring = self._marker(point, QgsVertexMarker.IconType.ICON_CIRCLE, self._RING_MIN_PX, 3)
+        self._elapsed = 0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(self._TICK_MS)
+
+    def _marker(self, point, icon, size: int, width: int, color=None, fill=None) -> QgsVertexMarker:
+        marker = QgsVertexMarker(self._canvas)
+        marker.setCenter(point)
+        marker.setIconType(icon)
+        marker.setIconSize(size)
+        marker.setPenWidth(width)
+        marker.setColor(color or self._COLOR)
+        marker.setFillColor(fill or QColor(0, 0, 0, 0))
+        return marker
+
+    def _tick(self):
+        self._elapsed += self._TICK_MS
+        pulse_end = self._PULSES * self._PULSE_MS
+        if self._elapsed < pulse_end:
+            phase = (self._elapsed % self._PULSE_MS) / self._PULSE_MS
+            self._ring.setIconSize(round(self._RING_MIN_PX + phase * (self._RING_MAX_PX - self._RING_MIN_PX)))
+            color = QColor(self._COLOR)
+            color.setAlphaF(1.0 - phase)
+            self._ring.setColor(color)
+            self._ring.update()
+        elif self._elapsed < pulse_end + self._HOLD_MS:
+            self._ring.hide()
+        else:
+            self._timer.stop()
+            for marker in (self._halo, self._cross, self._dot, self._ring):
+                self._canvas.scene().removeItem(marker)
+            self.deleteLater()
+
+
+def _coordinate(text: str) -> QgsPointXY | None:
+    """Eingabe als Koordinate (WGS 84): „Breite Länge“ oder UTMREF; sonst None – dann wird nach Adressen gesucht."""
+    point = parse_decimal_pair(text)
+    if point is not None:
+        return point
+    try:
+        return from_mgrs(text)
+    except ValueError:
+        return None
 
 
 def _format_result(result):

@@ -15,12 +15,15 @@ Laden am fertigen Layout:
   auch ohne den Plugin-Ordner öffnen lässt.
 - Trägt die Karte `Hauptkarte` die Gitter `UTMREF` / `LONLAT`, wird das gewählte
   eingeschaltet; die Karte übernimmt den aktuellen Ausschnitt in dessen UTM-Zone.
+- Ein im Dialog gewählter Maßstab der Hauptkarte (Empfehlung je Papierformat in
+  `EMPFOHLENE_MASSSTAEBE`) ersetzt den aus Ausschnitt bzw. Vorlage.
 - Übersichtskarten zeigen nur die Hintergrundkarte.
-- Das taktische Zeichen der Einheit (`Taktisches Zeichen Einheit`) lässt sich abschalten.
+- Das taktische Zeichen der Einheit (`Taktisches Zeichen Einheit`) wird nach Wahl ausgetauscht oder ausgeblendet.
 - Die Legende wird auf das Nötige reduziert (siehe `legend.py`).
 """
 
 import base64
+import functools
 import json
 import math
 import os
@@ -30,6 +33,7 @@ from dataclasses import dataclass
 
 from qgis.core import (
     Qgis,
+    QgsApplication,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsExpressionContextUtils,
@@ -38,13 +42,16 @@ from qgis.core import (
     QgsLayoutItemLegend,
     QgsLayoutItemMap,
     QgsLayoutItemPicture,
+    QgsLayoutPoint,
+    QgsLayoutSize,
     QgsPrintLayout,
     QgsProject,
     QgsReadWriteContext,
+    QgsRectangle,
     QgsSettings,
     QgsVectorLayer,
 )
-from qgis.PyQt.QtXml import QDomDocument
+from qgis.PyQt.QtXml import QDomDocument, QDomElement
 
 from ..logging_utils import get_logger
 from ..paths import profile_dir
@@ -93,7 +100,24 @@ _UNIT_SIGN_ID = "Taktisches Zeichen Einheit"
 _EMBEDDED_PREFIX = "base64:"
 _PICTURE_SVG = Qgis.PictureFormat.SVG
 
+# Taktisches Zeichen der Einheit oben rechts in den Toolbox-Vorlagen: Schlüssel → (Anzeigename, Datei in
+# `templates/assets/`). Die Dateien sind knapp auf das Zeichen zugeschnitten; es erhält die Höhe des Platzes
+# in der Vorlage und wächst rechtsbündig in die Breite
+EINHEIT_ZEICHEN_KEINS = ""
+EINHEIT_ZEICHEN_TRUPP_UL = "trupp_ul"
+EINHEIT_ZEICHEN = {
+    EINHEIT_ZEICHEN_KEINS: ("Keins", None),
+    EINHEIT_ZEICHEN_TRUPP_UL: ("Unbemannte Luftfahrtsysteme", "Taktisches_Zeichen-UnbemannteLuftfahrsysteme.svg"),
+    "zugtrupp": ("Zugtrupp", "Taktisches_Zeichen-Zugtrupp.svg"),
+}
+
 _STANDARD_SCALES = (500, 1000, 2500, 5000, 10000, 25000, 50000, 100000, 200000, 250000, 500000, 1000000)
+
+# Empfohlener Maßstab der Hauptkarte je Papierformat. Wie in den Vorlagen der THW-Leitung zeigt jedes
+# Format etwa denselben Ausschnitt (rund 3,3 × 2,6 km), größeres Papier also mehr Einzelheiten.
+EMPFOHLENE_MASSSTAEBE = {"A4": 15000, "A3": 10000, "A2": 7500, "A1": 5000, "A0": 3500}
+# Zur Auswahl im Druckvorlagen-Dialog, zusätzlich zu den empfohlenen
+MASSSTAB_VORSCHLAEGE = tuple(sorted({1000, 2500, 5000, 10000, 25000, 50000, 100000, *EMPFOHLENE_MASSSTAEBE.values()}))
 
 # (Muster, Ersetzung) für Textfelder der Vorlage
 _LABEL_REPLACEMENTS = (
@@ -110,7 +134,7 @@ class PrintInfo:
     ortsverband: str = ""
     einheit: str = "Trupp unbemannte Luftfahrtsysteme (Tr UL)"
     einheit_kurz: str = "TrUL"
-    einheit_zeichen: bool = True
+    einheit_zeichen: str = EINHEIT_ZEICHEN_TRUPP_UL  # Schlüssel aus `EINHEIT_ZEICHEN`
     bearbeiter: str = ""
     einsatz: str = ""
     kartentitel: str = KARTENTITEL_VORSCHLAEGE[0]
@@ -120,25 +144,35 @@ class PrintInfo:
     tidy_legend: bool = True
 
     @classmethod
-    def load(cls) -> "PrintInfo":
-        """OV/Einheit/Bearbeiter aus den Benutzereinstellungen, Einsatz aus dem Projekt."""
+    def load(cls, einsatz_from_title: bool = True) -> "PrintInfo":
+        """OV/Einheit/Bearbeiter aus den Benutzereinstellungen, Einsatz aus dem Projekt.
+
+        Ohne gespeicherten Einsatz wird der Projekttitel vorgeschlagen, außer bei
+        ``einsatz_from_title=False`` (Setup-Assistent: Einsatz bleibt dann leer).
+        Bearbeiter fällt auf den Autor des Projekts bzw. den Namen des Benutzers zurück.
+        """
         s = QgsSettings()
         d = cls()
         project = QgsProject.instance()
 
         einsatz, ok = project.readEntry(_PROJECT_SCOPE, _PROJECT_EINSATZ_KEY, "")
-        if not ok or not einsatz:
+        if (not ok or not einsatz) and einsatz_from_title:
             einsatz = project.title() or project.baseName()
         kartentitel, _ = project.readEntry(_PROJECT_SCOPE, _PROJECT_KARTENTITEL_KEY, d.kartentitel)
         einsatzort, _ = project.readEntry(_PROJECT_SCOPE, _PROJECT_EINSATZORT_KEY, "")
         gitter = s.value(_SETTINGS_PREFIX + "gitter", d.gitter)
+        # Früher nur ein Häkchen für das Zeichen des Trupps UL
+        zeichen_default = d.einheit_zeichen if s.value(_SETTINGS_PREFIX + "einheit_zeichen", True, type=bool) else ""
+        zeichen = s.value(_SETTINGS_PREFIX + "einheit_zeichen_art", zeichen_default)
 
         return cls(
             ortsverband=s.value(_SETTINGS_PREFIX + "ortsverband", d.ortsverband),
             einheit=s.value(_SETTINGS_PREFIX + "einheit", d.einheit),
             einheit_kurz=s.value(_SETTINGS_PREFIX + "einheit_kurz", d.einheit_kurz),
-            einheit_zeichen=s.value(_SETTINGS_PREFIX + "einheit_zeichen", d.einheit_zeichen, type=bool),
-            bearbeiter=s.value(_SETTINGS_PREFIX + "bearbeiter", "") or project.metadata().author(),
+            einheit_zeichen=zeichen if zeichen in EINHEIT_ZEICHEN else d.einheit_zeichen,
+            bearbeiter=s.value(_SETTINGS_PREFIX + "bearbeiter", "")
+            or project.metadata().author()
+            or QgsApplication.userFullName(),
             einsatz=einsatz,
             kartentitel=kartentitel,
             einsatzort=einsatzort,
@@ -151,7 +185,7 @@ class PrintInfo:
         s.setValue(_SETTINGS_PREFIX + "ortsverband", self.ortsverband)
         s.setValue(_SETTINGS_PREFIX + "einheit", self.einheit)
         s.setValue(_SETTINGS_PREFIX + "einheit_kurz", self.einheit_kurz)
-        s.setValue(_SETTINGS_PREFIX + "einheit_zeichen", self.einheit_zeichen)
+        s.setValue(_SETTINGS_PREFIX + "einheit_zeichen_art", self.einheit_zeichen)
         s.setValue(_SETTINGS_PREFIX + "bearbeiter", self.bearbeiter)
         s.setValue(_SETTINGS_PREFIX + "gitter", self.gitter)
         s.setValue(_SETTINGS_PREFIX + "tidy_legend", self.tidy_legend)
@@ -256,10 +290,106 @@ def _display_name(stem: str) -> str:
     return " ".join(parts)
 
 
-def load_print_template(path: str, info: PrintInfo, assets_dir: str, canvas=None) -> QgsPrintLayout:
+@dataclass(frozen=True)
+class TemplateInfo:
+    """Eckdaten einer Vorlage für den Druckvorlagen-Dialog, ohne sie als Layout zu laden."""
+
+    paper: str | None = None  # ISO-Format der ersten Seite, z. B. "A3"
+    map_size_mm: tuple[float, float] | None = None  # Breite, Höhe der Hauptkarte
+    canvas_extent: bool = False  # Hauptkarte trägt Toolbox-Gitter und übernimmt den Kartenausschnitt
+    unit_sign: bool = False  # Platz für das taktische Zeichen der Einheit (`Taktisches Zeichen Einheit`)
+
+    @property
+    def recommended_scale(self) -> int | None:
+        return EMPFOHLENE_MASSSTAEBE.get(self.paper)
+
+
+_LAYOUT_ITEM_PAGE = "65638"
+_LAYOUT_ITEM_MAP = "65639"
+_UNIT_TO_MM = {"mm": 1.0, "cm": 10.0, "m": 1000.0, "in": 25.4, "pt": 25.4 / 72}
+
+
+def template_info(path: str) -> TemplateInfo:
+    """Papierformat und Größe der Hauptkarte aus der Vorlage `path`; unbekanntes bleibt `None`."""
+    try:
+        return _template_info(path, os.path.getmtime(path))
+    except OSError:
+        return TemplateInfo()
+
+
+@functools.lru_cache(maxsize=32)
+def _template_info(path: str, _mtime: float) -> TemplateInfo:
+    try:
+        root = _xml_root(path)
+    except (OSError, ValueError) as e:
+        logger.warning("Vorlage %s konnte nicht gelesen werden: %s", path, e)
+        return TemplateInfo()
+
+    page = next((p for pc in _elements(root, "PageCollection") for p in _elements(pc, "LayoutItem")), None)
+    page_size = _size_mm(page.attribute("size")) if page is not None else None
+    items = _elements(root, "LayoutItem")
+    main_map = next(
+        (i for i in items if i.attribute("type") == _LAYOUT_ITEM_MAP and i.attribute("id") == _MAIN_MAP_ID),
+        None,
+    )
+    unit_sign = any(i.attribute("id") == _UNIT_SIGN_ID for i in items)
+    if main_map is None:
+        return TemplateInfo(paper=_paper_format(page_size), unit_sign=unit_sign)
+    return TemplateInfo(
+        paper=_paper_format(page_size),
+        map_size_mm=_size_mm(main_map.attribute("size")),
+        canvas_extent=any(g.attribute("name") in GITTER_NAMEN for g in _elements(main_map, "ComposerMapGrid")),
+        unit_sign=unit_sign,
+    )
+
+
+def _xml_root(path: str) -> QDomElement:
+    """Wurzelelement der XML-Datei `path`. Wirft `OSError`, bzw. `ValueError` bei ungültigem XML.
+
+    QDomDocument statt ElementTree, das Bandit (B314) als unsicher meldet – plugins.qgis.org blockiert sonst die Version.
+    """
+    with open(path, "rb") as f:
+        content = f.read()
+    doc = QDomDocument()
+    doc.setContent(content)  # Rückgabewert unterscheidet sich zwischen PyQt5 und PyQt6
+    root = doc.documentElement()
+    if root.isNull():
+        raise ValueError("keine gültige XML-Datei")
+    return root
+
+
+def _elements(parent: QDomElement, tag: str) -> list[QDomElement]:
+    """Alle Nachfahren von `parent` mit dem Namen `tag`, in Dokumentreihenfolge."""
+    nodes = parent.elementsByTagName(tag)
+    return [nodes.at(i).toElement() for i in range(nodes.count())]
+
+
+def _size_mm(size: str | None) -> tuple[float, float] | None:
+    """`"220.5,173,mm"` → `(220.5, 173.0)`."""
+    try:
+        w, h, unit = (size or "").split(",")
+        return float(w) * _UNIT_TO_MM[unit], float(h) * _UNIT_TO_MM[unit]
+    except (ValueError, KeyError):
+        return None
+
+
+def _paper_format(size_mm: tuple[float, float] | None) -> str | None:
+    """Nächstes ISO-A-Format nach der langen Seite (A0 = 1189 mm, je Stufe / √2), z. B. 400 × 297 mm → A3."""
+    if not size_mm or max(size_mm) <= 0:
+        return None
+    n = math.log(1189 / max(size_mm), math.sqrt(2))
+    return f"A{round(n)}" if 0 <= round(n) <= 10 and abs(n - round(n)) < 0.25 else None
+
+
+def load_print_template(
+    path: str, info: PrintInfo, assets_dir: str, canvas=None, scale: int | None = None
+) -> QgsPrintLayout:
     """Lädt `path` als neues Layout und wendet `info` an. Wirft `ValueError` bei Fehlern.
 
-    Mit `canvas` übernehmen Vorlagen mit UTMREF-/LONLAT-Gitter dessen Kartenausschnitt.
+    Mit `canvas` übernehmen Vorlagen mit UTMREF-/LONLAT-Gitter dessen Kartenausschnitt,
+    alle übrigen (z. B. THW-Leitung) werden auf dessen Mitte zentriert.
+    Mit `scale` erhält die Hauptkarte diesen Maßstab (um ihre Mitte), statt ihn aus dem
+    Kartenausschnitt bzw. der Vorlage zu übernehmen.
     """
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -279,11 +409,13 @@ def load_print_template(path: str, info: PrintInfo, assets_dir: str, canvas=None
 
     _apply_variables(layout, info)
     _remove_vsnfd(layout)
-    _apply_unit_sign(layout, info.einheit_zeichen)
     _fix_picture_paths(layout, [os.path.dirname(path), assets_dir])
+    _apply_unit_sign(layout, info.einheit_zeichen, assets_dir)
     _apply_grid(layout, info.gitter)
     if canvas is not None:
         _apply_canvas_view(layout, canvas)
+    if scale:
+        _apply_scale(layout, scale)
     _apply_overview_layers(layout)
     if info.tidy_legend:
         for legend in _items_of_type(layout, QgsLayoutItemLegend):
@@ -345,11 +477,39 @@ def _remove_vsnfd(layout: QgsPrintLayout) -> None:
             layout.removeLayoutItem(item)
 
 
-def _apply_unit_sign(layout: QgsPrintLayout, show: bool) -> None:
-    """Taktisches Zeichen der Einheit im Kartenkopf zeigen oder ausblenden."""
+def _apply_unit_sign(layout: QgsPrintLayout, zeichen: str, assets_dir: str) -> None:
+    """Taktisches Zeichen der Einheit im Kartenkopf austauschen oder ausblenden.
+
+    Das Zeichen behält Höhe und rechte Kante des Platzes in der Vorlage, die Breite folgt seinen Proportionen.
+    """
+    filename = EINHEIT_ZEICHEN.get(zeichen, (None, None))[1]
     for picture in _items_of_type(layout, QgsLayoutItemPicture):
-        if picture.id() == _UNIT_SIGN_ID:
-            picture.setVisibility(show)
+        if picture.id() != _UNIT_SIGN_ID:
+            continue
+        picture.setVisibility(filename is not None)
+        if not filename:
+            continue
+        sign_path = os.path.join(assets_dir, filename)
+        # Eingebettet wie die übrigen Bilder der Vorlage – das Projekt braucht den Plugin-Ordner nicht
+        _embed_svg(picture, sign_path)
+        aspect = _svg_aspect(sign_path)
+        size, pos = picture.sizeWithUnits(), picture.positionWithUnits()
+        if not aspect or size.height() <= 0 or abs(size.width() / size.height() - aspect) < 0.01:
+            continue
+        width = size.height() * aspect
+        picture.attemptMove(QgsLayoutPoint(pos.x() + size.width() - width, pos.y(), pos.units()))
+        picture.attemptResize(QgsLayoutSize(width, size.height(), size.units()))
+
+
+def _svg_aspect(path: str) -> float | None:
+    """Breite / Höhe der SVG-Datei `path` nach ihrer viewBox, `None` wenn sie sich nicht lesen lässt."""
+    try:
+        view_box = _xml_root(path).attribute("viewBox", "")
+        _, _, w, h = (float(v) for v in view_box.replace(",", " ").split())
+    except (OSError, ValueError) as e:
+        logger.warning("Taktisches Zeichen %s ohne lesbare viewBox: %s", path, e)
+        return None
+    return w / h if h > 0 else None
 
 
 def _template_grids(map_item: QgsLayoutItemMap) -> dict:
@@ -381,13 +541,14 @@ def _apply_canvas_view(layout: QgsPrintLayout, canvas) -> None:
     """Kartenausschnitt des Hauptfensters in die Hauptkarte übernehmen, in dessen UTM-Zone.
 
     Die Karte ist auch mit Lon/Lat-Gitter UTM-projiziert, damit der Maßstab stimmt.
+    Vorlagen ohne Toolbox-Gitter (THW-Leitung, eigene) behalten Maßstab und KBS und
+    werden nur auf die Mitte des Hauptfensters zentriert.
     """
     maps = _items_of_type(layout, QgsLayoutItemMap)
     main_map = next((m for m in maps if m.id() == _MAIN_MAP_ID), None)
-    if main_map is None:
-        return
-    grids = _template_grids(main_map)
+    grids = _template_grids(main_map) if main_map is not None else {}
     if not grids:
+        _center_maps(maps, canvas)
         return
 
     canvas_crs = canvas.mapSettings().destinationCrs()
@@ -408,6 +569,45 @@ def _apply_canvas_view(layout: QgsPrintLayout, canvas) -> None:
     scale = next((s for s in _STANDARD_SCALES if s >= main_map.scale()), None)
     if scale:
         main_map.setScale(scale)
+
+
+def _center_maps(maps: list, canvas) -> None:
+    """Alle Karten (auch die Übersichten, deren Rahmen die Hauptkarte zeigt) auf die
+    Mitte des Hauptfensters schieben, jede in ihrem eigenen KBS und Maßstab."""
+    canvas_crs = canvas.mapSettings().destinationCrs()
+    center = canvas.extent().center()
+    for map_item in maps:
+        try:
+            c = QgsCoordinateTransform(canvas_crs, map_item.crs(), QgsProject.instance()).transform(center)
+        except Exception as e:  # QgsCsException außerhalb des Gültigkeitsbereichs des KBS
+            logger.warning("Karte %s konnte nicht zentriert werden: %s", map_item.id(), e)
+            continue
+        extent = map_item.extent()
+        half_w, half_h = extent.width() / 2, extent.height() / 2
+        map_item.setExtent(QgsRectangle(c.x() - half_w, c.y() - half_h, c.x() + half_w, c.y() + half_h))
+
+    # Die Markierung in den Übersichten (Übersichtsrahmen) folgt der Hauptkarte, solange sie mit ihr
+    # verknüpft ist. Ging die Verknüpfung beim Laden verloren, bliebe sie an der alten Stelle stehen.
+    main_map = next((m for m in maps if m.id() == _MAIN_MAP_ID), None)
+    if main_map is None:
+        return
+    for map_item in maps:
+        if map_item is main_map:
+            continue
+        for overview in map_item.overviews().asList():
+            if overview.linkedMap() is None:
+                logger.debug("Übersichtsrahmen in %s neu mit der Hauptkarte verknüpft", map_item.id())
+                overview.setLinkedMap(main_map)
+        map_item.invalidateCache()
+
+
+def _apply_scale(layout: QgsPrintLayout, scale: int) -> None:
+    """Maßstab der Hauptkarte setzen; die Mitte bleibt. Übersichten der THW-Leitung folgen per Ausdruck."""
+    main_map = next((m for m in _items_of_type(layout, QgsLayoutItemMap) if m.id() == _MAIN_MAP_ID), None)
+    if main_map is None:
+        logger.warning("Vorlage ohne Hauptkarte: Maßstab 1:%s nicht gesetzt", scale)
+        return
+    main_map.setScale(scale)
 
 
 def _basemap_layers() -> list:
