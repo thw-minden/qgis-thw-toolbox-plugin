@@ -222,7 +222,20 @@ class DimensionHandles(QgsMapCanvasItem):
     def has_active(self) -> bool:
         return self._active is not None
 
+    def cancel(self) -> bool:
+        """Laufendes Ziehen abbrechen: das Maß bleibt, wo es war."""
+        if self._gesture is None:
+            return False
+        self._gesture = None
+        self._preview = None
+        self._started = False
+        self.update()
+        return True
+
     def clear_active(self) -> bool:
+        # Esc während des Ziehens bricht zuerst nur das Ziehen ab
+        if self.cancel():
+            return True
         if self._active is None:
             return False
         self._active = None
@@ -291,13 +304,14 @@ class DimensionHandles(QgsMapCanvasItem):
         preview, target, key = self._preview, self._target, self._active
         self._gesture = None
         self._preview = None
-        if self._started and preview is not None and target is not None:
+        if self._started and preview is not None and target is not None and key is not None:
             self.controller.set_dimension_adjustment(target[0], target[1], key, preview.adjust)
         self.refresh()
         return True
 
     def hide_active(self) -> bool:
-        """Entf: das ausgewählte Maß ausblenden."""
+        """Entf: das ausgewählte Maß ausblenden (auch mitten im Ziehen)."""
+        self.cancel()
         item = self._item(self._active)
         if item is None or self._target is None:
             return False

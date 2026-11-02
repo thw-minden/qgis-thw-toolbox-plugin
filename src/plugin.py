@@ -42,7 +42,7 @@ from .paths import plugin_root
 from .planning.controller import PlanningController
 from .planning.details import SelectionDetails
 from .planning.expressions import MGRS_RESOLUTION_VARIABLE
-from .planning.layers import ROLE_MARKERS
+from .planning.layers import ROLE_MARKERS, project_has_planning
 from .settings import THWToolboxSettings
 from .tools import style_library
 from .tools.canvas_drop_filter import CanvasDropFilter
@@ -94,6 +94,8 @@ class THWToolboxPlugin:
         # In dem Fall sollen wir die Layer-Entfernung still hinnehmen statt den
         # Nutzer mit der Deaktivierungs-Warnung zu konfrontieren.
         self._project_clearing = False
+        # Toolbox war beim Projektwechsel an: im nächsten Projekt mit Zeichen wieder einschalten
+        self._reactivate_on_read = False
         self.planning = None
         # Taktische Zeichen in der Rückgängig-Historie (angelegt mit dem Marker-Layer)
         self._marker_history = None
@@ -166,6 +168,15 @@ class THWToolboxPlugin:
         self.iface.addToolBarIcon(self.action)
         self.iface.addPluginToMenu("THW Toolbox", self.action)
 
+        # Objektplanung: Zelte, Flächen-Kapazität, Stromverteilung – direkt neben der Toolbox,
+        # die beiden Knöpfe schalten zwischen taktischen Zeichen und Objektplanung um
+        planning_icon = QIcon(os.path.join(self.plugin_dir, "icons", "objektplanung.svg"))
+        self.planning_action = QAction(planning_icon, "Objektplanung", self.iface.mainWindow())
+        self.planning_action.setCheckable(True)
+        self.planning_action.triggered.connect(self._toggle_planning)
+        self.iface.addToolBarIcon(self.planning_action)
+        self.iface.addPluginToMenu("THW Toolbox", self.planning_action)
+
         # Setup-Aktion (Projekt-Setup + Basiskarten)
         setup_icon = QIcon(os.path.join(self.plugin_dir, "icons", "setup.svg"))
         self.setup_action = QAction(setup_icon, "Toolbox Setup", self.iface.mainWindow())
@@ -192,14 +203,6 @@ class THWToolboxPlugin:
         self.iface.layoutDesignerOpened.connect(self._add_designer_action)
         for designer in self.iface.openLayoutDesigners():
             self._add_designer_action(designer)
-
-        # Objektplanung: Zelte, Flächen-Kapazität, Stromverteilung
-        planning_icon = QIcon(os.path.join(self.plugin_dir, "icons", "objektplanung.svg"))
-        self.planning_action = QAction(planning_icon, "Objektplanung", self.iface.mainWindow())
-        self.planning_action.setCheckable(True)
-        self.planning_action.triggered.connect(self._toggle_planning)
-        self.iface.addToolBarIcon(self.planning_action)
-        self.iface.addPluginToMenu("THW Toolbox", self.planning_action)
 
         # Adress-Suche (Nominatim)
         search_icon = QIcon(os.path.join(self.plugin_dir, "icons", "search.svg"))
@@ -310,6 +313,12 @@ class THWToolboxPlugin:
             self.iface.removeDockWidget(self.details)
             self.details.deleteLater()
             self.details = None
+
+        # Hängt am Marker-Layer und an der Karte – nach dem Entladen schriebe es sonst weiter mit
+        if self._marker_history is not None:
+            self._marker_history.detach()
+            self._marker_history.deleteLater()
+            self._marker_history = None
 
         # Vor den Aktionen: das Schließen des Objektplanungs-Docks meldet sich sonst an eine entfernte Aktion
         if self.planning:
@@ -478,8 +487,12 @@ class THWToolboxPlugin:
 
     def toggle_plugin(self):
         """Schaltet das Plugin ein/aus basierend auf dem aktuellen Zustand des Symbols."""
+        self._reactivate_on_read = False
         if self.action.isChecked():
             self.activate()
+            # Umschalten: Toolbox ein, Objektplanung zu (erst danach, sonst verschwände die Hotbar kurz)
+            if self.action.isChecked() and self.planning is not None and self.planning.dock_open():
+                self.planning.toggle_dock(False)
         else:
             self.deactivate()
 
@@ -559,8 +572,11 @@ class THWToolboxPlugin:
             if was_active:
                 self.deactivate()
                 # Beim Projekt-Schließen/-Wechsel werden alle Layer entfernt —
-                # das ist erwartet, also keinen Warndialog zeigen.
-                if not self._project_clearing:
+                # das ist erwartet, also keinen Warndialog zeigen. Die Toolbox
+                # (und mit ihr die Hotbar) kommt im nächsten Projekt wieder.
+                if self._project_clearing:
+                    self._reactivate_on_read = True
+                else:
                     self._show_error_alert(
                         "THW Toolbox deaktiviert",
                         "Der Marker-Layer „THW Toolbox Marker“ wurde aus dem Projekt entfernt.",
@@ -666,6 +682,17 @@ class THWToolboxPlugin:
         eigenständig. Läuft auch, wenn die Toolbox gerade nicht aktiv ist.
         """
         self._read_mgrs_resolution(QgsProject.instance())
+        # Objektplanung gleich übernehmen (frühere Versionen umstellen): Darstellung, Legende und Objektliste
+        # stimmen dann schon, bevor jemand die Objektplanung öffnet
+        if project_has_planning(QgsProject.instance()):
+            try:
+                self._planning_controller().adopt_project_layers()
+            except Exception:
+                logger.exception("Objektplanung konnte beim Projektöffnen nicht übernommen werden")
+        if self._reactivate_on_read:
+            self._reactivate_on_read = False
+            # Erst nach dem Laden: dann kennt die Karte das Koordinatensystem des Projekts
+            QTimer.singleShot(0, self._reactivate_after_switch)
         try:
             project = QgsProject.instance()
             layers = [layer for layer in project.mapLayersByName(LAYER_DISPLAY_NAME) if has_file_svg_paths(layer)]
@@ -682,6 +709,16 @@ class THWToolboxPlugin:
             QTimer.singleShot(0, lambda: project.setDirty(True))
         except Exception:
             logger.exception("Einbetten der Zeichen beim Projektöffnen fehlgeschlagen")
+
+    def _reactivate_after_switch(self):
+        """Toolbox war vor dem Projektwechsel an: im neuen Projekt wieder einschalten, samt Hotbar.
+
+        Nur, wenn das Projekt schon Zeichen hat – sonst legte bloßes Öffnen einen Marker-Layer an.
+        """
+        if self.action is None or self.action.isChecked():
+            return
+        if QgsProject.instance().mapLayersByName(LAYER_DISPLAY_NAME) and self._check_map_available():
+            self.activate()
 
     def _on_project_save(self, doc=None):
         """Projekt wird geschrieben: GeoPackages neben die Projektdatei ziehen, Settings speichern.
@@ -1214,6 +1251,10 @@ class THWToolboxPlugin:
         controller.toggle_dock(checked)
         if checked:
             self._arrange_docks(front=controller.dock)
+            # Umschalten: Objektplanung ein, Toolbox aus – Hotbar und Auswahl bleiben für die Objektplanung
+            if self.action is not None and self.action.isChecked():
+                self._reactivate_on_read = False
+                self.deactivate()
 
     def _arrange_docks(self, front=None):
         """Symbolpalette, Details und Objektplanung als Tabs übereinanderlegen, ``front`` liegt vorn.

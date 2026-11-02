@@ -48,6 +48,8 @@ _MARGIN_SIDE_PX = 16
 # Unterordner in icons/planning, erzeugt von scripts/build_planning_icons.py
 _VARIANT_DIRS = {"text": "text", "point": "point", "arrow": "line", "zone": "zone"}
 _GRID_PRESETS = ((1, 2), (2, 2), (2, 3), (3, 3), (2, 5), (4, 4))
+# Ereignisse des Hauptfensters, nach denen die Hotbar ihren Platz neu bestimmt
+_WINDOW_EVENTS = (QEvent.Type.Move, QEvent.Type.Resize, QEvent.Type.WindowStateChange)
 
 _STYLE = """
 QFrame#ObjektplanungHotbar {
@@ -250,6 +252,9 @@ class PlanningHotbar(QFrame):
         controller.state_changed.connect(self.sync_tool_buttons)
         self._prefs.changed.connect(self.refresh_markers)
         canvas.installEventFilter(self)
+        # Verschieben des Hauptfensters: die Hotbar bleibt im sichtbaren Teil des Bildschirms (siehe _reposition)
+        self._window = canvas.window()
+        self._window.installEventFilter(self)
         self.refresh_markers()
         self.refresh_selection()
 
@@ -382,6 +387,8 @@ class PlanningHotbar(QFrame):
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         if obj is self.canvas and event.type() == QEvent.Type.Resize:
             self._reposition()
+        elif obj is self._window and event.type() in _WINDOW_EVENTS and self.isVisible():
+            self._reposition()
         return False
 
     def _fit_markers(self):
@@ -404,7 +411,12 @@ class PlanningHotbar(QFrame):
         self._fit_markers()
         self.adjustSize()
         x = max(0, (self.canvas.width() - self.width()) // 2)
-        y = max(0, self.canvas.height() - self.height() - _MARGIN_BOTTOM_PX)
+        bottom = self.canvas.height()
+        # Reicht das Fenster unter die Taskleiste bzw. über den Bildschirmrand, läge die Hotbar dort unsichtbar
+        screen = self.canvas.screen()
+        if screen is not None:
+            bottom = min(bottom, self.canvas.mapFromGlobal(screen.availableGeometry().bottomLeft()).y())
+        y = max(0, bottom - self.height() - _MARGIN_BOTTOM_PX)
         self.move(x, y)
         self.raise_()
 
@@ -413,10 +425,11 @@ class PlanningHotbar(QFrame):
         self._reposition()
 
     def dispose(self):
-        try:
-            self.canvas.removeEventFilter(self)
-        except RuntimeError:
-            pass
+        for watched in (self.canvas, self._window):
+            try:
+                watched.removeEventFilter(self)
+            except RuntimeError:
+                pass
         try:
             self.controller.state_changed.disconnect(self.sync_tool_buttons)
         except (TypeError, RuntimeError):

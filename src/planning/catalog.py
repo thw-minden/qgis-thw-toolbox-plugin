@@ -103,6 +103,9 @@ _LEGACY_ZONES = [
     ShapeType("bereitstellung", "Bereitstellungsraum", "#2e7d32"),
     ShapeType("sperrung", "Absperrbereich", "#ef6c00"),
 ]
+# Anders als „Gebiet rot“ erklärt ihre Farbe sie nicht: ohne Bezeichnung tragen sie ihren Typ als Beschriftung,
+# und der Typ steht in der Zeichenerklärung
+LEGACY_ZONE_IDS = tuple(t.id for t in _LEGACY_ZONES)
 _DEFAULT_ARROWS = [
     ShapeType("rot", "Linie rot", "#c62828"),
     ShapeType("blau", "Linie blau", "#1565c0"),

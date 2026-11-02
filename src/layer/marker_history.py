@@ -43,12 +43,13 @@ class MarkerHistory(QObject):
         layer, self._layer = self._layer, None
         if layer is None:
             return
+        # Nach einem Projektwechsel ist der alte Layer schon gelöscht – schon der Zugriff auf sein Signal wirft
         for signal, slot in (
-            (layer.beforeCommitChanges, self._before_commit),
-            (layer.committedFeaturesAdded, self._committed_added),
+            ("beforeCommitChanges", self._before_commit),
+            ("committedFeaturesAdded", self._committed_added),
         ):
             try:
-                signal.disconnect(slot)
+                getattr(layer, signal).disconnect(slot)
             except (TypeError, RuntimeError):
                 pass
 

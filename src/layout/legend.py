@@ -38,7 +38,16 @@ from qgis.PyQt.QtWidgets import QAction, QMainWindow, QMenu, QToolBar, QToolButt
 
 from ..layer.background import DEFAULT_SCALE
 from ..layer.renderer import category_value, svg_symbol_layer
-from ..planning.layers import OBJECT_KEY_PREFIX, ROLE_ARROWS, ROLE_POINTS, ROLE_PROPERTY, ROLE_TEXTS, ROLE_ZONES
+from ..planning.catalog import LEGACY_ZONE_IDS
+from ..planning.layers import (
+    OBJECT_KEY_PREFIX,
+    ROLE_ARROWS,
+    ROLE_POINTS,
+    ROLE_PROPERTY,
+    ROLE_TEXTS,
+    ROLE_ZONES,
+    legend_key,
+)
 from ..planning.legend_symbols import legend_label, legend_symbol
 
 # Layer-Eigenschaft: 1/0 überstimmt die Regel aus `_default_in_legend`
@@ -343,7 +352,8 @@ def _planning_objects(model, node_layer, role: str) -> bool:
 
     Solche Objekte haben im Renderer eine eigene Kategorie (``planning.layers.LEGEND_KEY_EXPR``); die
     Kategorien je Typ fallen heraus – „Punkt rot“ erklärt nichts, ein Name auf der Karte erklärt sich selbst.
-    False, wenn nichts zu erklären bleibt.
+    Ausnahme: die früheren Gebietstypen (Gefahrenbereich …) bleiben mit ihrem Typnamen, sofern Gebiete dieses
+    Typs auf der Karte sind – ihre Farbe allein erklärt sie nicht. False, wenn nichts zu erklären bleibt.
     """
     layer = node_layer.layer()
     node_layer.removeCustomProperty("legend/node-order")
@@ -354,6 +364,17 @@ def _planning_objects(model, node_layer, role: str) -> bool:
     keep = []
     for index, category in enumerate(renderer.categories()):
         value = str(category.value())
+        if role == ROLE_ZONES and value in LEGACY_ZONE_IDS:
+            # Ein Gebiet dieses Typs als Vorbild für das Symbol, bevorzugt eins ohne eigenen Eintrag. Ältere
+            # Darstellungen (vor dem ersten Öffnen der Objektplanung) führen auch ungenutzte Typen
+            request = QgsFeatureRequest().setFilterExpression(f"\"typ_id\" = '{value}'")
+            features = list(layer.getFeatures(request))
+            if not features:
+                continue
+            feature = next((f for f in features if legend_key(role, f)[0] == value), features[0])
+            QgsMapLayerLegendUtils.setLegendNodeCustomSymbol(node_layer, index, legend_symbol(role, feature))
+            keep.append(index)
+            continue
         if not value.startswith(OBJECT_KEY_PREFIX):
             continue
         feature = layer.getFeature(int(value[len(OBJECT_KEY_PREFIX) :]))

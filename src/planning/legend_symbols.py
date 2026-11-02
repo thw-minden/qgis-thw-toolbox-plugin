@@ -57,15 +57,19 @@ def _rgba(color: QColor) -> str:
 def legend_label(role: str, feature, layer) -> str:
     """Name des Objekts für die Legende; ``$POS`` wird wie auf der Karte zur UTMREF."""
     lines = [line.strip() for line in (feature.attribute("bezeichnung") or "").splitlines() if line.strip()]
-    text = " / ".join(lines)
-    if POSITION_PLACEHOLDER in text and feature.hasGeometry():
-        point = feature.geometry().centroid().asPoint()
-        try:
-            wgs = QgsCoordinateTransform(layer.crs(), WGS84, QgsProject.instance()).transform(point)
-            text = text.replace(POSITION_PLACEHOLDER, to_mgrs(wgs.y(), wgs.x()))
-        except ValueError:
-            pass
-    return text
+    return resolve_position(" / ".join(lines), feature, layer)
+
+
+def resolve_position(text: str, feature, layer) -> str:
+    """``$POS`` wie auf der Karte durch die UTMREF des Objekts ersetzen – für Legende und KMZ-Export."""
+    if POSITION_PLACEHOLDER not in text or not feature.hasGeometry():
+        return text
+    point = feature.geometry().centroid().asPoint()
+    try:
+        wgs = QgsCoordinateTransform(layer.crs(), WGS84, QgsProject.instance()).transform(point)
+        return text.replace(POSITION_PLACEHOLDER, to_mgrs(wgs.y(), wgs.x()))
+    except ValueError:
+        return text
 
 
 def legend_symbol(role: str, feature):

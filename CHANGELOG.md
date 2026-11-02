@@ -22,12 +22,14 @@
 - **Zelt PRZ 33** (aufblasbar, 6,02 × 5,60 m) im Katalog der Objektplanung
 
 ### Geändert
+- **Toolbox und Objektplanung** liegen in der Werkzeugleiste nebeneinander und schalten zwischeneinander um; Hotbar und Auswahl bleiben dabei
+- Nach einem Projektwechsel bleibt die Toolbox samt Hotbar eingeschaltet, wenn das neue Projekt taktische Zeichen hat; die Objektplanung früherer Versionen wird schon beim Öffnen umgestellt (Legende und Objektliste stimmen sofort)
 - **Zelte auf der Karte** mit Kurznamen beschriftet (z. B. „SG30“, „PRZ33“, Feld `kurz` im Katalog); bestehende Zelt-Layer werden beim Öffnen umgestellt
 - **Nordpfeil** aller Druckvorlagen kontrastreicher, mit „N“ an der Spitze
 - Vorlagen der THW-Leitung und eigene Vorlagen öffnen auf der Mitte des Kartenfensters; der rote Rahmen der Übersichtskarten liegt über der Hintergrundkarte
 - MBTiles-Zoomstufen-Dialog breit genug für Titel und Hinweis
 - Gebietstypen: rot, gelb, blau – gefüllt oder ohne Füllung; Pfeiltypen heißen jetzt „Linie …“
-- Gebiete ohne Bezeichnung tragen keine Beschriftung mehr
+- Gebiete ohne Bezeichnung tragen keine Beschriftung mehr – außer den früheren Typen (Einsatzabschnitt, Gefahrenbereich, Bereitstellungsraum, Absperrbereich): sie zeigen weiter ihren Typ, auch in der Zeichenerklärung
 - **Legende der Objektplanung**: Punkte, Linien und Gebiete stehen mit ihrem Namen in der Zeichenerklärung, wenn er nicht auf der Karte steht (Beschriftung aus) – mit einem Symbol wie auf der Karte; Typnamen wie „Punkt rot“ entfallen
 - Schriftgröße in den Details kompakter
 

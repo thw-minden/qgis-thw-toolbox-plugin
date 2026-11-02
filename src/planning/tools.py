@@ -65,6 +65,12 @@ _ROTATE_ZONE_PX = 22.0
 # Pfeiltasten verschieben die Auswahl um so viele Meter (mit Shift: groß)
 _NUDGE_M = 0.5
 _NUDGE_BIG_M = 5.0
+_NUDGE_KEYS = {
+    Qt.Key.Key_Left: (-1, 0),
+    Qt.Key.Key_Right: (1, 0),
+    Qt.Key.Key_Up: (0, 1),
+    Qt.Key.Key_Down: (0, -1),
+}
 # Rundungstoleranz bei Abstandsprüfungen (Meter)
 _EPS_M = 0.01
 # Trefferreihenfolge: Punkte und Linien zuerst, sonst wären sie auf Zelten nicht greifbar.
@@ -1093,6 +1099,13 @@ class VertexTool(_PlanningTool):
             self.controller.duplicate_selection()
             event.accept()
             return
+        if key in _NUDGE_KEYS and not ctrl and self._drag is None:
+            # Wie im Auswahlwerkzeug: Pfeiltasten verschieben das ganze Gebiet bzw. die Linie
+            step = _NUDGE_BIG_M if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else _NUDGE_M
+            dx, dy = _NUDGE_KEYS[key]
+            self.controller.nudge_selection(dx * step, dy * step)
+            event.accept()
+            return
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self.cancel()
             event.accept()
@@ -1718,15 +1731,9 @@ class SelectTool(_PlanningTool):
         shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
         has_selection = bool(self.controller.selection_ids())
         single_marker = self.controller.single_marker() is not None
-        nudge = {
-            Qt.Key.Key_Left: (-1, 0),
-            Qt.Key.Key_Right: (1, 0),
-            Qt.Key.Key_Up: (0, 1),
-            Qt.Key.Key_Down: (0, -1),
-        }
-        if key in nudge and has_selection and not ctrl:
+        if key in _NUDGE_KEYS and has_selection and not ctrl:
             step = _NUDGE_BIG_M if shift else _NUDGE_M
-            dx, dy = nudge[key]
+            dx, dy = _NUDGE_KEYS[key]
             self.controller.nudge_selection(dx * step, dy * step)
         elif self._gesture == "marker":
             # Mitten im Ziehen eines Zeichens nichts verändern
@@ -1735,8 +1742,9 @@ class SelectTool(_PlanningTool):
             # Taste n: n-tes Zeichen der Hotbar setzen (Favoriten, sonst zuletzt verwendet)
             self.controller.activate_marker_slot(digit_slot(event))
         elif key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and self.dims is not None and self.dims.hide_active():
-            # Ausgewähltes Maß: nur dieses ausblenden
-            pass
+            # Ausgewähltes Maß: nur dieses ausblenden (ein laufendes Ziehen endet damit)
+            if self._gesture == "dimension":
+                self._end_gesture()
         elif key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and (has_selection or single_marker):
             self.controller.delete_selection()
         elif key == Qt.Key.Key_R and not ctrl and has_selection:
@@ -1745,13 +1753,14 @@ class SelectTool(_PlanningTool):
             self.controller.duplicate_selection()
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and has_selection:
             self.controller.focus_label()
+        elif key == Qt.Key.Key_Escape and self._gesture in ("label", "dimension"):
+            # Mitten im Ziehen einer Beschriftung bzw. eines Maßes: abbrechen, die Auswahl bleibt
+            (self.labels if self._gesture == "label" else self.dims).cancel()
+            self._end_gesture()
         elif key == Qt.Key.Key_Escape and self.dims is not None and self.dims.clear_active():
             pass
         elif key == Qt.Key.Key_Escape:
-            if self._gesture == "label":
-                self.labels.cancel()
-                self._end_gesture()
-            elif self._gesture:
+            if self._gesture:
                 self._end_gesture()
             elif has_selection or single_marker:
                 self.controller.clear_selection()

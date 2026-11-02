@@ -203,9 +203,10 @@ class PlanningController(QObject):
         self.canvas.mapToolSet.connect(self._on_map_tool_set)
         QgsProject.instance().writeProject.connect(self.layers.on_project_write)
         self.layers.selection_changed.connect(self._on_selection_changed)
-        # Rückgängig gilt nur innerhalb eines Projekts
-        QgsProject.instance().cleared.connect(self.layers.history.clear)
-        QgsProject.instance().readProject.connect(self._clear_history)
+        # Rückgängig gilt nur innerhalb eines Projekts; das Dock zeigt nach dem Wechsel das neue Projekt
+        QgsProject.instance().cleared.connect(self._on_project_switched)
+        QgsProject.instance().readProject.connect(self._on_project_switched)
+        QgsProject.instance().layersWillBeRemoved.connect(self._on_layers_will_be_removed)
 
     # ------------------------------------------------------------------
     # Export für Drohnen
@@ -223,8 +224,22 @@ class PlanningController(QObject):
     # Rückgängig / Wiederherstellen
     # ------------------------------------------------------------------
 
-    def _clear_history(self, *_args):
+    def _on_project_switched(self, *_args):
+        """Projekt geschlossen bzw. geöffnet: Rückgängig beginnt neu, Bilanz und Objektliste zeigen das neue Projekt.
+
+        Die Layer der Objektplanung hat beim Öffnen schon das Plugin übernommen (``_on_project_read``).
+        """
         self.layers.history.clear()
+        if self.dock is not None:
+            self.dock.refresh_summary()
+
+    def _on_layers_will_be_removed(self, layer_ids):
+        """Ein Objektplanungs-Layer verschwindet: seine Feature-IDs gelten nicht mehr, Rückgängig beginnt neu.
+
+        Ein neu angelegter Layer zählt wieder ab 1 – alte Schritte träfen sonst fremde Objekte.
+        """
+        if {lyr.id() for lyr in self.layers.all_layers()} & set(layer_ids):
+            self.layers.history.clear()
 
     def undo(self) -> bool:
         return self._step_history(undo=True)
@@ -276,8 +291,9 @@ class PlanningController(QObject):
         # Vorschau-Intervall der Karte nicht zurückgehalten lassen
         self.layers.release_preview()
         for signal, slot in (
-            (QgsProject.instance().cleared, self.layers.history.clear),
-            (QgsProject.instance().readProject, self._clear_history),
+            (QgsProject.instance().cleared, self._on_project_switched),
+            (QgsProject.instance().readProject, self._on_project_switched),
+            (QgsProject.instance().layersWillBeRemoved, self._on_layers_will_be_removed),
         ):
             try:
                 signal.disconnect(slot)
@@ -326,12 +342,17 @@ class PlanningController(QObject):
         if self.dock is None:
             return
         self.dock.setVisible(visible)
+        # Knopf in der Werkzeugleiste mitnehmen – visibilityChanged kommt nicht in jedem Fall (Qt 5)
+        self.dock_open_changed.emit(self.dock_open())
         if visible:
             self.dock.raise_()
-            # Vorhandene Objektplanung im Projekt übernehmen, ohne neue Layer anzulegen
-            self.layers._adopt_project_layers()
+            self.adopt_project_layers()
             self.dock.refresh_summary()
         self._update_canvas_ui(ensure_tool=visible)
+
+    def adopt_project_layers(self):
+        """Vorhandene Objektplanung im Projekt übernehmen (frühere Versionen umstellen), ohne neue Layer anzulegen."""
+        self.layers._adopt_project_layers()
 
     def dock_open(self) -> bool:
         # isHidden statt isVisible: ein Dock, das als Tab im Hintergrund liegt, ist weiterhin offen
@@ -1271,18 +1292,29 @@ class PlanningController(QObject):
             return False
         transform = QgsCoordinateTransform(WGS84, layer.crs(), QgsProject.instance())
         points = [transform.transform(p) for p in points_wgs]
+        old = layer.getFeature(fid)
+        old_geom = old.geometry() if old.isValid() and old.hasGeometry() else QgsGeometry()
+        multi = not old_geom.isEmpty() and old_geom.isMultipart()
+        # Die Tabelle zeigt den Außenring bzw. die Linie des ersten Teils (``vertex_points``): nur der wird
+        # ersetzt, Löcher und weitere Teile – etwa mit den Werkzeugen von QGIS gezeichnet – bleiben
         if role in NOTE_ROLES:
             geom = QgsGeometry.fromPointXY(points[0])
         elif role == ROLE_ZONES:
             if len(points) < 3:
                 return False
-            geom = QgsGeometry.fromPolygonXY([points + [points[0]]])
+            polygons = (
+                (old_geom.asMultiPolygon() if multi else [old_geom.asPolygon()]) if not old_geom.isEmpty() else []
+            )
+            first = [points + [points[0]]] + (list(polygons[0][1:]) if polygons and polygons[0] else [])
+            polygons = [first] + list(polygons[1:])
+            geom = QgsGeometry.fromMultiPolygonXY(polygons) if multi else QgsGeometry.fromPolygonXY(first)
         else:
             if len(points) < 2:
                 return False
-            geom = QgsGeometry.fromPolylineXY(points)
+            parts = (old_geom.asMultiPolyline() if multi else [old_geom.asPolyline()]) if not old_geom.isEmpty() else []
+            parts = [points] + list(parts[1:])
+            geom = QgsGeometry.fromMultiPolylineXY(parts) if multi else QgsGeometry.fromPolylineXY(points)
         # Andere Punktzahl: die Segmente sind neu nummeriert, angepasste Maße passen nicht mehr
-        old = layer.getFeature(fid)
         attrs = None
         if role in MEASURE_ROLES and old.isValid() and old.hasGeometry():
             if old.geometry().constGet().nCoordinates() != geom.constGet().nCoordinates():

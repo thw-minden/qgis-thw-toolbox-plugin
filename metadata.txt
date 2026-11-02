@@ -24,6 +24,7 @@ changelog=2.3.0
     - New: print templates: choose the main map scale and the unit symbol; setup assistant asks for the template details
     - New: tent PRZ 33; tents labelled with short names on the map
     - Changed: Objektplanung items listed by name in map legends, higher-contrast north arrow
+    - Changed: THW Toolbox and Objektplanung buttons side by side, switching between each other; the toolbox stays on after switching projects
     - Removed: toolbar action "add temporary MGRS grid" (UTMREF grids remain in the print templates)
     2.2.2
     - Fixed: the portable package (export) was missing data/, so Objektplanung had no tents or vehicles (GKW, MTW and others) and THW-Dienststellen were missing

@@ -47,7 +47,7 @@ from ..paths import in_temp_dir, temp_dir
 from ..tools.layer_functions import update_layer_tree_sources
 from ..util.svg_minify import minify_svg
 from ..util.temp_files import remove_temp_file
-from .catalog import Catalog
+from .catalog import LEGACY_ZONE_IDS, Catalog
 from .expressions import meters_text_expr, metric_length_expr, note_label_expr
 from .history import PlanningHistory
 from .object_style import (
@@ -263,14 +263,22 @@ def _arrow_trim_expr(modes) -> str:
 
 # Stand der Darstellung von Gebieten, Linien und Punkten; ältere Layer werden beim Öffnen einmal neu aufgebaut
 _STYLE_VERSION_PROPERTY = "thw_toolbox/objektplanung_darstellung"
-_STYLE_VERSION = 6
+_STYLE_VERSION = 7  # 7: Kategorie „Weitere Objekte“ mit schlichtem Symbol
 # Ob die Darstellung die Maß-Ebenen enthält (nur, solange ein Objekt seine Maße zeigt)
 _DIMENSIONS_PROPERTY = "thw_toolbox/objektplanung_masse"
 _VERSIONED_ROLES = (ROLE_ZONES, ROLE_ARROWS, ROLE_POINTS)
 
-# Gebiete tragen nur ihre eigene Bezeichnung; frühere Versionen zeigten ohne sie den Typ
-_ZONE_LABEL_EXPR = "nullif(\"bezeichnung\", '')"
-_PLAIN_LABEL_EXPR = _ZONE_LABEL_EXPR
+# Kategorie „alle übrigen Werte“ der Gebiete, Linien und Punkte: Objekte ohne eigene Kategorie – in der
+# Attributtabelle geändert, eingefügt, mit einer älteren Version gezeichnet – bleiben sichtbar, bis das
+# Plugin ihre Kategorie nachträgt (dann wieder in ihrer Typfarbe)
+_FALLBACK_KEY = ""
+_FALLBACK_LABEL = "Weitere Objekte"
+
+_PLAIN_LABEL_EXPR = "nullif(\"bezeichnung\", '')"
+# Gebiete tragen nur ihre eigene Bezeichnung – außer den früheren Typen (Gefahrenbereich …), deren Farbe nichts
+# erklärt: die zeigen ohne Bezeichnung weiter ihren Typ. Frühere Versionen zeigten ihn bei allen Gebieten
+_LEGACY_ZONE_IDS_SQL = ", ".join(f"'{type_id}'" for type_id in LEGACY_ZONE_IDS)
+_ZONE_LABEL_EXPR = f'coalesce(nullif("bezeichnung", \'\'), if("typ_id" IN ({_LEGACY_ZONE_IDS_SQL}), "typ", NULL))'
 _LEGACY_ZONE_LABEL_EXPR = 'coalesce(nullif("bezeichnung", \'\'), "typ")'
 
 # Zelte zeigen ohne eigene Bezeichnung ihren Kurznamen („SG30“); frühere Versionen den ganzen Typ
@@ -393,6 +401,14 @@ def _flag(value, default: bool) -> bool:
     if value is None or (hasattr(value, "isNull") and value.isNull()):
         return default
     return bool(value)
+
+
+def project_has_planning(project: QgsProject) -> bool:
+    """Liegen Layer der Objektplanung im Projekt (auch aus früheren Versionen)?"""
+    return any(
+        (lyr.customProperty(ROLE_PROPERTY) or lyr.customProperty(_LEGACY_ROLE_PROPERTY)) in _LAYER_SPECS
+        for lyr in project.mapLayers().values()
+    )
 
 
 def label_visible(role: str, feature) -> bool:
@@ -820,6 +836,7 @@ class PlanningLayers(QObject):
             self._set_renderer(lyr, role, self._legend_entries(lyr, role), _dimensions_used(lyr))
             # Gebiete sind groß – ihre Namen sollen auch in der Übersicht lesbar sein.
             # Nur eine eigene Bezeichnung: der Typ („Gebiet rot (gefüllt)“) steckt schon in der Darstellung
+            # (außer bei den früheren Typen, siehe _ZONE_LABEL_EXPR)
             _set_labels(lyr, _ZONE_LABEL_EXPR, polygon=True, min_scale=50000)
         elif role == ROLE_ARROWS:
             self._set_renderer(lyr, role, self._legend_entries(lyr, role), _dimensions_used(lyr))
@@ -857,6 +874,8 @@ class PlanningLayers(QObject):
             return
         if role == ROLE_ZONES:
             _replace_label_expression(lyr, _LEGACY_ZONE_LABEL_EXPR, _ZONE_LABEL_EXPR)
+            # Zwischenstand vor 2.3.0: nur die Bezeichnung, auch bei den früheren Typen
+            _replace_label_expression(lyr, _PLAIN_LABEL_EXPR, _ZONE_LABEL_EXPR)
         current = str(lyr.customProperty(_STYLE_VERSION_PROPERTY, "")) == str(_STYLE_VERSION)
         if current:
             # Aktuell – nur noch dafür sorgen, dass jeder verwendete Typ sein Symbol hat
@@ -888,7 +907,8 @@ class PlanningLayers(QObject):
             if isinstance(renderer, QgsCategorizedSymbolRenderer) and renderer.classAttribute() == LEGEND_KEY_EXPR
             else None
         )
-        if current == {(key, label) for key, _type, label in entries} and dimensions == _has_dimensions(lyr):
+        wanted = {(key, label) for key, _type, label in entries} | {(_FALLBACK_KEY, _FALLBACK_LABEL)}
+        if current == wanted and dimensions == _has_dimensions(lyr):
             return
         self._set_renderer(lyr, role, entries, dimensions)
         lyr.triggerRepaint()
@@ -933,11 +953,13 @@ class PlanningLayers(QObject):
                 return _with_segment_dimensions(zone) if dimensions else zone
             return (_arrow_symbol if role == ROLE_ARROWS else _point_symbol)(color, dimensions)
 
+        default_color = "#1565c0" if role == ROLE_ZONES else "#c62828"
         categories = [
             QgsRendererCategory(key, symbol(types[t].farbe, types[t].gefuellt), label) for key, t, label in entries
         ]
+        categories.append(QgsRendererCategory(_FALLBACK_KEY, _fallback_symbol(role, default_color), _FALLBACK_LABEL))
         renderer = QgsCategorizedSymbolRenderer(LEGEND_KEY_EXPR, categories)
-        renderer.setSourceSymbol(symbol("#1565c0" if role == ROLE_ZONES else "#c62828"))
+        renderer.setSourceSymbol(symbol(default_color))
         return renderer
 
     def _sign_symbol(self, role: str):
@@ -1175,6 +1197,22 @@ def _cable_symbol(color: str) -> QgsLineSymbol:
 def _rgba(color: str, alpha: int = 255) -> str:
     c = QColor(color)
     return f"{c.red()},{c.green()},{c.blue()},{alpha}"
+
+
+def _fallback_symbol(role: str, color: str):
+    """Schlichtes Symbol für „Weitere Objekte“: im Ebenenbaum ein kleines Icon, auf der Karte gut zu sehen.
+
+    Das volle Symbol (Radius-Kreis, Muster, Pfeilspitzen, Maße) zeichnet der Ebenenbaum ohne Objekt riesig.
+    """
+    if role == ROLE_ZONES:
+        return QgsFillSymbol.createSimple(
+            {"color": _rgba(color, 80), "outline_color": _rgba(color), "outline_width": "0.6"}
+        )
+    if role == ROLE_ARROWS:
+        return QgsLineSymbol.createSimple({"line_color": _rgba(color), "line_width": "0.8"})
+    return QgsMarkerSymbol.createSimple(
+        {"name": "circle", "color": _rgba(color), "outline_color": "255,255,255,255", "size": "3"}
+    )
 
 
 def _zone_symbol(

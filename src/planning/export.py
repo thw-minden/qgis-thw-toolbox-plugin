@@ -22,6 +22,7 @@ from ..util.coordinates import WGS84
 from .details import item_name, type_name
 from .geometry import MetricFrame
 from .layers import OBJECT_STYLE_ROLES, ROLE_MARKERS, ROLE_ZONES
+from .legend_symbols import resolve_position
 from .object_style import object_style_of
 from .zone_style import PATTERN_NONE
 
@@ -41,10 +42,10 @@ def _initial_dir() -> str:
     return desktop if os.path.isdir(desktop) else os.path.expanduser("~")
 
 
-def _label(role: str, feature) -> str:
-    """Name im KMZ: Bezeichnung (mehrzeilig mit „ / “ verbunden), sonst der Typ."""
+def _label(role: str, feature, layer) -> str:
+    """Name im KMZ: Bezeichnung (mehrzeilig mit „ / “ verbunden, ``$POS`` als UTMREF), sonst der Typ."""
     lines = [line.strip() for line in item_name(role, feature).splitlines() if line.strip()]
-    return " / ".join(lines) if lines else type_name(role, feature)
+    return resolve_position(" / ".join(lines), feature, layer) if lines else type_name(role, feature)
 
 
 def _colors(controller, role: str, feature, layer) -> tuple[QColor, QColor]:
@@ -81,7 +82,7 @@ def kml_items(controller) -> list[KmlItem]:
             continue
         layer = controller.layers.layer(role)
         fill, line = _colors(controller, role, feature, layer)
-        items.append(KmlItem(feature.geometry(), layer.crs(), _label(role, feature), fill, line))
+        items.append(KmlItem(feature.geometry(), layer.crs(), _label(role, feature, layer), fill, line))
     return items
 
 
