@@ -19,12 +19,14 @@ Bandit, detect-secrets und Flake8 kommen aus ``requirements-dev.txt``.
 
 import argparse
 import configparser
+import http.client
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -36,6 +38,9 @@ VERSION_URL = "https://plugins.qgis.org/plugins/" + PACKAGE + "/version/{}/"
 DIST_DIR = os.path.join(ROOT, "dist")
 # Gehört nicht ins ZIP; fehlt eins davon nicht, stimmt .gitattributes nicht
 _UNWANTED = ("/tmp/", "__pycache__", ".pyc", "/.git/", "/.claude/", ".log", "preview.gif")
+# plugins.qgis.org setzt zeitweise aus: so oft versuchen, mit dieser Pause (Sekunden) dazwischen
+_CHECK_ATTEMPTS = 4
+_CHECK_PAUSE = 5
 
 
 class ReleaseError(Exception):
@@ -56,17 +61,23 @@ def read_metadata(text: str) -> configparser.SectionProxy:
 
 
 def version_exists(version: str) -> bool | None:
-    """Gibt es die Version auf plugins.qgis.org schon? ``None``, wenn die Seite nicht erreichbar ist."""
+    """Gibt es die Version auf plugins.qgis.org schon? ``None``, wenn auch mehrere Versuche scheitern."""
     request = urllib.request.Request(VERSION_URL.format(version), headers={"User-Agent": "thw-toolbox-release"})
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            return response.status == 200
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return False
-        return None
-    except urllib.error.URLError:
-        return None
+    for attempt in range(1, _CHECK_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                return response.status == 200
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return False
+            problem = f"HTTP {e.code}"
+        # Ein Lese-Timeout kommt als TimeoutError, nicht als URLError – OSError fängt beides
+        except (OSError, http.client.HTTPException) as e:
+            problem = f"{type(e).__name__}: {e}"
+        print(f"  plugins.qgis.org: {problem} (Versuch {attempt}/{_CHECK_ATTEMPTS})")
+        if attempt < _CHECK_ATTEMPTS:
+            time.sleep(_CHECK_PAUSE)
+    return None
 
 
 def next_patch(version: str) -> str:
