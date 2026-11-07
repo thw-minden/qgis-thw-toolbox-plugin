@@ -38,7 +38,9 @@ VERSION_URL = "https://plugins.qgis.org/plugins/" + PACKAGE + "/version/{}/"
 DIST_DIR = os.path.join(ROOT, "dist")
 # Gehört nicht ins ZIP; fehlt eins davon nicht, stimmt .gitattributes nicht
 _UNWANTED = ("/tmp/", "__pycache__", ".pyc", "/.git/", "/.claude/", ".log", "preview.gif")
-# plugins.qgis.org setzt zeitweise aus: so oft versuchen, mit dieser Pause (Sekunden) dazwischen
+# plugins.qgis.org antwortet teils erst nach über 20 s oder setzt ganz aus:
+# Wartezeit je Versuch (Sekunden), Zahl der Versuche, Pause dazwischen (Sekunden)
+_CHECK_TIMEOUT = 60
 _CHECK_ATTEMPTS = 4
 _CHECK_PAUSE = 5
 
@@ -65,7 +67,7 @@ def version_exists(version: str) -> bool | None:
     request = urllib.request.Request(VERSION_URL.format(version), headers={"User-Agent": "thw-toolbox-release"})
     for attempt in range(1, _CHECK_ATTEMPTS + 1):
         try:
-            with urllib.request.urlopen(request, timeout=20) as response:
+            with urllib.request.urlopen(request, timeout=_CHECK_TIMEOUT) as response:
                 return response.status == 200
         except urllib.error.HTTPError as e:
             if e.code == 404:
